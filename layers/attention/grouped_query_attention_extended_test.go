@@ -837,6 +837,83 @@ func TestBuildGroupQueryAttention_WithYaRNScaling(t *testing.T) {
 	}
 }
 
+func TestBuildGroupQueryAttention_WithPartialRoPE(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	modelDim := 16
+	numQ := 4
+	numKV := 2
+	headDim := modelDim / numQ
+	kvDim := headDim * numKV
+
+	wq := makeNonZeroParam(t, "attn_wq", []int{modelDim, modelDim})
+	wk := makeNonZeroParam(t, "attn_wk", []int{modelDim, kvDim})
+	wv := makeNonZeroParam(t, "attn_wv", []int{modelDim, kvDim})
+	wo := makeNonZeroParam(t, "attn_wo", []int{modelDim, modelDim})
+
+	params := map[string]*graph.Parameter[float32]{
+		"attn_wq": wq, "attn_wk": wk, "attn_wv": wv, "attn_wo": wo,
+	}
+
+	input, err := tensor.New[float32]([]int{1, 4, modelDim}, nil)
+	if err != nil {
+		t.Fatalf("tensor.New failed: %v", err)
+	}
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.01
+	}
+
+	// Build WITHOUT partial RoPE
+	attrsNormal := map[string]interface{}{
+		"model_dim":           modelDim,
+		"num_query_heads":     numQ,
+		"num_key_value_heads": numKV,
+		"rope_base":           10000.0,
+		"max_seq_len":         64,
+	}
+	nodeNormal, err := BuildGroupQueryAttention[float32](engine, ops, "attn", params, attrsNormal)
+	if err != nil {
+		t.Fatalf("Build without partial RoPE failed: %v", err)
+	}
+	outNormal, err := nodeNormal.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward without partial RoPE failed: %v", err)
+	}
+
+	// Build WITH partial RoPE (fraction=0.5)
+	attrsPartial := map[string]interface{}{
+		"model_dim":              modelDim,
+		"num_query_heads":        numQ,
+		"num_key_value_heads":    numKV,
+		"rope_base":              10000.0,
+		"max_seq_len":            64,
+		"partial_rotary_factor": 0.5,
+	}
+	nodePartial, err := BuildGroupQueryAttention[float32](engine, ops, "attn", params, attrsPartial)
+	if err != nil {
+		t.Fatalf("Build with partial RoPE failed: %v", err)
+	}
+	outPartial, err := nodePartial.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward with partial RoPE failed: %v", err)
+	}
+
+	// Outputs should differ
+	normalData := outNormal.Data()
+	partialData := outPartial.Data()
+	allSame := true
+	for i := range normalData {
+		if normalData[i] != partialData[i] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		t.Error("output with partial RoPE should differ from output without")
+	}
+}
+
 func TestBuildGroupQueryAttention_MissingParams(t *testing.T) {
 	ops := numeric.Float32Ops{}
 	engine := compute.NewCPUEngine[float32](ops)

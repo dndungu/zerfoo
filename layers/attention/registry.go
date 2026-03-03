@@ -85,6 +85,9 @@ func buildGroupedQueryAttention[T tensor.Numeric](
 			ropeOpts = append(ropeOpts, embeddings.WithYaRNScaling(factor, origMaxLen))
 		}
 	}
+	if fraction, ok := attributes["partial_rotary_factor"].(float64); ok && fraction > 0 && fraction < 1.0 {
+		ropeOpts = append(ropeOpts, embeddings.WithRotaryDimFraction(fraction))
+	}
 
 	rope, err := embeddings.NewRotaryPositionalEmbedding[T](context.Background(), engine, headDim, maxSeqLen, ropeOpts...)
 	if err != nil {
