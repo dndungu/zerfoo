@@ -2292,17 +2292,18 @@ ONNX/ZMF models to Zerfoo's internal naming conventions.
 Validate that Llama 3 and Mistral models load and generate text through the
 existing pipeline with the new config parsing and parameter mapping.
 
-- [ ] T59.1 Llama 3 forward pass parity test  Owner: TBD  Est: 2h
+- [x] T59.1 Llama 3 forward pass parity test  Owner: Claude  Est: 2h  Completed: 2026-03-03
   - Dependencies: E57, E58
-  - Files: tests/parity/llama3_test.go (new)
+  - Files: tests/parity/llama3_test.go (new), tests/parity/helpers_test.go (new)
   - Acceptance: TestLlama3ForwardPass loads a Llama 3 8B ZMF model (env-gated by
     LLAMA3_ZMF_PATH), runs a forward pass, asserts output shape [1,seqLen,V] and
     no NaN or Inf. TestLlama3GreedyDecode runs 5-step greedy decode and asserts
     tokens in [0, vocabSize). Skips when env var not set.
-  - [ ] S59.1.1 Create tests/parity/llama3_test.go with forward pass test  Est: 45m
-  - [ ] S59.1.2 Add greedy decode test  Est: 30m
-  - [ ] S59.1.3 Add generation test via inference API  Est: 30m
-  - [ ] S59.1.4 Run golangci-lint and go test  Est: 15m
+  - Note: Extracted shared parity test helpers to reduce duplication across model families.
+  - [x] S59.1.1 Create tests/parity/llama3_test.go with forward pass test  Est: 45m
+  - [x] S59.1.2 Add greedy decode test  Est: 30m
+  - [x] S59.1.3 Add generation test via inference API  Est: 30m
+  - [x] S59.1.4 Run golangci-lint and go test  Est: 15m
 
 - [ ] T59.2 Mistral forward pass parity test  Owner: TBD  Est: 1h
   - Dependencies: E57, E58
