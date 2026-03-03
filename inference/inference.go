@@ -187,17 +187,31 @@ func assembleModel(
 	}
 }
 
-// loadMetadata reads and parses config.json.
+// loadMetadata reads config.json and dispatches to the appropriate
+// architecture-specific parser via the default config registry.
 func loadMetadata(path string) (*ModelMetadata, error) {
 	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return nil, err
 	}
-	var meta ModelMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	return &meta, nil
+
+	reg := DefaultArchConfigRegistry()
+	meta, err := reg.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	// Overlay fields that use our internal JSON tags (not HuggingFace names).
+	if ct, ok := raw["chat_template"].(string); ok {
+		meta.ChatTemplate = ct
+	}
+
+	return meta, nil
 }
 
 // GenerateOption configures a generation call.
