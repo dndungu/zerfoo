@@ -20,54 +20,66 @@ Define, train, and run a simple model in just a few lines of idiomatic Go.
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
 	"github.com/zerfoo/zerfoo/layers/activations"
 	"github.com/zerfoo/zerfoo/layers/core"
+	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
-	"github.com/zerfoo/zerfoo/training"
+	"github.com/zerfoo/zerfoo/training/optimizer"
+	"github.com/zerfoo/zerfoo/types"
 )
 
 func main() {
+	ctx := context.Background()
+	ops := numeric.Float32Ops{}
+
 	// 1. Create a compute engine
-	engine := compute.NewCPUEngine()
+	engine := compute.NewCPUEngine(ops)
 
 	// 2. Define the model architecture using a graph builder
 	builder := graph.NewBuilder[float32](engine)
 	input := builder.Input([]int{1, 10})
-	dense1 := builder.AddNode(core.NewDense(10, 32), input)
-	act1 := builder.AddNode(activations.NewReLU(), dense1)
-	output := builder.AddNode(core.NewDense(32, 1), act1)
+	
+	dense1, _ := core.NewDense("dense1", engine, ops, 10, 32)
+	node1 := builder.AddNode(dense1, input)
+	
+	act1 := activations.NewReLU[float32](engine, ops)
+	node2 := builder.AddNode(act1, node1)
+	
+	dense2, _ := core.NewDense("dense2", engine, ops, 32, 1)
+	output := builder.AddNode(dense2, node2)
 
 	// 3. Build the computational graph
-	forward, backward, err := builder.Build(output)
+	g, err := builder.Build(output)
 	if err != nil {
 		panic(err)
 	}
 
 	// 4. Create an optimizer
-	optimizer := training.NewAdamOptimizer[float32](0.01)
+	opt := optimizer.NewSGD[float32](engine, ops, 0.01)
 
 	// 5. Generate dummy data
-	inputTensor, _ := tensor.NewTensor(engine, []int{1, 10})
-	targetTensor, _ := tensor.NewTensor(engine, []int{1, 1})
+	inputTensor, _ := tensor.New[float32]([]int{1, 10}, nil)
+	targetTensor, _ := tensor.New[float32]([]int{1, 1}, nil)
 
 	// 6. Run the training loop
 	for i := 0; i < 100; i++ {
 		// Forward pass
-		predTensor := forward(map[graph.NodeHandle]*tensor.Tensor[float32]{input: inputTensor})
+		predTensor, _ := g.Forward(ctx, inputTensor)
 
 		// Compute loss (dummy loss for this example)
 		loss := predTensor.Data()[0] - targetTensor.Data()[0]
-		grad := tensor.NewScalar(engine, 2*loss)
+		gradTensor, _ := tensor.New[float32]([]int{1, 1}, []float32{2 * loss})
 
 		// Backward pass to compute gradients
-		backward(grad, map[graph.NodeHandle]*tensor.Tensor[float32]{input: inputTensor})
+		g.Backward(ctx, types.FullBackprop, gradTensor)
 
 		// Update weights
-		optimizer.Step(builder.Parameters())
+		opt.Step(ctx, g.Parameters())
 	}
 
 	fmt.Println("Training complete!")
@@ -122,97 +134,102 @@ Zerfoo is built on a clean, layered architecture that separates concerns, ensuri
 
 For a deep dive into the design philosophy, core interfaces, and technical roadmap, please read our **[Architectural Design Document](docs/design.md)**.
 
-## Getting Started
+## Advanced Usage Examples
 
-*This project is in a pre-release state. The API is not yet stable.*
+### Advanced Training Techniques
 
-To install Zerfoo, use `go get`:
-```sh
-go get github.com/zerfoo/zerfoo
-```
-
-### Advanced Usage Examples
-
-#### Advanced Model Architecture
+Zerfoo supports advanced training techniques like batch normalization, dropout, and various optimizers to improve model performance and generalization.
 
 ```go
 import (
-    "github.com/zerfoo/zerfoo/graph"
-    "github.com/zerfoo/zerfoo/layers/core"
-    "github.com/zerfoo/zerfoo/layers/attention"
-    "github.com/zerfoo/zerfoo/layers/activations"
+    "github.com/zerfoo/zerfoo/layers/normalization"
+    "github.com/zerfoo/zerfoo/layers/regularization"
+    "github.com/zerfoo/zerfoo/training/optimizer"
 )
 
-// Build sophisticated model with attention
-builder := graph.NewBuilder[float32](engine)
-input := builder.Input([]int{batchSize, seqLen, inputDim})
+// Add Layer Normalization
+ln, _ := normalization.NewLayerNormalization(engine, hiddenDim)
+nodeLN := builder.AddNode(ln, prevNode)
 
-// Add linear transformation 
-linear := builder.AddNode(core.NewLinear("input_proj", engine, ops, inputDim, hiddenDim), input)
+// Add Dropout for regularization
+dropout := regularization.NewDropout(engine, ops, ops.FromFloat32(0.5)) // 50% dropout rate
+nodeDropout := builder.AddNode(dropout, nodeLN)
 
-// Add multi-head attention
-attention := builder.AddNode(attention.NewGlobalAttention(engine, ops, hiddenDim, numHeads, headSize), linear)
-
-// Add residual connection and activation
-residual := builder.AddNode(core.NewAdd(engine), linear, attention)
-activated := builder.AddNode(activations.NewTanh(engine, ops), residual)
-
-// Output projection
-output := builder.AddNode(core.NewLinear("output_proj", engine, ops, hiddenDim, outputDim), activated)
+// Use AdamW Optimizer with weight decay
+opt := optimizer.NewAdamW[float32](engine, 0.001, 0.9, 0.999, 1e-8, 0.01)
 ```
 
-#### Hierarchical Recurrent Models
+### Model Evaluation
+
+Evaluate your model after training using comprehensive metrics.
 
 ```go
 import (
-    "github.com/zerfoo/zerfoo/graph"
-    "github.com/zerfoo/zerfoo/layers/hrm"
-    "github.com/zerfoo/zerfoo/layers/core"
-)
-
-// Build hierarchical model
-builder := graph.NewBuilder[float32](engine)
-spectralInput := builder.Input([]int{windowSize})
-featureInput := builder.Input([]int{numStocks, numFeatures})
-
-// Add spectral fingerprint layer
-spectral := builder.AddNode(core.NewSpectralFingerprint(windowSize, fingerprintDim), spectralInput)
-
-// Add hierarchical recurrent modules
-hModule := builder.AddNode(hrm.NewHModule(hDim), spectral)
-lModule := builder.AddNode(hrm.NewLModule(lDim), featureInput, hModule)
-
-// Add FiLM conditioning
-film := builder.AddNode(core.NewFiLM(lDim), lModule, hModule)
-output := builder.AddNode(core.NewDense(lDim, 1), film)
-
-model, _, err := builder.Build(output)
-```
-
-#### Training with Metrics Evaluation
-
-```go
-import (
-    "github.com/zerfoo/zerfoo/training"
     "github.com/zerfoo/zerfoo/metrics"
 )
 
-// Set up trainer with metrics evaluation
-trainer := training.NewDefaultTrainer(graph, lossNode, optimizer, strategy)
+// After training, run a validation pass
+predTensor, _ := g.Forward(ctx, valInputTensor)
 
-// Training loop with evaluation metrics
-for epoch := 0; epoch < epochs; epoch++ {
-    loss, err := trainer.TrainBatch(batchData)
-    if err != nil {
-        log.Printf("Training error: %v", err)
-        continue
+// Convert predictions and targets to float64 slices for evaluation
+preds := convertToFloat64(predTensor.Data())
+targets := convertToFloat64(valTargetTensor.Data())
+
+// Calculate metrics
+res := metrics.CalculateMetrics(preds, targets)
+fmt.Printf("MSE: %.4f, Pearson: %.4f\n", res.MSE, res.PearsonCorrelation)
+
+func convertToFloat64(data []float32) []float64 {
+    out := make([]float64, len(data))
+    for i, v := range data {
+        out[i] = float64(v)
     }
-    
-    // Evaluate with correlation and error metrics
-    evalMetrics := metrics.CalculateMetrics(predictions, targets)
-    log.Printf("Epoch %d: Loss=%.4f, Pearson=%.4f, MSE=%.4f", 
-               epoch, loss, evalMetrics.PearsonCorrelation, evalMetrics.MSE)
+    return out
 }
+```
+
+### Creating Custom Layers
+
+Zerfoo is designed to be extensible. You can easily create custom layers by implementing the `graph.Node[T]` interface.
+
+```go
+type CustomSquareNode[T tensor.Numeric] struct {
+    engine      compute.Engine[T]
+    outputShape []int
+}
+
+func (n *CustomSquareNode[T]) OpType() string { return "CustomSquare" }
+func (n *CustomSquareNode[T]) Attributes() map[string]interface{} { return nil }
+func (n *CustomSquareNode[T]) OutputShape() []int { return n.outputShape }
+
+func (n *CustomSquareNode[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+    n.outputShape = inputs[0].Shape()
+    return n.engine.Mul(ctx, inputs[0], inputs[0])
+}
+
+func (n *CustomSquareNode[T]) Backward(ctx context.Context, mode types.BackwardMode, outputGradient *tensor.TensorNumeric[T], inputs ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+    // d/dx (x^2) = 2x
+    two := n.engine.Ops().FromFloat64(2.0)
+    twoX, _ := n.engine.MulScalar(ctx, inputs[0], two)
+    grad, _ := n.engine.Mul(ctx, outputGradient, twoX)
+    return []*tensor.TensorNumeric[T]{grad}, nil
+}
+
+func (n *CustomSquareNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+```
+
+### Performance Benchmarking
+
+Zerfoo includes built-in benchmarking tools to evaluate the performance of different engines and configurations.
+
+To run the standard benchmarks:
+```sh
+go test ./compute -bench=. -benchmem
+```
+
+You can also use the `bench-compare` tool to compare performance across different commits or configurations:
+```sh
+go run cmd/bench-compare/main.go --baseline=benchmarks/baseline.txt --current=benchmarks/current.txt
 ```
 
 ## Contributing
