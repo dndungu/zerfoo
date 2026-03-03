@@ -276,7 +276,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 	_ = s // stream used via cuBLAS handle
 
-	return makeGPUResult[T](outShape, devCTotal, batchSize*cMatSize, dst...)
+	return makeGPUResult[T](e, outShape, devCTotal, batchSize*cMatSize, dst...)
 }
 
 // --- GPU-accelerated and fallback methods ---

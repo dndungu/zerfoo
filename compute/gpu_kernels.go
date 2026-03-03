@@ -51,8 +51,8 @@ func getDevicePtr[T tensor.Numeric](e *GPUEngine[T], t *tensor.TensorNumeric[T])
 // makeGPUResult creates a tensor with GPUStorage wrapping the given device pointer.
 // The device pointer is NOT freed when the storage is freed; the caller retains
 // ownership through the pool.
-func makeGPUResult[T tensor.Numeric](shape []int, devPtr unsafe.Pointer, numElems int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, numElems)
+func makeGPUResult[T tensor.Numeric](e *GPUEngine[T], shape []int, devPtr unsafe.Pointer, numElems int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, numElems, e.deviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func gpuBinaryOp[T tensor.Numeric](
 		}
 	}
 
-	return makeGPUResult[T](a.Shape(), devC, n, dst...)
+	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
 }
 
 // gpuUnaryOp runs a unary kernel on a float32 tensor.
@@ -171,7 +171,7 @@ func gpuUnaryOp[T tensor.Numeric](
 		}
 	}
 
-	return makeGPUResult[T](a.Shape(), devC, n, dst...)
+	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
 }
 
 // gpuScalarOp runs a scalar kernel on a float32 tensor.
@@ -217,7 +217,7 @@ func gpuScalarOp[T tensor.Numeric](
 		}
 	}
 
-	return makeGPUResult[T](a.Shape(), devC, n, dst...)
+	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
 }
 
 // isFloat32 checks if the generic type T is float32.
@@ -404,7 +404,7 @@ func (e *GPUEngine[T]) gpuFill(ctx context.Context, t *tensor.TensorNumeric[T], 
 		}
 	}
 
-	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, n)
+	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, n, e.deviceID)
 	if err != nil {
 		e.pool.Free(e.deviceID, devPtr, byteSize)
 
@@ -506,7 +506,7 @@ func (e *GPUEngine[T]) gpuSum(ctx context.Context, a *tensor.TensorNumeric[T], a
 		}
 	}
 
-	return makeGPUResult[T](newShape, devOut, numStripes, dst...)
+	return makeGPUResult[T](e, newShape, devOut, numStripes, dst...)
 }
 
 func (e *GPUEngine[T]) gpuReduceSum(ctx context.Context, a *tensor.TensorNumeric[T], axis int, keepDims bool, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -615,7 +615,7 @@ func (e *GPUEngine[T]) gpuSoftmax(ctx context.Context, a *tensor.TensorNumeric[T
 		}
 	}
 
-	return makeGPUResult[T](shape, devOut, n, dst...)
+	return makeGPUResult[T](e, shape, devOut, n, dst...)
 }
 
 // sameShape checks if two tensors have the same shape (for non-broadcasting GPU path).
