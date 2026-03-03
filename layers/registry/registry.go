@@ -26,6 +26,7 @@ func RegisterAll() {
 	// Attention
 	model.RegisterLayer("GroupQueryAttention", attention.BuildGroupQueryAttention[float32])
 	model.RegisterLayer("GlobalAttention", attention.BuildGlobalAttention[float32])
+	model.RegisterLayer("MultiHeadLatentAttention", attention.BuildMultiHeadLatentAttention[float32])
 
 	// Core
 	model.RegisterLayer("Add", core.BuildAdd[float32])
