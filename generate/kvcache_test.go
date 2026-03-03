@@ -16,14 +16,14 @@ func makeTensor(t *testing.T, shape []int, data []float32) *tensor.TensorNumeric
 }
 
 func TestKVCache_NewAndNumLayers(t *testing.T) {
-	cache := NewKVCache(4)
+	cache := NewKVCache[float32](4)
 	if got := cache.NumLayers(); got != 4 {
 		t.Errorf("NumLayers() = %d, want 4", got)
 	}
 }
 
 func TestKVCache_GetEmpty(t *testing.T) {
-	cache := NewKVCache(2)
+	cache := NewKVCache[float32](2)
 	_, ok := cache.Get(0)
 	if ok {
 		t.Error("Get(0) on empty cache should return false")
@@ -31,7 +31,7 @@ func TestKVCache_GetEmpty(t *testing.T) {
 }
 
 func TestKVCache_GetOutOfRange(t *testing.T) {
-	cache := NewKVCache(2)
+	cache := NewKVCache[float32](2)
 	_, ok := cache.Get(5)
 	if ok {
 		t.Error("Get(5) with 2 layers should return false")
@@ -43,7 +43,7 @@ func TestKVCache_GetOutOfRange(t *testing.T) {
 }
 
 func TestKVCache_UpdateAndGet(t *testing.T) {
-	cache := NewKVCache(2)
+	cache := NewKVCache[float32](2)
 
 	// First update: [batch=1, seq=1, dim=4]
 	k1 := makeTensor(t, []int{1, 1, 4}, []float32{1, 2, 3, 4})
@@ -63,7 +63,7 @@ func TestKVCache_UpdateAndGet(t *testing.T) {
 }
 
 func TestKVCache_UpdateConcat(t *testing.T) {
-	cache := NewKVCache(1)
+	cache := NewKVCache[float32](1)
 
 	// First token: [batch=1, seq=1, dim=2]
 	k1 := makeTensor(t, []int{1, 1, 2}, []float32{1, 2})
@@ -107,7 +107,7 @@ func TestKVCache_UpdateConcat(t *testing.T) {
 }
 
 func TestKVCache_UpdateThreeTokens(t *testing.T) {
-	cache := NewKVCache(1)
+	cache := NewKVCache[float32](1)
 
 	for i := range 3 {
 		k := makeTensor(t, []int{1, 1, 2}, []float32{float32(i*2 + 1), float32(i*2 + 2)})
@@ -128,7 +128,7 @@ func TestKVCache_UpdateThreeTokens(t *testing.T) {
 }
 
 func TestKVCache_MultiLayer(t *testing.T) {
-	cache := NewKVCache(3)
+	cache := NewKVCache[float32](3)
 
 	for layer := range 3 {
 		k := makeTensor(t, []int{1, 1, 2}, []float32{float32(layer), 0})
@@ -152,7 +152,7 @@ func TestKVCache_MultiLayer(t *testing.T) {
 }
 
 func TestKVCache_SeqLen(t *testing.T) {
-	cache := NewKVCache(1)
+	cache := NewKVCache[float32](1)
 	if got := cache.SeqLen(); got != 0 {
 		t.Errorf("SeqLen() on empty cache = %d, want 0", got)
 	}
@@ -177,7 +177,7 @@ func TestKVCache_SeqLen(t *testing.T) {
 }
 
 func TestKVCache_Reset(t *testing.T) {
-	cache := NewKVCache(2)
+	cache := NewKVCache[float32](2)
 
 	k := makeTensor(t, []int{1, 1, 2}, []float32{1, 2})
 	v := makeTensor(t, []int{1, 1, 2}, []float32{3, 4})
@@ -200,7 +200,7 @@ func TestKVCache_Reset(t *testing.T) {
 }
 
 func TestKVCache_UpdateOutOfRange(t *testing.T) {
-	cache := NewKVCache(1)
+	cache := NewKVCache[float32](1)
 	k := makeTensor(t, []int{1, 1, 2}, []float32{1, 2})
 	v := makeTensor(t, []int{1, 1, 2}, []float32{3, 4})
 
@@ -213,7 +213,7 @@ func TestKVCache_UpdateOutOfRange(t *testing.T) {
 }
 
 func TestKVCache_ConcatDimensionMismatch(t *testing.T) {
-	cache := NewKVCache(1)
+	cache := NewKVCache[float32](1)
 
 	k1 := makeTensor(t, []int{1, 1, 4}, []float32{1, 2, 3, 4})
 	v1 := makeTensor(t, []int{1, 1, 4}, []float32{5, 6, 7, 8})
@@ -230,14 +230,14 @@ func TestKVCache_ConcatDimensionMismatch(t *testing.T) {
 }
 
 func TestKVCache_SeqLenEmpty(t *testing.T) {
-	cache := NewKVCache(0)
+	cache := NewKVCache[float32](0)
 	if got := cache.SeqLen(); got != 0 {
 		t.Errorf("SeqLen() with 0 layers = %d, want 0", got)
 	}
 }
 
 func TestKVCache_BatchedConcat(t *testing.T) {
-	cache := NewKVCache(1)
+	cache := NewKVCache[float32](1)
 
 	// Batch of 2: [batch=2, seq=1, dim=2]
 	k1 := makeTensor(t, []int{2, 1, 2}, []float32{1, 2, 3, 4})

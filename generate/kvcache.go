@@ -7,32 +7,32 @@ import (
 )
 
 // LayerKV holds the cached key and value tensors for a single attention layer.
-type LayerKV struct {
-	Key   *tensor.TensorNumeric[float32]
-	Value *tensor.TensorNumeric[float32]
+type LayerKV[T tensor.Numeric] struct {
+	Key   *tensor.TensorNumeric[T]
+	Value *tensor.TensorNumeric[T]
 }
 
 // KVCache stores key-value tensors for all attention layers during autoregressive generation.
 // Each call to Update appends new K/V along the sequence dimension (axis 1).
-type KVCache struct {
-	layers []LayerKV
+type KVCache[T tensor.Numeric] struct {
+	layers []LayerKV[T]
 }
 
 // NewKVCache creates a KVCache for the specified number of layers.
-func NewKVCache(numLayers int) *KVCache {
-	return &KVCache{
-		layers: make([]LayerKV, numLayers),
+func NewKVCache[T tensor.Numeric](numLayers int) *KVCache[T] {
+	return &KVCache[T]{
+		layers: make([]LayerKV[T], numLayers),
 	}
 }
 
 // NumLayers returns the number of layers in the cache.
-func (c *KVCache) NumLayers() int {
+func (c *KVCache[T]) NumLayers() int {
 	return len(c.layers)
 }
 
 // Get returns the cached key-value pair for the given layer.
 // Returns false if the layer has not been populated yet.
-func (c *KVCache) Get(layer int) (*LayerKV, bool) {
+func (c *KVCache[T]) Get(layer int) (*LayerKV[T], bool) {
 	if layer < 0 || layer >= len(c.layers) {
 		return nil, false
 	}
@@ -46,7 +46,7 @@ func (c *KVCache) Get(layer int) (*LayerKV, bool) {
 // Update appends new key and value tensors to the cache for the given layer.
 // Tensors are expected to have shape [batch, seq_len, dim].
 // The new tensors are concatenated along axis 1 (sequence dimension).
-func (c *KVCache) Update(layer int, newK, newV *tensor.TensorNumeric[float32]) error {
+func (c *KVCache[T]) Update(layer int, newK, newV *tensor.TensorNumeric[T]) error {
 	if layer < 0 || layer >= len(c.layers) {
 		return fmt.Errorf("layer index %d out of range [0, %d)", layer, len(c.layers))
 	}
@@ -61,11 +61,11 @@ func (c *KVCache) Update(layer int, newK, newV *tensor.TensorNumeric[float32]) e
 
 	// Concatenate along sequence dimension (axis 1).
 	var err error
-	lkv.Key, err = concatAxis1(lkv.Key, newK)
+	lkv.Key, err = ConcatAxis1(lkv.Key, newK)
 	if err != nil {
 		return fmt.Errorf("concat key for layer %d: %w", layer, err)
 	}
-	lkv.Value, err = concatAxis1(lkv.Value, newV)
+	lkv.Value, err = ConcatAxis1(lkv.Value, newV)
 	if err != nil {
 		return fmt.Errorf("concat value for layer %d: %w", layer, err)
 	}
@@ -74,7 +74,7 @@ func (c *KVCache) Update(layer int, newK, newV *tensor.TensorNumeric[float32]) e
 
 // SeqLen returns the current cached sequence length.
 // Returns 0 if the cache is empty.
-func (c *KVCache) SeqLen() int {
+func (c *KVCache[T]) SeqLen() int {
 	if len(c.layers) == 0 {
 		return 0
 	}
@@ -90,16 +90,16 @@ func (c *KVCache) SeqLen() int {
 }
 
 // Reset clears all cached tensors.
-func (c *KVCache) Reset() {
+func (c *KVCache[T]) Reset() {
 	for i := range c.layers {
 		c.layers[i].Key = nil
 		c.layers[i].Value = nil
 	}
 }
 
-// concatAxis1 concatenates two 3D tensors along axis 1 (sequence dimension).
+// ConcatAxis1 concatenates two 3D tensors along axis 1 (sequence dimension).
 // Both tensors must have matching batch and dim dimensions.
-func concatAxis1(a, b *tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+func ConcatAxis1[T tensor.Numeric](a, b *tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	shapeA := a.Shape()
 	shapeB := b.Shape()
 
@@ -121,16 +121,16 @@ func concatAxis1(a, b *tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[flo
 
 	dataA := a.Data()
 	dataB := b.Data()
-	newData := make([]float32, batch*newSeq*dim)
+	newData := make([]T, batch*newSeq*dim)
 
-	for b := range batch {
-		// Copy from A: batch b, all seqA positions.
-		srcOffA := b * seqA * dim
-		dstOff := b * newSeq * dim
+	for bi := range batch {
+		// Copy from A: batch bi, all seqA positions.
+		srcOffA := bi * seqA * dim
+		dstOff := bi * newSeq * dim
 		copy(newData[dstOff:dstOff+seqA*dim], dataA[srcOffA:srcOffA+seqA*dim])
 
-		// Copy from B: batch b, all seqB positions.
-		srcOffB := b * seqB * dim
+		// Copy from B: batch bi, all seqB positions.
+		srcOffB := bi * seqB * dim
 		dstOff2 := dstOff + seqA*dim
 		copy(newData[dstOff2:dstOff2+seqB*dim], dataB[srcOffB:srcOffB+seqB*dim])
 	}
