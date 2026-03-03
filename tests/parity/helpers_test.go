@@ -3,6 +3,8 @@ package parity_test
 import (
 	"context"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -168,6 +170,73 @@ func runGreedyDecodeTest(t *testing.T, g *graph.Graph[float32], initTokens []flo
 	if len(tokens) != expected {
 		t.Errorf("expected %d tokens after decode, got %d", expected, len(tokens))
 	}
+}
+
+// modelParityConfig describes a complete parity test suite for a model family.
+type modelParityConfig struct {
+	// Name is a human-readable label (e.g. "Llama 3").
+	Name string
+	// ZMFEnvVar is the environment variable for the .zmf file path.
+	ZMFEnvVar string
+	// ModelDirEnvVar is the environment variable for the model directory.
+	ModelDirEnvVar string
+	// ModelID is the ID used with inference.Load.
+	ModelID string
+	// MinVocabSize is the minimum expected vocabulary dimension.
+	MinVocabSize int
+}
+
+// runModelForwardPass runs the forward pass test for a model family.
+func runModelForwardPass(t *testing.T, cfg modelParityConfig) {
+	t.Helper()
+	zmfPath := envOrSkip(t, cfg.ZMFEnvVar)
+	g := loadZMFGraph(t, zmfPath)
+	runForwardPassTest(t, g, forwardPassConfig{
+		Name:         cfg.Name,
+		SeqLen:       8,
+		MinVocabSize: cfg.MinVocabSize,
+	})
+}
+
+// runModelGreedyDecode runs the greedy decode test for a model family.
+func runModelGreedyDecode(t *testing.T, cfg modelParityConfig) {
+	t.Helper()
+	zmfPath := envOrSkip(t, cfg.ZMFEnvVar)
+	g := loadZMFGraph(t, zmfPath)
+	runGreedyDecodeTest(t, g, []float32{1, 2, 3}, 5)
+}
+
+// runModelGeneration runs the generation test suite for a model family.
+func runModelGeneration(t *testing.T, cfg modelParityConfig) {
+	t.Helper()
+	modelDir := modelDirOrSkip(t, cfg.ModelDirEnvVar, cfg.ZMFEnvVar)
+	runGenerationTests(t, generationTestConfig{
+		ModelID:  cfg.ModelID,
+		ModelDir: modelDir,
+	})
+}
+
+// envOrSkip returns the value of the named env var, or skips the test.
+func envOrSkip(t *testing.T, key string) string {
+	t.Helper()
+	v := os.Getenv(key)
+	if v == "" {
+		t.Skipf("%s not set; skipping", key)
+	}
+	return v
+}
+
+// modelDirOrSkip resolves a model directory from env vars, or skips the test.
+func modelDirOrSkip(t *testing.T, dirEnvVar, zmfEnvVar string) string {
+	t.Helper()
+	if d := os.Getenv(dirEnvVar); d != "" {
+		return d
+	}
+	zmfPath := os.Getenv(zmfEnvVar)
+	if zmfPath == "" {
+		t.Skipf("%s and %s not set; skipping", dirEnvVar, zmfEnvVar)
+	}
+	return filepath.Dir(zmfPath)
 }
 
 // generationTestConfig holds parameters for generation tests via inference API.
