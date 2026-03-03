@@ -2282,10 +2282,10 @@ ONNX/ZMF models to Zerfoo's internal naming conventions.
   - [x] S58.2.3 Verify Gemma 3 loading is unaffected  Est: 10m
   - [x] S58.2.4 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T58.3 Run linters and verify coverage for E58  Owner: TBD  Est: 15m
+- [x] T58.3 Run linters and verify coverage for E58  Owner: Claude  Est: 15m  Completed: 2026-03-03
   - Dependencies: T58.2
-  - [ ] S58.3.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
-  - [ ] S58.3.2 Fix any remaining issues  Est: 5m
+  - [x] S58.3.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [x] S58.3.2 Fix any remaining issues (none needed)  Est: 5m
 
 #### E59: Llama and Mistral Validation (Tier 1)
 
