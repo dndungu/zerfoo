@@ -1,22 +1,31 @@
 # Multi-GPU and Distributed GPU Support
 
-This document describes what is needed to add multi-GPU and distributed GPU
-support to Zerfoo. It serves as a roadmap for future implementation.
+This document describes the multi-GPU and distributed GPU support in Zerfoo.
+Phase 10 implementation is complete. See
+[ADR-007](adr/007-multi-gpu-architecture.md) for architecture decisions.
 
-## Current State
+## Status: COMPLETE (Phase 10, 2026-03-03)
 
-Zerfoo has a single-GPU CUDA backend (float32 only) behind `//go:build cuda`.
-The runtime bindings for `cuda.SetDevice()` and `cuda.GetDeviceCount()` exist
-in `internal/cuda/runtime.go` but are never called in production code.
-Everything implicitly uses `cuda:0`. See
-[ADR-006](adr/006-gpu-engine-architecture.md) for the current GPU architecture.
+All layers implemented:
+- Layer 1 (Device Affinity): MemPool, GPUEngine, GPUStorage, cudaAllocator
+- Layer 2 (Inference): Device selection in inference.Load, Model.Close
+- Layer 3 (NCCL): CGo bindings for collective operations
+- Layer 4 (Strategy): NcclStrategy for GPU-native gradient exchange
 
-Key limitations:
-- `GPUEngine` has no `deviceID` field (`compute/gpu_engine.go:27`).
-- `GPUStorage` has no device affinity (`tensor/gpu_storage.go:17`).
-- `MemPool` is keyed by byte size only, not per-device (`internal/cuda/mempool.go:13`).
-- `inference.Load()` hardcodes `NewCPUEngine` and ignores the `WithDevice("cuda")` option (`inference/inference.go:149`).
-- Distributed gradient exchange copies GPU tensors to CPU before serialization (`distributed/grpc_strategy.go:371`).
+## Original State (Pre-Phase 10)
+
+Zerfoo had a single-GPU CUDA backend (float32 only) behind `//go:build cuda`.
+The runtime bindings for `cuda.SetDevice()` and `cuda.GetDeviceCount()` existed
+in `internal/cuda/runtime.go` but were not called in production code.
+Everything implicitly used `cuda:0`. See
+[ADR-006](adr/006-gpu-engine-architecture.md) for the pre-Phase-10 GPU architecture.
+
+Limitations addressed:
+- `GPUEngine` now has a `deviceID` field and `SetDevice` guards.
+- `GPUStorage` tracks device affinity and exposes `DeviceID()`.
+- `MemPool` is keyed by `(deviceID, byteSize)` to prevent cross-device reuse.
+- `inference.Load()` uses `WithDevice("cuda:N")` to create GPUEngine on device N.
+- `NcclStrategy` performs gradient exchange directly on GPU memory via NCCL.
 
 ## Layer 1: CUDA Device Affinity (Foundation)
 

@@ -868,7 +868,35 @@ parameter names are not found. See [ADR-005](adr/005-multi-architecture-support.
 
 ---
 
-## 13. Architectural Decision Records
+## 13. Multi-GPU Support
+
+Phase 10 adds device affinity to all CUDA-aware components and NCCL-based
+collective operations for distributed GPU training.
+
+### 13.1 Device Affinity
+
+Every CUDA component (MemPool, GPUEngine, GPUStorage, cudaAllocator) carries a
+`deviceID` field and calls `cuda.SetDevice(deviceID)` before all CUDA operations.
+Constructors accept optional device ID parameters (default 0) for backwards
+compatibility. Cross-device tensor transfer uses `cudaMemcpyPeer` for peer-to-peer
+D2D copy without CPU staging.
+
+### 13.2 Inference Device Selection
+
+`inference.Load(modelID, WithDevice("cuda:N"))` creates a GPUEngine on device N.
+Build-tag-gated files (`engine_cuda.go`, `engine_nocuda.go`) handle conditional
+compilation. `Model.Close()` releases GPU resources.
+
+### 13.3 NCCL Collective Operations
+
+`internal/nccl/` binds NCCL functions (AllReduce, Broadcast, GroupStart/End) behind
+`//go:build cuda`. `NcclStrategy[T]` in `distributed/` implements `InternalStrategy[T]`
+for GPU-native gradient exchange, operating directly on device pointers without CPU
+round-trips. See [ADR-007](adr/007-multi-gpu-architecture.md).
+
+---
+
+## 14. Architectural Decision Records
 
 Stable design decisions extracted from the implementation plan into self-contained
 ADR files in `docs/adr/`.
@@ -881,3 +909,4 @@ ADR files in `docs/adr/`.
 | [004](adr/004-embeddable-inference-library.md) | Embeddable Inference Library | 8 | BPE tokenizer, KV cache, generation loop, sampling, streaming, serve |
 | [005](adr/005-multi-architecture-support.md) | Multi-Architecture Support | 9 | Config registry, param resolver, YaRN, partial RoPE, MLA, shared MoE |
 | [006](adr/006-gpu-engine-architecture.md) | GPU Engine Architecture | 2-3 | CUDA float32, memory pool, cuBLAS row-major, OOM fallback, parity tolerances |
+| [007](adr/007-multi-gpu-architecture.md) | Multi-GPU Architecture | 10 | Device affinity, NCCL bindings, NcclStrategy, cross-device transfer, inference device selection |
