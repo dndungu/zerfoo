@@ -2374,16 +2374,16 @@ the original training length.
   - [x] S61.1.5 Write unit tests: default unchanged, YaRN frequencies match reference  Est: 25m
   - [x] S61.1.6 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T61.2 Integrate YaRN config into model loading  Owner: TBD  Est: 45m
+- [x] T61.2 Integrate YaRN config into model loading  Owner: TBD  Est: 45m
   - Dependencies: T61.1, E57
-  - Files: model/builder.go (modify), layers/attention/group_query_attention_registry.go (modify)
+  - Files: model/builder.go (modify), layers/attention/registry.go (modify), inference/inference.go (modify), model/zmf_loader.go (modify)
   - Acceptance: When ModelMetadata.RopeScaling is non-nil and type="yarn", the
     model builder passes WithYaRNScaling to RoPE construction. Existing models
     without rope_scaling are unaffected.
-  - [ ] S61.2.1 Read RopeScaling from ModelMetadata in builder  Est: 15m
-  - [ ] S61.2.2 Pass YaRN options to RotaryPositionalEmbedding construction  Est: 15m
-  - [ ] S61.2.3 Write tests  Est: 10m
-  - [ ] S61.2.4 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S61.2.1 Read RopeScaling from ModelMetadata in builder  Est: 15m
+  - [x] S61.2.2 Pass YaRN options to RotaryPositionalEmbedding construction  Est: 15m
+  - [x] S61.2.3 Write tests  Est: 10m
+  - [x] S61.2.4 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T61.3 Run linters and verify for E61  Owner: TBD  Est: 15m
   - Dependencies: T61.2
