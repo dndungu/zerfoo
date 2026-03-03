@@ -2394,22 +2394,22 @@ the original training length.
 
 Validate that Qwen 2.5 models load and generate text with QKV bias and YaRN.
 
-- [ ] T62.1 Qwen 2.5 forward pass parity test  Owner: TBD  Est: 2h
+- [x] T62.1 Qwen 2.5 forward pass parity test  Owner: TBD  Est: 2h
   - Dependencies: E57, E58, E60, E61
   - Files: tests/parity/qwen_test.go (new)
   - Acceptance: TestQwen25ForwardPass loads a Qwen 2.5 7B ZMF model (env-gated
     by QWEN25_ZMF_PATH), runs a forward pass, asserts valid output shape and
     no NaN/Inf. TestQwen25GreedyDecode runs 5-step greedy decode. Skips when
     env var not set.
-  - [ ] S62.1.1 Create tests/parity/qwen_test.go  Est: 45m
-  - [ ] S62.1.2 Add greedy decode test  Est: 30m
-  - [ ] S62.1.3 Add generation test via inference API  Est: 30m
-  - [ ] S62.1.4 Run golangci-lint and go test  Est: 15m
+  - [x] S62.1.1 Create tests/parity/qwen_test.go  Est: 45m
+  - [x] S62.1.2 Add greedy decode test  Est: 30m
+  - [x] S62.1.3 Add generation test via inference API  Est: 30m
+  - [x] S62.1.4 Run golangci-lint and go test  Est: 15m
 
-- [ ] T62.2 Run linters and verify for E62  Owner: TBD  Est: 15m
+- [x] T62.2 Run linters and verify for E62  Owner: TBD  Est: 15m
   - Dependencies: T62.1
-  - [ ] S62.2.1 Run golangci-lint, go test -race  Est: 10m
-  - [ ] S62.2.2 Fix any issues  Est: 5m
+  - [x] S62.2.1 Run golangci-lint, go test -race  Est: 10m
+  - [x] S62.2.2 Fix any issues  Est: 5m
 
 #### E63: Partial RoPE for Phi-4 (Tier 3)
 
