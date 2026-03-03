@@ -15,6 +15,21 @@ import (
 	"github.com/zerfoo/zmf"
 )
 
+// BuildOption configures optional behavior for BuildFromZMF.
+type BuildOption func(*buildConfig)
+
+type buildConfig struct {
+	resolver ParamResolver
+}
+
+// WithParamResolver supplies an architecture-aware parameter name resolver.
+// When provided, the resolver adds canonical aliases to the parameter map
+// so that layer builders can look up parameters by canonical name even when
+// the ZMF file uses architecture-specific names.
+func WithParamResolver(r ParamResolver) BuildOption {
+	return func(c *buildConfig) { c.resolver = r }
+}
+
 // BuildFromZMF constructs a Zerfoo computation graph from a ZMF model definition.
 // This function iterates through the nodes in the graph, instantiates the
 // corresponding layers using a registered builder, and connects them into an
@@ -25,14 +40,25 @@ func BuildFromZMF[T tensor.Numeric](
 	engine compute.Engine[T],
 	ops numeric.Arithmetic[T],
 	model *zmf.Model,
+	opts ...BuildOption,
 ) (*graph.Graph[T], error) {
 	if model == nil || model.Graph == nil {
 		return nil, errors.New("cannot build model from nil or empty ZMF graph")
 	}
 
+	cfg := buildConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	params, err := convertParameters[T](model.Graph.Parameters)
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply resolver to add canonical aliases alongside original names.
+	if cfg.resolver != nil {
+		params = ResolveAll(cfg.resolver, params)
 	}
 
 	builder := graph.NewBuilder[T](engine)
