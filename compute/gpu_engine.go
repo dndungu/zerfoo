@@ -25,19 +25,30 @@ import (
 // per-operation cudaMalloc/cudaFree, and a dedicated CUDA stream enables
 // async kernel execution.
 type GPUEngine[T tensor.Numeric] struct {
-	cpu    *CPUEngine[T]
-	handle *cublas.Handle
-	pool   *cuda.MemPool
-	stream *cuda.Stream
-	logger log.Logger
+	cpu      *CPUEngine[T]
+	handle   *cublas.Handle
+	pool     *cuda.MemPool
+	stream   *cuda.Stream
+	logger   log.Logger
+	deviceID int
 
 	// oomFallbackCount tracks how many times an OOM triggered CPU fallback.
 	oomFallbackCount atomic.Int64
 }
 
 // NewGPUEngine creates a new GPUEngine backed by a cuBLAS handle, memory pool,
-// and CUDA stream. Call Close() when done to release all resources.
-func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T]) (*GPUEngine[T], error) {
+// and CUDA stream. An optional deviceID selects the GPU (default 0).
+// Call Close() when done to release all resources.
+func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T], deviceID ...int) (*GPUEngine[T], error) {
+	dev := 0
+	if len(deviceID) > 0 {
+		dev = deviceID[0]
+	}
+
+	if err := cuda.SetDevice(dev); err != nil {
+		return nil, fmt.Errorf("failed to set CUDA device %d: %w", dev, err)
+	}
+
 	h, err := cublas.CreateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cuBLAS handle: %w", err)
@@ -58,15 +69,26 @@ func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T]) (*GPUEngine[T], e
 	}
 
 	l := log.Nop()
-	l.Info("gpu engine initialized", "pool", "enabled", "stream", "enabled")
+	l.Info("gpu engine initialized", "device", dev, "pool", "enabled", "stream", "enabled")
 
 	return &GPUEngine[T]{
-		cpu:    NewCPUEngine(ops),
-		handle: h,
-		pool:   cuda.NewMemPool(),
-		stream: stream,
-		logger: l,
+		cpu:      NewCPUEngine(ops),
+		handle:   h,
+		pool:     cuda.NewMemPool(),
+		stream:   stream,
+		logger:   l,
+		deviceID: dev,
 	}, nil
+}
+
+// DeviceID returns the CUDA device ID this engine is bound to.
+func (e *GPUEngine[T]) DeviceID() int { return e.deviceID }
+
+// setDevice calls cuda.SetDevice with this engine's device ID.
+// This must be called at the top of every method that dispatches CUDA
+// kernels or cuBLAS calls to ensure correct device context.
+func (e *GPUEngine[T]) setDevice() {
+	_ = cuda.SetDevice(e.deviceID)
 }
 
 // SetLogger replaces the engine's logger.
@@ -130,6 +152,8 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	if _, ok := any(zero).(float32); !ok {
 		return e.cpu.MatMul(ctx, a, b, dst...)
 	}
+
+	e.setDevice()
 
 	if a == nil || b == nil {
 		return nil, fmt.Errorf("MatMul: input tensors must not be nil")
@@ -210,7 +234,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	cMatSize := m * n
 
 	// Allocate device output.
-	devCTotal, err := e.pool.Alloc(0, batchSize*cMatSize*elemSize)
+	devCTotal, err := e.pool.Alloc(e.deviceID, batchSize*cMatSize*elemSize)
 	if err != nil {
 		e.oomFallbackCount.Add(1)
 		e.logger.Warn("MatMul: GPU output alloc failed, falling back to CPU", "error", err.Error())
@@ -235,7 +259,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 		// cuBLAS Sgemm
 		if err := cublas.Sgemm(e.handle, m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC); err != nil {
-			e.pool.Free(0, devCTotal, batchSize*cMatSize*elemSize)
+			e.pool.Free(e.deviceID, devCTotal, batchSize*cMatSize*elemSize)
 
 			return nil, fmt.Errorf("MatMul: cublasSgemm batch %d: %w", batch, err)
 		}
@@ -244,7 +268,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	// Synchronize stream before creating the storage.
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(0, devCTotal, batchSize*cMatSize*elemSize)
+			e.pool.Free(e.deviceID, devCTotal, batchSize*cMatSize*elemSize)
 
 			return nil, fmt.Errorf("MatMul: stream sync: %w", err)
 		}
