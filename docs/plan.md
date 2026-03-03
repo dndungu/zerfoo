@@ -2270,17 +2270,17 @@ ONNX/ZMF models to Zerfoo's internal naming conventions.
   - [x] S58.1.4 Write unit tests for each architecture's name resolution  Est: 20m
   - [x] S58.1.5 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T58.2 Integrate parameter resolver into model builder  Owner: TBD  Est: 1h
+- [x] T58.2 Integrate parameter resolver into model builder  Owner: Claude  Est: 1h  Completed: 2026-03-03
   - Dependencies: T58.1
-  - Files: model/builder.go (modify)
+  - Files: model/builder.go (modify), zerfoo.go (modify)
   - Acceptance: model.BuildFromZMF uses the resolver to look up parameters when
     the exact name is not found. Existing Gemma 3 loading still works (resolver
     is a fallback, not a replacement). New models with different naming patterns
     resolve correctly.
-  - [ ] S58.2.1 Add resolver lookup to parameter resolution in builder  Est: 25m
-  - [ ] S58.2.2 Write tests verifying Llama-style names resolve correctly  Est: 20m
-  - [ ] S58.2.3 Verify Gemma 3 loading is unaffected  Est: 10m
-  - [ ] S58.2.4 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S58.2.1 Add resolver lookup to parameter resolution in builder  Est: 25m
+  - [x] S58.2.2 Write tests verifying Llama-style names resolve correctly  Est: 20m
+  - [x] S58.2.3 Verify Gemma 3 loading is unaffected  Est: 10m
+  - [x] S58.2.4 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T58.3 Run linters and verify coverage for E58  Owner: TBD  Est: 15m
   - Dependencies: T58.2
