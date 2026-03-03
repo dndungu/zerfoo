@@ -15,6 +15,7 @@ import (
 type RotaryPositionalEmbedding[T tensor.Numeric] struct {
 	engine    compute.Engine[T]
 	headDim   int
+	rotaryDim int // number of dimensions that receive rotation (<= headDim)
 	cosAngles *tensor.TensorNumeric[T]
 	sinAngles *tensor.TensorNumeric[T]
 	// Cached input for backward pass
@@ -28,10 +29,11 @@ type RotaryPositionalEmbedding[T tensor.Numeric] struct {
 
 // RotaryPositionalEmbeddingOptions holds configuration options for RotaryPositionalEmbedding layers.
 type RotaryPositionalEmbeddingOptions struct {
-	Base       float64 // Base for the inverse frequency calculation (theta parameter)
-	YaRN       bool    // Whether to apply YaRN scaling
-	YaRNFactor float64 // YaRN scaling factor (e.g. 4.0 for 4x context extension)
-	YaRNOrigML int     // Original max sequence length before scaling
+	Base            float64 // Base for the inverse frequency calculation (theta parameter)
+	YaRN            bool    // Whether to apply YaRN scaling
+	YaRNFactor      float64 // YaRN scaling factor (e.g. 4.0 for 4x context extension)
+	YaRNOrigML      int     // Original max sequence length before scaling
+	RotaryDimFraction float64 // Fraction of head dims to rotate (default 1.0 = all)
 }
 
 // RotaryPositionalEmbeddingOption is a functional option for configuring RotaryPositionalEmbedding layers.
@@ -41,6 +43,14 @@ type RotaryPositionalEmbeddingOption func(*RotaryPositionalEmbeddingOptions)
 func WithRotaryBase(base float64) RotaryPositionalEmbeddingOption {
 	return func(opts *RotaryPositionalEmbeddingOptions) {
 		opts.Base = base
+	}
+}
+
+// WithRotaryDimFraction sets the fraction of head dimensions that receive rotation.
+// Default is 1.0 (all dimensions rotated). Phi-4 uses 0.75 for partial RoPE.
+func WithRotaryDimFraction(fraction float64) RotaryPositionalEmbeddingOption {
+	return func(opts *RotaryPositionalEmbeddingOptions) {
+		opts.RotaryDimFraction = fraction
 	}
 }
 
@@ -72,10 +82,19 @@ func NewRotaryPositionalEmbedding[T tensor.Numeric](
 
 	// Apply functional options
 	opts := &RotaryPositionalEmbeddingOptions{
-		Base: 10000.0, // Default base value (theta)
+		Base:              10000.0, // Default base value (theta)
+		RotaryDimFraction: 1.0,
 	}
 	for _, option := range options {
 		option(opts)
+	}
+
+	// Compute the number of dimensions that receive rotation.
+	rotaryDim := headDim
+	if opts.RotaryDimFraction > 0 && opts.RotaryDimFraction < 1.0 {
+		rotaryDim = int(float64(headDim) * opts.RotaryDimFraction)
+		// Ensure rotaryDim is even.
+		rotaryDim &^= 1
 	}
 
 	// Create position indices: [0, 1, ..., seq_len-1]
@@ -84,12 +103,12 @@ func NewRotaryPositionalEmbedding[T tensor.Numeric](
 		positions[i] = i
 	}
 
-	// Create inverse frequencies: 1 / (base^(2i/head_dim))
+	// Create inverse frequencies: 1 / (base^(2i/rotaryDim))
 	ops := engine.Ops()
-	halfDim := headDim / 2
+	halfDim := rotaryDim / 2
 	invFreqs64 := make([]float64, halfDim)
 	for i := 0; i < halfDim; i++ {
-		invFreqs64[i] = 1.0 / math.Pow(opts.Base, float64(2*i)/float64(headDim))
+		invFreqs64[i] = 1.0 / math.Pow(opts.Base, float64(2*i)/float64(rotaryDim))
 	}
 
 	// Apply YaRN scaling to inverse frequencies if enabled.
@@ -137,6 +156,7 @@ func NewRotaryPositionalEmbedding[T tensor.Numeric](
 	return &RotaryPositionalEmbedding[T]{
 		engine:          engine,
 		headDim:         headDim,
+		rotaryDim:       rotaryDim,
 		cosAngles:       cosAngles,
 		sinAngles:       sinAngles,
 		attnScaleFactor: attnScaleFactor,
@@ -167,25 +187,26 @@ func (rpe *RotaryPositionalEmbedding[T]) Forward(ctx context.Context, inputs ...
 	}
 
 	seqLen := rpe.inputShape[1]
+	halfRotary := rpe.rotaryDim / 2
 
 	// Slice cos and sin angles to match the input sequence length
-	cosAngles, err := rpe.cosAngles.Slice([2]int{0, seqLen}, [2]int{0, rpe.headDim / 2})
+	cosAngles, err := rpe.cosAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
 		return nil, err
 	}
 
-	sinAngles, err := rpe.sinAngles.Slice([2]int{0, seqLen}, [2]int{0, rpe.headDim / 2})
+	sinAngles, err := rpe.sinAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
 		return nil, err
 	}
 
-	// Split input into two halves: x_rot0, x_rot1
-	rpe.xRot0Slice, err = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{0, rpe.headDim / 2})
+	// Split rotary portion into two halves: x_rot0, x_rot1
+	rpe.xRot0Slice, err = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
 		return nil, err
 	}
 
-	rpe.xRot1Slice, err = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{rpe.headDim / 2, rpe.headDim})
+	rpe.xRot1Slice, err = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{halfRotary, rpe.rotaryDim})
 	if err != nil {
 		return nil, err
 	}
@@ -193,26 +214,21 @@ func (rpe *RotaryPositionalEmbedding[T]) Forward(ctx context.Context, inputs ...
 	// Apply rotation:
 	// x_rot0 * cos(angles) - x_rot1 * sin(angles)
 	// x_rot1 * cos(angles) + x_rot0 * sin(angles)
-
-	// Term 1: x_rot0 * cos(angles)
-	term1, err := rpe.engine.Mul(ctx, rpe.xRot0Slice, cosAngles) // Broadcasting cosAngles
+	term1, err := rpe.engine.Mul(ctx, rpe.xRot0Slice, cosAngles)
 	if err != nil {
 		return nil, err
 	}
 
-	// Term 2: x_rot1 * sin(angles)
-	term2, err := rpe.engine.Mul(ctx, rpe.xRot1Slice, sinAngles) // Broadcasting sinAngles
+	term2, err := rpe.engine.Mul(ctx, rpe.xRot1Slice, sinAngles)
 	if err != nil {
 		return nil, err
 	}
 
-	// rotated_x0 = term1 - term2
 	rotatedX0, err := rpe.engine.Sub(ctx, term1, term2)
 	if err != nil {
 		return nil, err
 	}
 
-	// rotated_x1 = x_rot1 * cos(angles) + x_rot0 * sin(angles)
 	mul1, err := rpe.engine.Mul(ctx, rpe.xRot1Slice, cosAngles)
 	if err != nil {
 		return nil, err
@@ -228,8 +244,17 @@ func (rpe *RotaryPositionalEmbedding[T]) Forward(ctx context.Context, inputs ...
 		return nil, err
 	}
 
-	// Concatenate rotated halves
-	output, err := rpe.engine.Concat(ctx, []*tensor.TensorNumeric[T]{rotatedX0, rotatedX1}, 2)
+	// Concatenate rotated halves, plus pass-through if partial.
+	parts := []*tensor.TensorNumeric[T]{rotatedX0, rotatedX1}
+	if rpe.rotaryDim < rpe.headDim {
+		passThrough, err2 := input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{rpe.rotaryDim, rpe.headDim})
+		if err2 != nil {
+			return nil, err2
+		}
+		parts = append(parts, passThrough)
+	}
+
+	output, err := rpe.engine.Concat(ctx, parts, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -244,30 +269,30 @@ func (rpe *RotaryPositionalEmbedding[T]) Backward(ctx context.Context, mode type
 	dShape := dOut.Shape()
 	batchDim := dShape[0]
 	seqLen := dShape[1]
+	halfRotary := rpe.rotaryDim / 2
 
 	// Slice cos and sin angles to match the input sequence length
-	cosAngles, err := rpe.cosAngles.Slice([2]int{0, seqLen}, [2]int{0, rpe.headDim / 2})
+	cosAngles, err := rpe.cosAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
 		return nil, err
 	}
 
-	sinAngles, err := rpe.sinAngles.Slice([2]int{0, seqLen}, [2]int{0, rpe.headDim / 2})
+	sinAngles, err := rpe.sinAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
 		return nil, err
 	}
 
-	// Split dOut into d_rotated_x0, d_rotated_x1
-	dRotatedX0, err := dOut.Slice([2]int{0, batchDim}, [2]int{0, seqLen}, [2]int{0, rpe.headDim / 2})
+	// Split dOut rotary portion into d_rotated_x0, d_rotated_x1
+	dRotatedX0, err := dOut.Slice([2]int{0, batchDim}, [2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
 		return nil, err
 	}
 
-	dRotatedX1, err := dOut.Slice([2]int{0, batchDim}, [2]int{0, seqLen}, [2]int{rpe.headDim / 2, rpe.headDim})
+	dRotatedX1, err := dOut.Slice([2]int{0, batchDim}, [2]int{0, seqLen}, [2]int{halfRotary, rpe.rotaryDim})
 	if err != nil {
 		return nil, err
 	}
 
-	// Gradients for x_rot0 and x_rot1
 	// dL/dx_rot0 = d_rotated_x0 * cos(angles) + d_rotated_x1 * sin(angles)
 	mul1, err := rpe.engine.Mul(ctx, dRotatedX0, cosAngles)
 	if err != nil {
@@ -300,8 +325,17 @@ func (rpe *RotaryPositionalEmbedding[T]) Backward(ctx context.Context, mode type
 		return nil, err
 	}
 
-	// Concatenate gradients for x_rot0 and x_rot1
-	dInput, err := rpe.engine.Concat(ctx, []*tensor.TensorNumeric[T]{dLdxRot0, dLdxRot1}, 2)
+	// Concatenate rotary gradients, plus pass-through if partial.
+	parts := []*tensor.TensorNumeric[T]{dLdxRot0, dLdxRot1}
+	if rpe.rotaryDim < rpe.headDim {
+		dPassThrough, err2 := dOut.Slice([2]int{0, batchDim}, [2]int{0, seqLen}, [2]int{rpe.rotaryDim, rpe.headDim})
+		if err2 != nil {
+			return nil, err2
+		}
+		parts = append(parts, dPassThrough)
+	}
+
+	dInput, err := rpe.engine.Concat(ctx, parts, 2)
 	if err != nil {
 		return nil, err
 	}
