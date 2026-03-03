@@ -58,16 +58,20 @@ metrics/              ML evaluation metrics (Pearson, Spearman, MSE, RMSE, MAE)
 log/                  Structured leveled logging (Debug/Info/Warn/Error, text/JSON)
 shutdown/             Ordered shutdown coordinator with reverse-order Closer execution
 cmd/                  CLI binaries and framework
-  cmd/zerfoo/           Main binary (predict, tokenize, worker subcommands)
-  cmd/cli/              Command interface, CommandRegistry, CLI runner
+  cmd/zerfoo/           Main binary (predict, tokenize, worker, pull, run, serve subcommands)
+  cmd/cli/              Command interface, CommandRegistry, CLI runner, pull/run/serve commands
   cmd/zerfoo-predict/   Standalone predict binary
   cmd/zerfoo-tokenize/  Standalone tokenize binary
   cmd/bench-compare/    Benchmark comparison tool
   cmd/coverage-gate/    CI coverage enforcement tool
+inference/            High-level inference API: Load, Generate, GenerateStream, Chat, Embed
+generate/             Autoregressive generation loop, sampling (temp, topK, topP, repetition), streaming
+registry/             Model registry with local cache, Pull/Get/List/Delete interface
+serve/                OpenAI-compatible HTTP server (chat completions, completions, models, SSE streaming)
+pkg/tokenizer/        BPE tokenizer loading from tokenizer.json, WhitespaceTokenizer for testing
 data/                 Dataset container (Sample, Batch, normalization)
 features/             Time-series feature transformers (Lag, Rolling, FFT)
 types/                Shared type definitions (BackwardMode)
-pkg/tokenizer/        Whitespace-splitting tokenizer (standard lib only)
 internal/xblas/       CPU BLAS wrappers (gonum GEMM for float32/64; upcast for float16/float8)
 internal/cuda/        CUDA runtime CGO bindings (//go:build cuda)
 internal/cublas/      cuBLAS CGO bindings (//go:build cuda)
@@ -746,6 +750,8 @@ curl http://localhost:8081/debug/pprof/goroutine?debug=2
 7. Hardware validation pending -- GCP GPU quota request pending.
 8. float16/float8 GEMM upcasts to float32 -- no native half-precision kernels.
 9. Generics wiring hardcodes float32 -- registry, worker node, CLI all use float32.
+10. Embeddings not yet supported -- inference.Embed returns an error (no hidden state access).
+11. KV cache is optional -- not all graph architectures support it.
 
 ---
 
@@ -759,20 +765,48 @@ curl http://localhost:8081/debug/pprof/goroutine?debug=2
 - **float8** (`github.com/zerfoo/float8`): E4M3 float8 type for Go.
 - **gemma3** (`github.com/zerfoo/gemma3`): Gemma 3 model support and conversion scripts.
 
-### 11.2 Data Flow
+### 11.2 Inference Pipeline (Phase 8)
+
+The inference pipeline provides an embeddable Go-native API for model loading and text generation.
+
+**Loading:** `inference.Load(modelID, opts...)` resolves a model via `registry.ModelRegistry`, reads `config.json` (metadata), `tokenizer.json` (BPE tokenizer), and `model.zmf` (weights), then wires a `generate.Generator[float32]` with a `graph.Graph[float32]` and `compute.CPUEngine[float32]`.
+
+**Generation:** `generate.Generator.Generate(ctx, prompt, config)` runs the autoregressive loop:
+1. Encode prompt via BPE tokenizer
+2. Prefill: single forward pass through the full graph
+3. Decode: loop picking one token at a time using the sampling pipeline
+4. Sampling: temperature scaling, top-k filtering, top-p (nucleus) sampling, repetition penalty, then softmax + weighted random (or argmax at temperature=0)
+5. Stop on EOS token, stop string, or max tokens
+
+**Streaming:** `generate.Generator.GenerateStream(ctx, prompt, config, handler)` delivers tokens incrementally via `generate.TokenStream.OnToken(token, done)`.
+
+**KV Cache:** `generate.KVCache[T]` stores per-layer key/value tensors, passed via context (`generate.WithKVCache`/`generate.GetKVCache`). Avoids recomputing attention over prior tokens during autoregressive decode.
+
+**Serve:** `serve.NewServer(model).Handler()` returns an `http.Handler` implementing:
+- `POST /v1/chat/completions` -- OpenAI chat completion (non-streaming and SSE)
+- `POST /v1/completions` -- OpenAI text completion (non-streaming and SSE)
+- `GET /v1/models` -- model listing
+
+**CLI Commands:**
+- `zerfoo pull <model-id>` -- download and cache a model via registry
+- `zerfoo run <model-id>` -- interactive chat with streaming output
+- `zerfoo serve --port <port>` -- start OpenAI-compatible HTTP server
+
+### 11.3 Data Flow
 
 ```
 HuggingFace model (ONNX/SafeTensors)
     |
     v (zonnx converter)
-ZMF file
+ZMF file + config.json + tokenizer.json
     |
-    v (zmf library)
-model.LoadModelFromZMF[float32](engine, ops, path)
+    v (registry.Pull / inference.Load)
+inference.Model
     |
-    v
-graph.Graph[float32].Forward(ctx, input)
+    +-- Generate(ctx, prompt) -> string
+    +-- GenerateStream(ctx, prompt, handler) -> error
+    +-- Chat(ctx, messages) -> Response
     |
-    v
-Output tensor
+    v (serve.NewServer)
+OpenAI-compatible HTTP API
 ```
