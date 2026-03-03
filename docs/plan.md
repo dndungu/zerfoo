@@ -2184,7 +2184,7 @@ different HuggingFace model families without manual config translation.
   - [x] S57.1.4 Write unit tests: known model_type, fallback, missing fields  Est: 15m
   - [x] S57.1.5 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T57.2 Add Llama config parser  Owner: TBD  Est: 45m
+- [x] T57.2 Add Llama config parser  Owner: Claude  Est: 45m  Completed: 2026 03 03
   - Dependencies: T57.1
   - Files: inference/arch_config.go (extend)
   - Acceptance: Parser for model_type "llama" maps: num_hidden_layers -> NumLayers,
@@ -2194,10 +2194,10 @@ different HuggingFace model families without manual config translation.
     max_position_embeddings -> MaxPositionEmbeddings, eos_token_id -> EOSTokenID,
     bos_token_id -> BOSTokenID. Test: parse a real Llama 3.1 8B config.json fixture
     and verify all fields are correctly populated.
-  - [ ] S57.2.1 Implement Llama config parser with field mapping  Est: 15m
-  - [ ] S57.2.2 Add testdata/llama3_config.json fixture  Est: 10m
-  - [ ] S57.2.3 Write unit tests with fixture  Est: 15m
-  - [ ] S57.2.4 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S57.2.1 Implement Llama config parser with field mapping  Est: 15m
+  - [x] S57.2.2 Add testdata/llama3_config.json fixture  Est: 10m
+  - [x] S57.2.3 Write unit tests with fixture  Est: 15m
+  - [x] S57.2.4 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T57.3 Add Mistral and Qwen config parsers  Owner: TBD  Est: 45m
   - Dependencies: T57.1
