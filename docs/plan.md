@@ -2478,21 +2478,21 @@ output LMHead layer, reducing model parameter count.
 
 Validate Phi-4 model loading and generation with partial RoPE and tied embeddings.
 
-- [ ] T65.1 Phi-4 forward pass parity test  Owner: TBD  Est: 2h
+- [x] T65.1 Phi-4 forward pass parity test  Owner: TBD  Est: 2h
   - Dependencies: E57, E58, E63, E64
   - Files: tests/parity/phi4_test.go (new)
   - Acceptance: TestPhi4ForwardPass loads a Phi-4 ZMF model (env-gated by
     PHI4_ZMF_PATH), runs a forward pass, asserts valid output. TestPhi4GreedyDecode
     runs 5-step greedy decode. Skips when env var not set.
-  - [ ] S65.1.1 Create tests/parity/phi4_test.go  Est: 45m
-  - [ ] S65.1.2 Add greedy decode test  Est: 30m
-  - [ ] S65.1.3 Add generation test via inference API  Est: 30m
-  - [ ] S65.1.4 Run golangci-lint and go test  Est: 15m
+  - [x] S65.1.1 Create tests/parity/phi4_test.go  Est: 45m
+  - [x] S65.1.2 Add greedy decode test  Est: 30m
+  - [x] S65.1.3 Add generation test via inference API  Est: 30m
+  - [x] S65.1.4 Run golangci-lint and go test  Est: 15m
 
-- [ ] T65.2 Run linters and verify for E65  Owner: TBD  Est: 15m
+- [x] T65.2 Run linters and verify for E65  Owner: TBD  Est: 15m
   - Dependencies: T65.1
-  - [ ] S65.2.1 Run golangci-lint, go test -race  Est: 10m
-  - [ ] S65.2.2 Fix any issues  Est: 5m
+  - [x] S65.2.1 Run golangci-lint, go test -race  Est: 10m
+  - [x] S65.2.2 Fix any issues  Est: 5m
 
 #### E66: Multi-head Latent Attention (Tier 4)
 
