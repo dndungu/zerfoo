@@ -349,3 +349,22 @@ func (m *Model) Config() ModelMetadata {
 func (m *Model) Info() *registry.ModelInfo {
 	return m.info
 }
+
+// NewTestModel constructs a Model from pre-built components.
+// Intended for use in external test packages that need a Model
+// without going through the full Load pipeline.
+func NewTestModel(
+	gen *generate.Generator[float32],
+	tok tokenizer.Tokenizer,
+	eng compute.Engine[float32],
+	meta ModelMetadata,
+	info *registry.ModelInfo,
+) *Model {
+	return &Model{
+		generator: gen,
+		tokenizer: tok,
+		engine:    eng,
+		config:    meta,
+		info:      info,
+	}
+}
