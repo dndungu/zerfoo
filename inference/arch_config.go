@@ -47,6 +47,9 @@ func DefaultArchConfigRegistry() *ArchConfigRegistry {
 	r.Register("llama", parseLlamaConfig)
 	r.Register("mistral", parseMistralConfig)
 	r.Register("qwen2", parseQwenConfig)
+	r.Register("phi3", parsePhiConfig)
+	r.Register("phi", parsePhiConfig)
+	r.Register("deepseek_v3", parseDeepSeekConfig)
 	return r
 }
 
@@ -142,6 +145,66 @@ func parseQwenConfig(raw map[string]interface{}) (*ModelMetadata, error) {
 	}
 	if meta.RopeTheta == 0 {
 		meta.RopeTheta = 1000000 // Qwen default
+	}
+	return meta, nil
+}
+
+// parsePhiConfig parses Phi-family config.json fields.
+// Adds partial_rotary_factor (default 1.0) and tie_word_embeddings.
+func parsePhiConfig(raw map[string]interface{}) (*ModelMetadata, error) {
+	meta := &ModelMetadata{
+		Architecture:          getString(raw, "model_type"),
+		VocabSize:             getInt(raw, "vocab_size"),
+		HiddenSize:            getInt(raw, "hidden_size"),
+		NumLayers:             getInt(raw, "num_hidden_layers"),
+		NumQueryHeads:         getInt(raw, "num_attention_heads"),
+		NumKeyValueHeads:      getInt(raw, "num_key_value_heads"),
+		IntermediateSize:      getInt(raw, "intermediate_size"),
+		MaxPositionEmbeddings: getInt(raw, "max_position_embeddings"),
+		EOSTokenID:            getInt(raw, "eos_token_id"),
+		BOSTokenID:            getInt(raw, "bos_token_id"),
+		RopeTheta:             getFloat(raw, "rope_theta"),
+		TieWordEmbeddings:     getBool(raw, "tie_word_embeddings"),
+		SlidingWindow:         getInt(raw, "sliding_window"),
+		PartialRotaryFactor:   getFloat(raw, "partial_rotary_factor"),
+		RopeScaling:           getRopeScaling(raw),
+	}
+	if meta.RopeTheta == 0 {
+		meta.RopeTheta = 10000 // Phi default
+	}
+	if meta.PartialRotaryFactor == 0 {
+		meta.PartialRotaryFactor = 1.0 // Full rotation by default
+	}
+	return meta, nil
+}
+
+// parseDeepSeekConfig parses DeepSeek V3-family config.json fields.
+// Adds MLA fields (kv_lora_rank, q_lora_rank, qk_rope_head_dim) and
+// MoE fields (n_routed_experts, num_experts_per_tok, n_shared_experts).
+func parseDeepSeekConfig(raw map[string]interface{}) (*ModelMetadata, error) {
+	meta := &ModelMetadata{
+		Architecture:          getString(raw, "model_type"),
+		VocabSize:             getInt(raw, "vocab_size"),
+		HiddenSize:            getInt(raw, "hidden_size"),
+		NumLayers:             getInt(raw, "num_hidden_layers"),
+		NumQueryHeads:         getInt(raw, "num_attention_heads"),
+		NumKeyValueHeads:      getInt(raw, "num_key_value_heads"),
+		IntermediateSize:      getInt(raw, "intermediate_size"),
+		MaxPositionEmbeddings: getInt(raw, "max_position_embeddings"),
+		EOSTokenID:            getInt(raw, "eos_token_id"),
+		BOSTokenID:            getInt(raw, "bos_token_id"),
+		RopeTheta:             getFloat(raw, "rope_theta"),
+		TieWordEmbeddings:     getBool(raw, "tie_word_embeddings"),
+		KVLoRADim:             getInt(raw, "kv_lora_rank"),
+		QLoRADim:              getInt(raw, "q_lora_rank"),
+		QKRopeHeadDim:         getInt(raw, "qk_rope_head_dim"),
+		NumExperts:            getInt(raw, "n_routed_experts"),
+		NumExpertsPerToken:    getInt(raw, "num_experts_per_tok"),
+		NumSharedExperts:      getInt(raw, "n_shared_experts"),
+		RopeScaling:           getRopeScaling(raw),
+	}
+	if meta.RopeTheta == 0 {
+		meta.RopeTheta = 10000 // DeepSeek default
 	}
 	return meta, nil
 }

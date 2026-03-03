@@ -45,9 +45,18 @@ type ModelMetadata struct {
 	NumKeyValueHeads  int                `json:"num_key_value_heads"`
 	RopeTheta         float64            `json:"rope_theta"`
 	RopeScaling       *RopeScalingConfig `json:"rope_scaling,omitempty"`
-	TieWordEmbeddings bool               `json:"tie_word_embeddings"`
-	SlidingWindow     int                `json:"sliding_window"`
-	AttentionBias     bool               `json:"attention_bias"`
+	TieWordEmbeddings  bool               `json:"tie_word_embeddings"`
+	SlidingWindow      int                `json:"sliding_window"`
+	AttentionBias      bool               `json:"attention_bias"`
+	PartialRotaryFactor float64           `json:"partial_rotary_factor"`
+
+	// DeepSeek MLA and MoE fields.
+	KVLoRADim        int `json:"kv_lora_rank"`
+	QLoRADim         int `json:"q_lora_rank"`
+	QKRopeHeadDim    int `json:"qk_rope_head_dim"`
+	NumExperts       int `json:"num_experts"`
+	NumExpertsPerToken int `json:"num_experts_per_tok"`
+	NumSharedExperts int `json:"n_shared_experts"`
 }
 
 // Option configures model loading.

@@ -619,6 +619,249 @@ func TestQwenConfigParser_Fixture(t *testing.T) {
 	}
 }
 
+func TestPhiConfigParser(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  map[string]interface{}
+		want ModelMetadata
+	}{
+		{
+			name: "phi4 full",
+			raw: map[string]interface{}{
+				"model_type":              "phi3",
+				"vocab_size":              float64(100352),
+				"hidden_size":             float64(5120),
+				"num_hidden_layers":       float64(40),
+				"num_attention_heads":     float64(40),
+				"num_key_value_heads":     float64(10),
+				"intermediate_size":       float64(17920),
+				"max_position_embeddings": float64(16384),
+				"rope_theta":              float64(10000),
+				"eos_token_id":            float64(100265),
+				"bos_token_id":            float64(100257),
+				"partial_rotary_factor":   float64(0.5),
+				"tie_word_embeddings":     false,
+				"sliding_window":          float64(2048),
+			},
+			want: ModelMetadata{
+				Architecture:          "phi3",
+				VocabSize:             100352,
+				HiddenSize:            5120,
+				NumLayers:             40,
+				NumQueryHeads:         40,
+				NumKeyValueHeads:      10,
+				IntermediateSize:      17920,
+				MaxPositionEmbeddings: 16384,
+				RopeTheta:             10000,
+				EOSTokenID:            100265,
+				BOSTokenID:            100257,
+				PartialRotaryFactor:   0.5,
+				SlidingWindow:         2048,
+			},
+		},
+		{
+			name: "phi minimal defaults partial_rotary_factor to 1.0",
+			raw: map[string]interface{}{
+				"model_type":          "phi3",
+				"vocab_size":          float64(32064),
+				"num_hidden_layers":   float64(32),
+				"num_attention_heads": float64(32),
+			},
+			want: ModelMetadata{
+				Architecture:        "phi3",
+				VocabSize:           32064,
+				NumLayers:           32,
+				NumQueryHeads:       32,
+				RopeTheta:           10000,
+				PartialRotaryFactor: 1.0,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePhiConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("parsePhiConfig error: %v", err)
+			}
+			assertMetadataEqual(t, tc.want, *got)
+		})
+	}
+}
+
+func TestPhiConfigParser_Fixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/phi4_config.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	meta, err := parsePhiConfig(raw)
+	if err != nil {
+		t.Fatalf("parsePhiConfig error: %v", err)
+	}
+
+	assertMetadataEqual(t, ModelMetadata{
+		Architecture:          "phi3",
+		VocabSize:             100352,
+		HiddenSize:            5120,
+		NumLayers:             40,
+		NumQueryHeads:         40,
+		NumKeyValueHeads:      10,
+		IntermediateSize:      17920,
+		MaxPositionEmbeddings: 16384,
+		RopeTheta:             10000,
+		EOSTokenID:            100265,
+		BOSTokenID:            100257,
+		PartialRotaryFactor:   0.5,
+		SlidingWindow:         2048,
+	}, *meta)
+}
+
+func TestDeepSeekConfigParser(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  map[string]interface{}
+		want ModelMetadata
+	}{
+		{
+			name: "deepseek v3 full",
+			raw: map[string]interface{}{
+				"model_type":              "deepseek_v3",
+				"vocab_size":              float64(129280),
+				"hidden_size":             float64(7168),
+				"num_hidden_layers":       float64(61),
+				"num_attention_heads":     float64(128),
+				"num_key_value_heads":     float64(128),
+				"intermediate_size":       float64(18432),
+				"max_position_embeddings": float64(163840),
+				"rope_theta":              float64(10000),
+				"eos_token_id":            float64(1),
+				"bos_token_id":            float64(0),
+				"kv_lora_rank":            float64(512),
+				"q_lora_rank":             float64(1536),
+				"qk_rope_head_dim":        float64(64),
+				"n_routed_experts":        float64(256),
+				"num_experts_per_tok":     float64(8),
+				"n_shared_experts":        float64(1),
+			},
+			want: ModelMetadata{
+				Architecture:          "deepseek_v3",
+				VocabSize:             129280,
+				HiddenSize:            7168,
+				NumLayers:             61,
+				NumQueryHeads:         128,
+				NumKeyValueHeads:      128,
+				IntermediateSize:      18432,
+				MaxPositionEmbeddings: 163840,
+				RopeTheta:             10000,
+				EOSTokenID:            1,
+				BOSTokenID:            0,
+				KVLoRADim:             512,
+				QLoRADim:              1536,
+				QKRopeHeadDim:         64,
+				NumExperts:            256,
+				NumExpertsPerToken:    8,
+				NumSharedExperts:      1,
+			},
+		},
+		{
+			name: "deepseek minimal defaults rope_theta to 10000",
+			raw: map[string]interface{}{
+				"model_type":          "deepseek_v3",
+				"vocab_size":          float64(129280),
+				"num_hidden_layers":   float64(61),
+				"num_attention_heads": float64(128),
+			},
+			want: ModelMetadata{
+				Architecture:  "deepseek_v3",
+				VocabSize:     129280,
+				NumLayers:     61,
+				NumQueryHeads: 128,
+				RopeTheta:     10000,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDeepSeekConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("parseDeepSeekConfig error: %v", err)
+			}
+			assertMetadataEqual(t, tc.want, *got)
+		})
+	}
+}
+
+func TestDeepSeekConfigParser_Fixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/deepseek_v3_config.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	meta, err := parseDeepSeekConfig(raw)
+	if err != nil {
+		t.Fatalf("parseDeepSeekConfig error: %v", err)
+	}
+
+	assertMetadataEqual(t, ModelMetadata{
+		Architecture:          "deepseek_v3",
+		VocabSize:             129280,
+		HiddenSize:            7168,
+		NumLayers:             61,
+		NumQueryHeads:         128,
+		NumKeyValueHeads:      128,
+		IntermediateSize:      18432,
+		MaxPositionEmbeddings: 163840,
+		RopeTheta:             10000,
+		EOSTokenID:            1,
+		BOSTokenID:            0,
+		KVLoRADim:             512,
+		QLoRADim:              1536,
+		QKRopeHeadDim:         64,
+		NumExperts:            256,
+		NumExpertsPerToken:    8,
+		NumSharedExperts:      1,
+	}, *meta)
+}
+
+func TestDefaultArchConfigRegistry_PhiAndDeepSeekRegistered(t *testing.T) {
+	reg := DefaultArchConfigRegistry()
+
+	for _, tc := range []struct {
+		modelType string
+		wantArch  string
+	}{
+		{"phi3", "phi3"},
+		{"phi", "phi"},
+		{"deepseek_v3", "deepseek_v3"},
+	} {
+		t.Run(tc.modelType, func(t *testing.T) {
+			raw := map[string]interface{}{
+				"model_type":          tc.modelType,
+				"vocab_size":          float64(32000),
+				"num_hidden_layers":   float64(32),
+				"num_attention_heads": float64(32),
+			}
+			meta, err := reg.Parse(raw)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if meta.Architecture != tc.wantArch {
+				t.Errorf("Architecture = %q, want %q", meta.Architecture, tc.wantArch)
+			}
+		})
+	}
+}
+
 func TestDefaultArchConfigRegistry_MistralAndQwenRegistered(t *testing.T) {
 	reg := DefaultArchConfigRegistry()
 
@@ -691,5 +934,26 @@ func assertMetadataEqual(t *testing.T, want, got ModelMetadata) {
 	}
 	if got.AttentionBias != want.AttentionBias {
 		t.Errorf("AttentionBias = %v, want %v", got.AttentionBias, want.AttentionBias)
+	}
+	if got.PartialRotaryFactor != want.PartialRotaryFactor {
+		t.Errorf("PartialRotaryFactor = %f, want %f", got.PartialRotaryFactor, want.PartialRotaryFactor)
+	}
+	if got.KVLoRADim != want.KVLoRADim {
+		t.Errorf("KVLoRADim = %d, want %d", got.KVLoRADim, want.KVLoRADim)
+	}
+	if got.QLoRADim != want.QLoRADim {
+		t.Errorf("QLoRADim = %d, want %d", got.QLoRADim, want.QLoRADim)
+	}
+	if got.QKRopeHeadDim != want.QKRopeHeadDim {
+		t.Errorf("QKRopeHeadDim = %d, want %d", got.QKRopeHeadDim, want.QKRopeHeadDim)
+	}
+	if got.NumExperts != want.NumExperts {
+		t.Errorf("NumExperts = %d, want %d", got.NumExperts, want.NumExperts)
+	}
+	if got.NumExpertsPerToken != want.NumExpertsPerToken {
+		t.Errorf("NumExpertsPerToken = %d, want %d", got.NumExpertsPerToken, want.NumExpertsPerToken)
+	}
+	if got.NumSharedExperts != want.NumSharedExperts {
+		t.Errorf("NumSharedExperts = %d, want %d", got.NumSharedExperts, want.NumSharedExperts)
 	}
 }
