@@ -1,0 +1,155 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/zerfoo/zerfoo/inference"
+)
+
+func TestRunCommand_Name(t *testing.T) {
+	cmd := NewRunCommand(nil, nil)
+	if cmd.Name() != "run" {
+		t.Errorf("Name() = %q, want %q", cmd.Name(), "run")
+	}
+}
+
+func TestRunCommand_Description(t *testing.T) {
+	cmd := NewRunCommand(nil, nil)
+	if cmd.Description() == "" {
+		t.Error("Description() should not be empty")
+	}
+}
+
+func TestRunCommand_Usage(t *testing.T) {
+	cmd := NewRunCommand(nil, nil)
+	if !strings.Contains(cmd.Usage(), "run") {
+		t.Error("Usage() should contain 'run'")
+	}
+}
+
+func TestRunCommand_Examples(t *testing.T) {
+	cmd := NewRunCommand(nil, nil)
+	if len(cmd.Examples()) == 0 {
+		t.Error("Examples() should not be empty")
+	}
+}
+
+func TestRunCommand_MissingModelID(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRunCommand(strings.NewReader(""), &out)
+	err := cmd.Run(context.Background(), nil)
+	if err == nil {
+		t.Error("expected error for missing model ID")
+	}
+}
+
+func TestRunCommand_LoadError(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRunCommand(strings.NewReader(""), &out)
+	cmd.loadFn = func(_ string, _ ...inference.Option) (*inference.Model, error) {
+		return nil, errors.New("load failed")
+	}
+	err := cmd.Run(context.Background(), []string{"test-model"})
+	if err == nil {
+		t.Error("expected error from load")
+	}
+	if !strings.Contains(err.Error(), "load model") {
+		t.Errorf("error = %q, want 'load model'", err.Error())
+	}
+}
+
+func TestRunCommand_FlagParsing(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		err  string
+	}{
+		{"temperature missing value", []string{"--temperature"}, "--temperature requires a value"},
+		{"temperature invalid", []string{"--temperature", "abc", "m"}, "--temperature:"},
+		{"top-k missing value", []string{"--top-k"}, "--top-k requires a value"},
+		{"top-k invalid", []string{"--top-k", "abc", "m"}, "--top-k:"},
+		{"top-p missing value", []string{"--top-p"}, "--top-p requires a value"},
+		{"top-p invalid", []string{"--top-p", "abc", "m"}, "--top-p:"},
+		{"max-tokens missing value", []string{"--max-tokens"}, "--max-tokens requires a value"},
+		{"max-tokens invalid", []string{"--max-tokens", "abc", "m"}, "--max-tokens:"},
+		{"system missing value", []string{"--system"}, "--system requires a value"},
+		{"cache-dir missing value", []string{"--cache-dir"}, "--cache-dir requires a value"},
+		{"unexpected arg", []string{"model1", "model2"}, "unexpected argument"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := NewRunCommand(strings.NewReader(""), &out)
+			cmd.loadFn = func(_ string, _ ...inference.Option) (*inference.Model, error) {
+				return nil, errors.New("should not be called")
+			}
+			err := cmd.Run(context.Background(), tc.args)
+			if err == nil {
+				t.Error("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tc.err)
+			}
+		})
+	}
+}
+
+func TestRunCommand_REPL(t *testing.T) {
+	mdl := buildCLITestModel(t)
+	var out bytes.Buffer
+	// Simulate user typing "hello" then EOF.
+	cmd := NewRunCommand(strings.NewReader("hello\n"), &out)
+	cmd.loadFn = func(_ string, _ ...inference.Option) (*inference.Model, error) {
+		return mdl, nil
+	}
+	err := cmd.Run(context.Background(), []string{"test-model"})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Model loaded") {
+		t.Errorf("output should contain 'Model loaded', got %q", out.String())
+	}
+}
+
+func TestRunCommand_REPL_EmptyLines(t *testing.T) {
+	mdl := buildCLITestModel(t)
+	var out bytes.Buffer
+	// Empty lines should be skipped.
+	cmd := NewRunCommand(strings.NewReader("\n\n"), &out)
+	cmd.loadFn = func(_ string, _ ...inference.Option) (*inference.Model, error) {
+		return mdl, nil
+	}
+	err := cmd.Run(context.Background(), []string{"test-model"})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+}
+
+func TestRunCommand_REPL_WithOptions(t *testing.T) {
+	mdl := buildCLITestModel(t)
+	var out bytes.Buffer
+	cmd := NewRunCommand(strings.NewReader("hello\n"), &out)
+	cmd.loadFn = func(_ string, _ ...inference.Option) (*inference.Model, error) {
+		return mdl, nil
+	}
+	err := cmd.Run(context.Background(), []string{
+		"--temperature", "0.5",
+		"--top-k", "10",
+		"--top-p", "0.9",
+		"--max-tokens", "5",
+		"--system", "You are helpful",
+		"--cache-dir", "/tmp/cache",
+		"test-model",
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+}
+
+func TestRunCommand_Interface(t *testing.T) {
+	var _ Command = (*RunCommand)(nil)
+}
