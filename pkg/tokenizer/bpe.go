@@ -26,6 +26,8 @@ type BPETokenizer struct {
 	// preTokenize controls how text is split before BPE merging.
 	// If true, byte-level pre-tokenization is used (GPT-2 style).
 	byteLevelBPE bool
+	// normalizer is an optional text normalization function applied before tokenization.
+	normalizer NormalizerFunc
 }
 
 // NewBPETokenizer creates a BPETokenizer from vocabulary, merge rules, and special tokens.
@@ -55,6 +57,9 @@ func NewBPETokenizer(vocab map[string]int, merges []MergePair, special SpecialTo
 func (t *BPETokenizer) Encode(text string) ([]int, error) {
 	if text == "" {
 		return []int{}, nil
+	}
+	if t.normalizer != nil {
+		text = t.normalizer(text)
 	}
 	words := t.preTokenize(text)
 	var ids []int
@@ -247,7 +252,7 @@ func buildByteEncoderDecoder() (map[byte]rune, map[rune]byte) {
 	// Printable ASCII ranges that map to themselves:
 	// '!' (33) to '~' (126), plus non-breaking characters.
 	n := rune(256) // Next available Unicode codepoint for non-printable bytes.
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		b := byte(i)
 		if isPrintableGPT2Byte(b) {
 			enc[b] = rune(b)
