@@ -39,13 +39,14 @@ func LoadModelFromZMF[T tensor.Numeric](
 	engine compute.Engine[T],
 	ops numeric.Arithmetic[T],
 	filePath string,
+	buildOpts ...BuildOption,
 ) (*Model[T], error) {
 	zmfModel, err := LoadZMF(filePath)
 	if err != nil {
 		return nil, err
 	}
 
-	graph, err := BuildFromZMF(engine, ops, zmfModel)
+	graph, err := BuildFromZMF(engine, ops, zmfModel, buildOpts...)
 	if err != nil {
 		return nil, err
 	}

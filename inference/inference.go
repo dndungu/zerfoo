@@ -148,7 +148,16 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 	zmfPath := filepath.Join(info.Path, "model.zmf")
 	eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
 
-	mdl, err := model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath)
+	var buildOpts []model.BuildOption
+	if meta.RopeScaling != nil && meta.RopeScaling.Type == "yarn" {
+		buildOpts = append(buildOpts, model.WithGlobalAttributes(map[string]interface{}{
+			"rope_scaling_type":         meta.RopeScaling.Type,
+			"rope_scaling_factor":       meta.RopeScaling.Factor,
+			"rope_scaling_orig_max_len": meta.RopeScaling.OriginalMaxPositionEmbeddings,
+		}))
+	}
+
+	mdl, err := model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath, buildOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load model: %w", err)
 	}
