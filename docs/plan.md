@@ -2250,7 +2250,7 @@ different HuggingFace model families without manual config translation.
 Add a parameter name resolver that maps architecture-specific weight names from
 ONNX/ZMF models to Zerfoo's internal naming conventions.
 
-- [ ] T58.1 Create parameter name resolver  Owner: TBD  Est: 1.5h
+- [x] T58.1 Create parameter name resolver  Owner: Claude  Est: 1.5h  Completed: 2026-03-03
   - Dependencies: E57
   - Files: model/param_resolver.go (new)
   - Acceptance: A ParamResolver maps model weight names to canonical names used
@@ -2264,11 +2264,11 @@ ONNX/ZMF models to Zerfoo's internal naming conventions.
     Norm: model.layers.{i}.{input,post_attention}_layernorm.weight (all families)
     The resolver is called during model building (model/builder.go) to find
     parameters by canonical name when the ZMF parameter has a model-specific name.
-  - [ ] S58.1.1 Define ParamResolver interface and implementation  Est: 30m
-  - [ ] S58.1.2 Add Llama/Gemma/Mistral name mappings  Est: 15m
-  - [ ] S58.1.3 Add Qwen/Phi/DeepSeek name mappings  Est: 15m
-  - [ ] S58.1.4 Write unit tests for each architecture's name resolution  Est: 20m
-  - [ ] S58.1.5 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S58.1.1 Define ParamResolver interface and implementation  Est: 30m
+  - [x] S58.1.2 Add Llama/Gemma/Mistral name mappings  Est: 15m
+  - [x] S58.1.3 Add Qwen/Phi/DeepSeek name mappings  Est: 15m
+  - [x] S58.1.4 Write unit tests for each architecture's name resolution  Est: 20m
+  - [x] S58.1.5 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T58.2 Integrate parameter resolver into model builder  Owner: TBD  Est: 1h
   - Dependencies: T58.1
