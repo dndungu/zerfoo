@@ -772,3 +772,103 @@ func TestModel_Chat_GenerateError(t *testing.T) {
 		t.Error("expected error from Chat when Generate fails")
 	}
 }
+
+// --- assembleModel tests ---
+
+func TestAssembleModel(t *testing.T) {
+	t.Run("uses default maxSeqLen from metadata", func(t *testing.T) {
+		tok := buildTestTokenizer()
+		vocabSize := 8
+		g := buildTestGraph(t, vocabSize, []int{6, 2})
+		eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+		meta := &ModelMetadata{
+			VocabSize:             vocabSize,
+			MaxPositionEmbeddings: 4096,
+			EOSTokenID:            2,
+			BOSTokenID:            1,
+			NumLayers:             1,
+		}
+		info := &registry.ModelInfo{ID: "test", Path: "/tmp/test"}
+
+		m := assembleModel(g, tok, eng, meta, info, 0)
+		if m == nil {
+			t.Fatal("expected non-nil model")
+		}
+		if m.config.VocabSize != vocabSize {
+			t.Errorf("VocabSize = %d, want %d", m.config.VocabSize, vocabSize)
+		}
+		if m.config.MaxPositionEmbeddings != 4096 {
+			t.Errorf("MaxPositionEmbeddings = %d, want 4096", m.config.MaxPositionEmbeddings)
+		}
+		if m.info.ID != "test" {
+			t.Errorf("Info.ID = %q, want %q", m.info.ID, "test")
+		}
+	})
+
+	t.Run("overrides maxSeqLen when positive", func(t *testing.T) {
+		tok := buildTestTokenizer()
+		vocabSize := 8
+		g := buildTestGraph(t, vocabSize, []int{6, 2})
+		eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+		meta := &ModelMetadata{
+			VocabSize:             vocabSize,
+			MaxPositionEmbeddings: 4096,
+			EOSTokenID:            2,
+			NumLayers:             1,
+		}
+		info := &registry.ModelInfo{ID: "test", Path: "/tmp/test"}
+
+		m := assembleModel(g, tok, eng, meta, info, 2048)
+		if m == nil {
+			t.Fatal("expected non-nil model")
+		}
+		// Verify the model can generate (proves the generator was wired correctly).
+		result, err := m.Generate(context.Background(), "hello",
+			WithTemperature(0), WithMaxTokens(5))
+		if err != nil {
+			t.Fatalf("Generate error: %v", err)
+		}
+		if result == "" {
+			t.Error("expected non-empty result")
+		}
+	})
+
+	t.Run("generates correctly with assembled model", func(t *testing.T) {
+		tok := buildTestTokenizer()
+		vocabSize := 8
+		g := buildTestGraph(t, vocabSize, []int{6, 7, 2})
+		eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+		meta := &ModelMetadata{
+			VocabSize:             vocabSize,
+			MaxPositionEmbeddings: 32,
+			EOSTokenID:            2,
+			BOSTokenID:            1,
+			NumLayers:             0,
+			ChatTemplate:          "gemma",
+		}
+		info := &registry.ModelInfo{ID: "test", Path: "/tmp/test"}
+
+		m := assembleModel(g, tok, eng, meta, info, 0)
+		result, err := m.Generate(context.Background(), "hello world",
+			WithTemperature(0), WithMaxTokens(10))
+		if err != nil {
+			t.Fatalf("Generate error: %v", err)
+		}
+		if result != "foo bar" {
+			t.Errorf("Generate = %q, want %q", result, "foo bar")
+		}
+	})
+}
+
+// --- Embed forward error test ---
+
+func TestModel_Embed_ForwardError(t *testing.T) {
+	m := buildErrorModel(t)
+	_, err := m.Embed(context.Background(), "hello")
+	if err == nil {
+		t.Error("expected error from Embed when forward fails")
+	}
+	if !strings.Contains(err.Error(), "forward") {
+		t.Errorf("error = %q, want 'forward' prefix", err.Error())
+	}
+}
