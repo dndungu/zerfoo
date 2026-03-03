@@ -1,0 +1,220 @@
+package tokenizer
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadFromJSON(t *testing.T) {
+	tok, err := LoadFromJSON(filepath.Join("testdata", "tokenizer.json"))
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+
+	// Verify vocabulary was loaded.
+	if got := tok.VocabSize(); got != 22 {
+		t.Errorf("VocabSize() = %d, want 22", got)
+	}
+
+	// Verify encoding.
+	ids, err := tok.Encode("hello")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 17 {
+		t.Errorf("Encode(\"hello\") = %v, want [17]", ids)
+	}
+
+	// Verify multi-word encoding.
+	ids, err = tok.Encode("hello world")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != 17 || ids[1] != 21 {
+		t.Errorf("Encode(\"hello world\") = %v, want [17 21]", ids)
+	}
+
+	// Verify special tokens.
+	special := tok.SpecialTokens()
+	if special.BOS != 1 {
+		t.Errorf("BOS = %d, want 1", special.BOS)
+	}
+	if special.EOS != 2 {
+		t.Errorf("EOS = %d, want 2", special.EOS)
+	}
+	if special.PAD != 3 {
+		t.Errorf("PAD = %d, want 3", special.PAD)
+	}
+	if special.UNK != 0 {
+		t.Errorf("UNK = %d, want 0", special.UNK)
+	}
+}
+
+func TestLoadFromJSON_ByteLevel(t *testing.T) {
+	// Create a byte-level pre-tokenizer fixture.
+	fixture := `{
+  "model": {
+    "type": "BPE",
+    "vocab": {"<unk>": 0, "<s>": 1, "</s>": 2, "a": 3, "b": 4, "ab": 5},
+    "merges": ["a b"]
+  },
+  "added_tokens": [
+    {"id": 0, "content": "<unk>", "special": true},
+    {"id": 1, "content": "<s>", "special": true},
+    {"id": 2, "content": "</s>", "special": true}
+  ],
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {"type": "ByteLevel"}
+    ]
+  }
+}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, err := LoadFromJSON(path)
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+	if !tok.byteLevelBPE {
+		t.Error("expected byteLevelBPE to be true for ByteLevel pre-tokenizer")
+	}
+}
+
+func TestLoadFromJSON_Normalizer(t *testing.T) {
+	fixture := `{
+  "model": {
+    "type": "BPE",
+    "vocab": {"<unk>": 0, "hello": 1, "h": 2, "e": 3, "l": 4, "o": 5},
+    "merges": ["h e", "he l", "hel l", "hell o"]
+  },
+  "added_tokens": [],
+  "normalizer": {
+    "type": "Sequence",
+    "normalizers": [
+      {"type": "Lowercase"},
+      {"type": "NFC"}
+    ]
+  }
+}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, err := LoadFromJSON(path)
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+
+	// "HELLO" should be lowercased then tokenized.
+	ids, err := tok.Encode("HELLO")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("Encode(\"HELLO\") with Lowercase normalizer = %v, want [1]", ids)
+	}
+}
+
+func TestLoadFromJSON_InvalidModel(t *testing.T) {
+	fixture := `{
+  "model": {"type": "WordPiece", "vocab": {}, "merges": []},
+  "added_tokens": []
+}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromJSON(path)
+	if err == nil {
+		t.Fatal("expected error for WordPiece model type")
+	}
+}
+
+func TestLoadFromJSON_InvalidMerge(t *testing.T) {
+	fixture := `{
+  "model": {"type": "BPE", "vocab": {}, "merges": ["nospace"]},
+  "added_tokens": []
+}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromJSON(path)
+	if err == nil {
+		t.Fatal("expected error for invalid merge format")
+	}
+}
+
+func TestLoadFromJSON_FileNotFound(t *testing.T) {
+	_, err := LoadFromJSON("/nonexistent/tokenizer.json")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestLoadFromJSON_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadFromJSON(path)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestLoadFromJSON_RoundTrip(t *testing.T) {
+	tok, err := LoadFromJSON(filepath.Join("testdata", "tokenizer.json"))
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+
+	text := "hello"
+	ids, err := tok.Encode(text)
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	decoded, err := tok.Decode(ids)
+	if err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if decoded != text {
+		t.Errorf("round-trip: %q -> %v -> %q", text, ids, decoded)
+	}
+}
+
+func TestLoadFromJSON_EncodeWithSpecialTokens(t *testing.T) {
+	tok, err := LoadFromJSON(filepath.Join("testdata", "tokenizer.json"))
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+
+	ids, err := tok.EncodeWithSpecialTokens("hello", true, true)
+	if err != nil {
+		t.Fatalf("EncodeWithSpecialTokens error: %v", err)
+	}
+	// BOS=1, hello=17, EOS=2
+	want := []int{1, 17, 2}
+	if len(ids) != len(want) {
+		t.Fatalf("got %v (len=%d), want %v (len=%d)", ids, len(ids), want, len(want))
+	}
+	for i, id := range ids {
+		if id != want[i] {
+			t.Errorf("[%d] = %d, want %d", i, id, want[i])
+		}
+	}
+}
