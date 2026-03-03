@@ -271,3 +271,50 @@ func TestKVCache_BatchedConcat(t *testing.T) {
 		}
 	}
 }
+
+func TestKVCache_SeqLen_EmptyLayers(t *testing.T) {
+	cache := NewKVCache[float32](0)
+	if cache.SeqLen() != 0 {
+		t.Errorf("SeqLen = %d, want 0 for empty cache", cache.SeqLen())
+	}
+}
+
+func TestKVCache_SeqLen_1DKey(t *testing.T) {
+	cache := NewKVCache[float32](1)
+	// Directly set a 1D key (invalid shape for normal use).
+	k, err := tensor.New([]int{4}, []float32{1, 2, 3, 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.layers[0].Key = k
+	if cache.SeqLen() != 0 {
+		t.Errorf("SeqLen = %d, want 0 for 1D key", cache.SeqLen())
+	}
+}
+
+func TestConcatAxis1_NonThreeD(t *testing.T) {
+	a, _ := tensor.New([]int{2, 3}, []float32{1, 2, 3, 4, 5, 6})
+	b, _ := tensor.New([]int{2, 3}, []float32{7, 8, 9, 10, 11, 12})
+	_, err := ConcatAxis1(a, b)
+	if err == nil {
+		t.Error("expected error for 2D tensors")
+	}
+}
+
+func TestConcatAxis1_BatchMismatch(t *testing.T) {
+	a := makeTensor(t, []int{1, 2, 3}, make([]float32, 6))
+	b := makeTensor(t, []int{2, 2, 3}, make([]float32, 12))
+	_, err := ConcatAxis1(a, b)
+	if err == nil {
+		t.Error("expected error for batch mismatch")
+	}
+}
+
+func TestConcatAxis1_DimMismatch(t *testing.T) {
+	a := makeTensor(t, []int{1, 2, 3}, make([]float32, 6))
+	b := makeTensor(t, []int{1, 2, 4}, make([]float32, 8))
+	_, err := ConcatAxis1(a, b)
+	if err == nil {
+		t.Error("expected error for dim mismatch")
+	}
+}
