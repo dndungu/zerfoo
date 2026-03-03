@@ -2344,10 +2344,10 @@ Qwen models (which use attention_bias=true) work correctly.
   - [x] S60.1.5 Verify existing GQA tests still pass  Est: 5m
   - [x] S60.1.6 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T60.2 Run linters and verify for E60  Owner: TBD  Est: 15m
+- [x] T60.2 Run linters and verify for E60  Owner: TBD  Est: 15m
   - Dependencies: T60.1
-  - [ ] S60.2.1 Run golangci-lint, go test -cover -race on layers/attention/  Est: 10m
-  - [ ] S60.2.2 Fix any remaining issues  Est: 5m
+  - [x] S60.2.1 Run golangci-lint, go test -cover -race on layers/attention/  Est: 10m
+  - [x] S60.2.2 Fix any remaining issues  Est: 5m  (no issues found, 94.1% coverage)
 
 #### E61: YaRN RoPE Scaling (Tier 2)
 
