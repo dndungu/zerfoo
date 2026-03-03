@@ -2598,30 +2598,32 @@ Validate DeepSeek V3 model loading and generation with MLA and shared MoE.
 
 Run the full quality gate suite after all Phase 9 work is complete.
 
-- [ ] T69.1 Run full test suite with coverage and race detector  Owner: TBD  Est: 30m
+- [x] T69.1 Run full test suite with coverage and race detector  Owner: TBD  Est: 30m
   - Dependencies: E57, E58, E59, E60, E61, E62, E63, E64, E65, E66, E67, E68
   - Acceptance: go test ./... -cover -race passes. All new code >= 90% coverage.
     No regressions in existing tests. All parity tests skip gracefully when model
     files are not present.
-  - [ ] S69.1.1 Run go test ./... -cover -race  Est: 15m
-  - [ ] S69.1.2 Verify coverage thresholds  Est: 10m
-  - [ ] S69.1.3 Fix any regressions  Est: 5m
+  - [x] S69.1.1 Run go test ./... -cover -race  Est: 15m
+  - [x] S69.1.2 Verify coverage thresholds  Est: 10m
+  - [x] S69.1.3 Fix any regressions  Est: 5m
+  - Note: All packages pass. Key coverage: attention 91.9%, core 93.7%, embeddings 92.5%, inference 93.7%, model 93.9%.
 
-- [ ] T69.2 Run linters and verify  Owner: TBD  Est: 15m
+- [x] T69.2 Run linters and verify  Owner: TBD  Est: 15m
   - Dependencies: T69.1
   - Acceptance: golangci-lint 0 issues. go vet clean.
-  - [ ] S69.2.1 Run golangci-lint run ./...  Est: 5m
-  - [ ] S69.2.2 Run go vet ./...  Est: 5m
-  - [ ] S69.2.3 Fix any remaining issues  Est: 5m
+  - [x] S69.2.1 Run golangci-lint run ./...  Est: 5m
+  - [x] S69.2.2 Run go vet ./...  Est: 5m
+  - [x] S69.2.3 Fix any remaining issues  Est: 5m
+  - Note: 0 lint issues, go vet clean.
 
-- [ ] T69.3 Update documentation  Owner: TBD  Est: 45m
+- [x] T69.3 Update documentation  Owner: TBD  Est: 45m
   - Dependencies: T69.2
   - Acceptance: docs/plan.md Phase 9 tasks marked complete. docs/design.md updated
     with multi-architecture support section listing all supported model families,
     their config fields, and any architecture-specific notes.
-  - [ ] S69.3.1 Update docs/plan.md  Est: 15m
-  - [ ] S69.3.2 Update docs/design.md with supported architectures table  Est: 20m
-  - [ ] S69.3.3 Update hand-off notes  Est: 10m
+  - [x] S69.3.1 Update docs/plan.md  Est: 15m
+  - [x] S69.3.2 Update docs/design.md with supported architectures table  Est: 20m
+  - [x] S69.3.3 Update hand-off notes  Est: 10m
 
 ---
 

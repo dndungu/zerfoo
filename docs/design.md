@@ -810,3 +810,49 @@ inference.Model
     v (serve.NewServer)
 OpenAI-compatible HTTP API
 ```
+
+## 12. Multi-Architecture Support (Phase 9)
+
+Phase 9 extends the inference pipeline to support multiple model architectures
+beyond Gemma 3. Each architecture has distinct attention, normalization, and
+routing patterns that are handled through the config registry and layer builders.
+
+### 12.1 Supported Model Families
+
+| Model Family | Attention | RoPE Variant | Normalization | MoE | Config Parser |
+|---|---|---|---|---|---|
+| Gemma 3 | GQA | Standard | RMSNorm | No | `gemma3` |
+| LLaMA 3 | GQA | Standard | RMSNorm | No | `llama` |
+| Mistral | GQA | Standard | RMSNorm | No | `mistral` |
+| Qwen 2.5 | GQA | YaRN scaling | RMSNorm | No | `qwen2` |
+| Phi-4 | GQA | Partial (0.75) | LayerNorm | No | `phi` |
+| DeepSeek V3 | MLA | Standard | RMSNorm | Shared expert | `deepseek` |
+
+### 12.2 Architecture-Specific Features
+
+**YaRN Scaling (Qwen 2.5):** `embeddings.WithYaRNScaling(factor, origMaxLen)`
+classifies frequency bands into low/medium/high and applies differential scaling
+to extend context beyond the original training length.
+
+**Partial RoPE (Phi-4):** `embeddings.WithRotaryDimFraction(fraction)` rotates
+only a fraction of head dimensions, leaving the rest as pass-through. Phi-4
+uses fraction=0.75.
+
+**Multi-head Latent Attention (DeepSeek V3):** `attention.MultiHeadLatentAttention`
+compresses KV into a low-rank latent via down-projection (`W_DKV`), then
+up-projects to keys (`W_UK`) and values (`W_UV`), reducing KV cache size.
+
+**Shared Expert MoE (DeepSeek V3):** `core.MixtureOfExperts.SharedExpert` runs
+one expert on every token and adds its output to the weighted routed sum.
+
+**Tied Embeddings (Phi-4, Gemma 3):** `core.NewTiedLMHead` reuses the token
+embedding weight matrix (transposed) as the output projection, halving the
+parameter count for the LM head.
+
+### 12.3 Config Registry
+
+`inference.ConfigRegistry` maps model family names to config parsers that extract
+`ModelMetadata` from `config.json`. Each parser reads architecture-specific fields
+(e.g., `rope_scaling`, `partial_rotary_factor`, `n_shared_experts`) and maps them
+to the common metadata struct. Global attributes (rope scaling, partial rotation)
+are injected via `model.WithGlobalAttributes` during graph construction.
