@@ -210,7 +210,7 @@ same-node workers). Tensors stay on-device throughout the all-reduce.
 Make the CUDA memory pool device-aware so pointers allocated on one GPU are
 never reused on another.
 
-- [ ] T70.1 Add deviceID parameter to MemPool.Alloc and MemPool.Free  Owner: TBD  Est: 1h
+- [x] T70.1 Add deviceID parameter to MemPool.Alloc and MemPool.Free  Owner: TBD  Est: 1h  Completed: 2026-03-03
   - Dependencies: None
   - Files: internal/cuda/mempool.go
   - Acceptance: MemPool.Alloc(deviceID int, byteSize int) calls cuda.SetDevice(deviceID)
@@ -218,19 +218,20 @@ never reused on another.
     the pointer under (deviceID, byteSize). Cache key is (deviceID, byteSize). Drain()
     iterates all devices, calling SetDevice before Free for each. No cross-device pointer
     reuse possible. Existing behavior preserved when all calls use deviceID=0.
-  - [ ] S70.1.1 Change cache type from map[int][]unsafe.Pointer to map[int]map[int][]unsafe.Pointer  Est: 15m
-  - [ ] S70.1.2 Update Alloc to accept deviceID, call SetDevice before Malloc  Est: 15m
-  - [ ] S70.1.3 Update Free to accept deviceID, store under (deviceID, byteSize)  Est: 10m
-  - [ ] S70.1.4 Update Drain to iterate per-device, call SetDevice before Free  Est: 10m
-  - [ ] S70.1.5 Write unit tests: alloc/free on device 0, alloc/free on device 1, no cross-reuse  Est: 20m
-  - [ ] S70.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S70.1.1 Change cache type from map[int][]unsafe.Pointer to map[int]map[int][]unsafe.Pointer  Est: 15m
+  - [x] S70.1.2 Update Alloc to accept deviceID, call SetDevice before Malloc  Est: 15m
+  - [x] S70.1.3 Update Free to accept deviceID, store under (deviceID, byteSize)  Est: 10m
+  - [x] S70.1.4 Update Drain to iterate per-device, call SetDevice before Free  Est: 10m
+  - [x] S70.1.5 Write unit tests: alloc/free on device 0, alloc/free on device 1, no cross-reuse  Est: 20m
+  - [x] S70.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - Note: Also updated all callers in compute/gpu_engine.go and compute/gpu_kernels.go to pass deviceID=0.
 
 #### E71: Device-Affine GPU Engine
 
 Add device ID tracking to GPUEngine so each engine is explicitly bound to a
 specific GPU and calls SetDevice before all CUDA operations.
 
-- [ ] T71.1 Add deviceID field to GPUEngine and update constructor  Owner: TBD  Est: 1.5h
+- [x] T71.1 Add deviceID field to GPUEngine and update constructor  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
   - Dependencies: E70
   - Files: compute/gpu_engine.go
   - Acceptance: GPUEngine gains a `deviceID int` field. NewGPUEngine(ops, ...int)
@@ -246,7 +247,7 @@ specific GPU and calls SetDevice before all CUDA operations.
   - [ ] S71.1.6 Write tests: create engine on device 0, verify DeviceID(); create on device 1 if available  Est: 20m
   - [ ] S71.1.7 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T71.2 Add SetDevice guard to all GPUEngine methods  Owner: TBD  Est: 1.5h
+- [x] T71.2 Add SetDevice guard to all GPUEngine methods  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
   - Dependencies: T71.1
   - Files: compute/gpu_engine.go, compute/gpu_kernels.go
   - Acceptance: Every method on GPUEngine that dispatches a CUDA kernel or cuBLAS
@@ -265,7 +266,7 @@ specific GPU and calls SetDevice before all CUDA operations.
   - [ ] S71.2.4 Write concurrent test: 2 engines on 2 devices, parallel MatMul (skip if < 2 GPUs)  Est: 20m
   - [ ] S71.2.5 Run golangci-lint and go test -cover -race  Est: 5m
 
-- [ ] T71.3 Update all GPUEngine pool calls to pass deviceID  Owner: TBD  Est: 45m
+- [x] T71.3 Update all GPUEngine pool calls to pass deviceID  Owner: TBD  Est: 45m  Completed: 2026-03-03
   - Dependencies: T71.1, E70
   - Files: compute/gpu_engine.go, compute/gpu_kernels.go
   - Acceptance: Every call to e.pool.Alloc() and e.pool.Free() passes e.deviceID.
@@ -276,7 +277,7 @@ specific GPU and calls SetDevice before all CUDA operations.
   - [ ] S71.3.3 Grep for remaining pool.Alloc/pool.Free calls without deviceID; fix any  Est: 10m
   - [ ] S71.3.4 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T71.4 Run linters and verify coverage for E71  Owner: TBD  Est: 15m
+- [x] T71.4 Run linters and verify coverage for E71  Owner: TBD  Est: 15m  Completed: 2026-03-03
   - Dependencies: T71.3
   - Acceptance: golangci-lint 0 issues on compute/. go test -tags cuda -cover -race
     passes. Coverage >= 95%.
@@ -288,7 +289,7 @@ specific GPU and calls SetDevice before all CUDA operations.
 Add device ID tracking to GPUStorage so each tensor knows which GPU it resides
 on.
 
-- [ ] T72.1 Add deviceID field to GPUStorage and update constructors  Owner: TBD  Est: 1.5h
+- [x] T72.1 Add deviceID field to GPUStorage and update constructors  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
   - Dependencies: None (can be done in parallel with E71 after E70)
   - Files: tensor/gpu_storage.go
   - Acceptance: GPUStorage gains a `deviceID int` field and a `DeviceID() int`
@@ -300,31 +301,31 @@ on.
     deviceID=0.
   - Risk: All callers of NewGPUStorage must be updated to pass deviceID. This
     includes gpu_engine.go, transfer.go, and any test files.
-  - [ ] S72.1.1 Add deviceID int field to GPUStorage struct (line 17)  Est: 5m
-  - [ ] S72.1.2 Add DeviceID() int method  Est: 5m
-  - [ ] S72.1.3 Update NewGPUStorage to accept deviceID, call SetDevice  Est: 15m
-  - [ ] S72.1.4 Update NewGPUStorageFromSlice to accept deviceID, call SetDevice  Est: 15m
-  - [ ] S72.1.5 Update NewGPUStorageFromPtr to accept deviceID  Est: 10m
-  - [ ] S72.1.6 Add SetDevice call in TrySlice and TrySet  Est: 10m
-  - [ ] S72.1.7 Update all callers (grep for NewGPUStorage, NewGPUStorageFromSlice, NewGPUStorageFromPtr)  Est: 15m
-  - [ ] S72.1.8 Write tests: create storage on device 0 and device 1, verify DeviceID  Est: 15m
-  - [ ] S72.1.9 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S72.1.1 Add deviceID int field to GPUStorage struct (line 17)  Est: 5m
+  - [x] S72.1.2 Add DeviceID() int method  Est: 5m
+  - [x] S72.1.3 Update NewGPUStorage to accept deviceID, call SetDevice  Est: 15m
+  - [x] S72.1.4 Update NewGPUStorageFromSlice to accept deviceID, call SetDevice  Est: 15m
+  - [x] S72.1.5 Update NewGPUStorageFromPtr to accept deviceID  Est: 10m
+  - [x] S72.1.6 Add SetDevice call in TrySlice and TrySet  Est: 10m
+  - [x] S72.1.7 Update all callers (grep for NewGPUStorage, NewGPUStorageFromSlice, NewGPUStorageFromPtr)  Est: 15m
+  - [x] S72.1.8 Write tests: create storage on device 0 and device 1, verify DeviceID  Est: 15m
+  - [x] S72.1.9 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T72.2 Update device/cuda_allocator.go with device affinity  Owner: TBD  Est: 30m
+- [x] T72.2 Update device/cuda_allocator.go with device affinity  Owner: TBD  Est: 30m  Completed: 2026-03-03
   - Dependencies: None
   - Files: device/cuda_allocator.go
   - Acceptance: cudaAllocator gains a deviceID int field. NewCUDAAllocator(deviceID)
     stores it. Allocate() calls cuda.SetDevice(a.deviceID) before cuda.Malloc().
     Free() calls cuda.SetDevice(a.deviceID) before cuda.Free(). Update
     cuda_device.go newCUDADevice to pass deviceID to NewCUDAAllocator.
-  - [ ] S72.2.1 Add deviceID field to cudaAllocator  Est: 5m
-  - [ ] S72.2.2 Update NewCUDAAllocator to accept deviceID  Est: 5m
-  - [ ] S72.2.3 Add SetDevice calls in Allocate and Free  Est: 10m
-  - [ ] S72.2.4 Update newCUDADevice to pass deviceID  Est: 5m
-  - [ ] S72.2.5 Write tests for device-affine allocation  Est: 10m
-  - [ ] S72.2.6 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S72.2.1 Add deviceID field to cudaAllocator  Est: 5m
+  - [x] S72.2.2 Update NewCUDAAllocator to accept deviceID  Est: 5m
+  - [x] S72.2.3 Add SetDevice calls in Allocate and Free  Est: 10m
+  - [x] S72.2.4 Update newCUDADevice to pass deviceID  Est: 5m
+  - [x] S72.2.5 Write tests for device-affine allocation  Est: 10m
+  - [x] S72.2.6 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T72.3 Add cross-device tensor transfer  Owner: TBD  Est: 1h
+- [x] T72.3 Add cross-device tensor transfer  Owner: TBD  Est: 1h  Completed: 2026-03-03
   - Dependencies: T72.1
   - Files: tensor/transfer.go, internal/cuda/runtime.go
   - Acceptance: New function ToGPUDevice[T](t *TensorNumeric[T], deviceID int)
@@ -333,18 +334,18 @@ on.
     uses cudaMemcpyHostToDevice with SetDevice. New CGo binding
     cuda.MemcpyPeer(dst, dstDevice, src, srcDevice, size) wraps cudaMemcpyPeer.
     Update existing ToGPU to default to device 0 for backwards compatibility.
-  - [ ] S72.3.1 Add MemcpyPeer binding to internal/cuda/runtime.go  Est: 15m
-  - [ ] S72.3.2 Implement ToGPUDevice[T] in tensor/transfer.go  Est: 20m
-  - [ ] S72.3.3 Update existing ToGPU to call ToGPUDevice with device 0  Est: 5m
-  - [ ] S72.3.4 Write tests: CPU to GPU:0, CPU to GPU:1, GPU:0 to GPU:1 (skip if < 2 GPUs)  Est: 20m
-  - [ ] S72.3.5 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S72.3.1 Add MemcpyPeer binding to internal/cuda/runtime.go  Est: 15m
+  - [x] S72.3.2 Implement ToGPUDevice[T] in tensor/transfer.go  Est: 20m
+  - [x] S72.3.3 Update existing ToGPU to call ToGPUDevice with device 0  Est: 5m
+  - [x] S72.3.4 Write tests: CPU to GPU:0, CPU to GPU:1, GPU:0 to GPU:1 (skip if < 2 GPUs)  Est: 20m
+  - [x] S72.3.5 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T72.4 Run linters and verify coverage for E72  Owner: TBD  Est: 15m
+- [x] T72.4 Run linters and verify coverage for E72  Owner: TBD  Est: 15m  Completed: 2026-03-03
   - Dependencies: T72.3
   - Acceptance: golangci-lint 0 issues on tensor/, device/. go test -tags cuda
     -cover -race passes. Coverage >= 95%.
-  - [ ] S72.4.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [ ] S72.4.2 Fix any remaining issues  Est: 5m
+  - [x] S72.4.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [x] S72.4.2 Fix any remaining issues  Est: 5m
 
 #### E73: Multi-GPU Inference
 
