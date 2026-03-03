@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 
@@ -1127,5 +1128,151 @@ func TestModelForward_EmbeddingError(t *testing.T) {
 	_, err = m.Forward(ctx)
 	if err == nil {
 		t.Error("expected error when embedding receives no inputs")
+	}
+}
+
+// --- ParamResolver integration tests (T58.2) ---
+
+// resolverParamLookupBuilder returns a LayerBuilder that expects a specific parameter
+// name to exist in the params map. It fails if the parameter is not found.
+func resolverParamLookupBuilder(expectedParamName string) LayerBuilder[float32] {
+	return func(
+		_ compute.Engine[float32],
+		_ numeric.Arithmetic[float32],
+		_ string,
+		params map[string]*graph.Parameter[float32],
+		_ map[string]any,
+	) (graph.Node[float32], error) {
+		if _, ok := params[expectedParamName]; !ok {
+			return nil, fmt.Errorf("expected parameter %q not found in params", expectedParamName)
+		}
+		val, _ := tensor.New[float32]([]int{1}, []float32{1})
+		return &parameterNode[float32]{value: val}, nil
+	}
+}
+
+func TestBuildFromZMF_WithParamResolver_PhiDenseProj(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	// Register a layer builder that looks up "model.layers.0.self_attn.o_proj.weight"
+	// (canonical name) even though the ZMF param is "model.layers.0.self_attn.dense_proj.weight"
+	RegisterLayer("TestPhiAttnOp", resolverParamLookupBuilder("model.layers.0.self_attn.o_proj.weight"))
+	defer UnregisterLayer("TestPhiAttnOp")
+
+	paramData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(paramData, math.Float32bits(1.0))
+
+	zmfModel := &zmf.Model{
+		Graph: &zmf.Graph{
+			Parameters: map[string]*zmf.Tensor{
+				// Phi-style name: dense_proj instead of o_proj
+				"model.layers.0.self_attn.dense_proj.weight": {
+					Dtype: zmf.Tensor_FLOAT32,
+					Shape: []int64{1},
+					Data:  paramData,
+				},
+			},
+			Inputs: []*zmf.ValueInfo{
+				{Name: "input", Shape: []int64{1}},
+			},
+			Nodes: []*zmf.Node{
+				{Name: "attn_node", OpType: "TestPhiAttnOp", Inputs: []string{"input"}},
+			},
+			Outputs: []*zmf.ValueInfo{{Name: "attn_node"}},
+		},
+	}
+
+	// Without resolver, the canonical name would not be in params and the build would fail
+	_, err := BuildFromZMF[float32](engine, ops, zmfModel)
+	if err == nil {
+		t.Fatal("expected error without resolver, but got nil")
+	}
+
+	// With Phi resolver, dense_proj is aliased to o_proj and the build succeeds
+	g, err := BuildFromZMF[float32](engine, ops, zmfModel, WithParamResolver(NewParamResolver("phi")))
+	if err != nil {
+		t.Fatalf("BuildFromZMF with Phi resolver failed: %v", err)
+	}
+	if g == nil {
+		t.Fatal("expected non-nil graph")
+	}
+}
+
+func TestBuildFromZMF_WithParamResolver_IdentityPreservesExisting(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	// Layer that looks up a param by its original name
+	RegisterLayer("TestIdentityResolveOp", resolverParamLookupBuilder("model.layers.0.self_attn.q_proj.weight"))
+	defer UnregisterLayer("TestIdentityResolveOp")
+
+	paramData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(paramData, math.Float32bits(2.0))
+
+	zmfModel := &zmf.Model{
+		Graph: &zmf.Graph{
+			Parameters: map[string]*zmf.Tensor{
+				"model.layers.0.self_attn.q_proj.weight": {
+					Dtype: zmf.Tensor_FLOAT32,
+					Shape: []int64{1},
+					Data:  paramData,
+				},
+			},
+			Inputs: []*zmf.ValueInfo{
+				{Name: "input", Shape: []int64{1}},
+			},
+			Nodes: []*zmf.Node{
+				{Name: "node1", OpType: "TestIdentityResolveOp", Inputs: []string{"input"}},
+			},
+			Outputs: []*zmf.ValueInfo{{Name: "node1"}},
+		},
+	}
+
+	// With identity resolver (llama), original names are preserved
+	g, err := BuildFromZMF[float32](engine, ops, zmfModel, WithParamResolver(NewParamResolver("llama")))
+	if err != nil {
+		t.Fatalf("BuildFromZMF with Llama resolver failed: %v", err)
+	}
+	if g == nil {
+		t.Fatal("expected non-nil graph")
+	}
+}
+
+func TestBuildFromZMF_WithoutResolver_BackwardCompatible(t *testing.T) {
+	// Verify that all existing tests still pass without any resolver option.
+	// This test creates a minimal model and builds it with no options.
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	paramData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(paramData, math.Float32bits(1.0))
+
+	zmfModel := &zmf.Model{
+		Graph: &zmf.Graph{
+			Parameters: map[string]*zmf.Tensor{
+				"weight": {
+					Dtype: zmf.Tensor_FLOAT32,
+					Shape: []int64{1},
+					Data:  paramData,
+				},
+			},
+			Inputs: []*zmf.ValueInfo{
+				{Name: "input", Shape: []int64{1}},
+				{Name: "weight", Shape: []int64{1}},
+			},
+			Outputs: []*zmf.ValueInfo{
+				{Name: "input"},
+			},
+		},
+	}
+
+	// No resolver option - should work exactly as before
+	g, err := BuildFromZMF[float32](engine, ops, zmfModel)
+	if err != nil {
+		t.Fatalf("BuildFromZMF without resolver failed: %v", err)
+	}
+	if g == nil {
+		t.Fatal("expected non-nil graph")
 	}
 }
