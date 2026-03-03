@@ -406,6 +406,247 @@ func TestDefaultArchConfigRegistry_LlamaRegistered(t *testing.T) {
 	}
 }
 
+func TestMistralConfigParser(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  map[string]interface{}
+		want ModelMetadata
+	}{
+		{
+			name: "mistral 7B full",
+			raw: map[string]interface{}{
+				"model_type":              "mistral",
+				"vocab_size":              float64(32000),
+				"hidden_size":             float64(4096),
+				"num_hidden_layers":       float64(32),
+				"num_attention_heads":     float64(32),
+				"num_key_value_heads":     float64(8),
+				"intermediate_size":       float64(14336),
+				"max_position_embeddings": float64(32768),
+				"rope_theta":              float64(10000),
+				"eos_token_id":            float64(2),
+				"bos_token_id":            float64(1),
+				"sliding_window":          float64(4096),
+			},
+			want: ModelMetadata{
+				Architecture:          "mistral",
+				VocabSize:             32000,
+				HiddenSize:            4096,
+				NumLayers:             32,
+				NumQueryHeads:         32,
+				NumKeyValueHeads:      8,
+				IntermediateSize:      14336,
+				MaxPositionEmbeddings: 32768,
+				RopeTheta:             10000,
+				EOSTokenID:            2,
+				BOSTokenID:            1,
+				SlidingWindow:         4096,
+			},
+		},
+		{
+			name: "mistral minimal defaults rope_theta to 10000",
+			raw: map[string]interface{}{
+				"model_type":          "mistral",
+				"vocab_size":          float64(32000),
+				"num_hidden_layers":   float64(32),
+				"num_attention_heads": float64(32),
+			},
+			want: ModelMetadata{
+				Architecture:  "mistral",
+				VocabSize:     32000,
+				NumLayers:     32,
+				NumQueryHeads: 32,
+				RopeTheta:     10000,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseMistralConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("parseMistralConfig error: %v", err)
+			}
+			assertMetadataEqual(t, tc.want, *got)
+		})
+	}
+}
+
+func TestMistralConfigParser_Fixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/mistral7b_config.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	meta, err := parseMistralConfig(raw)
+	if err != nil {
+		t.Fatalf("parseMistralConfig error: %v", err)
+	}
+
+	assertMetadataEqual(t, ModelMetadata{
+		Architecture:          "mistral",
+		VocabSize:             32000,
+		HiddenSize:            4096,
+		NumLayers:             32,
+		NumQueryHeads:         32,
+		NumKeyValueHeads:      8,
+		IntermediateSize:      14336,
+		MaxPositionEmbeddings: 32768,
+		RopeTheta:             10000,
+		EOSTokenID:            2,
+		BOSTokenID:            1,
+		SlidingWindow:         4096,
+	}, *meta)
+}
+
+func TestQwenConfigParser(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  map[string]interface{}
+		want ModelMetadata
+	}{
+		{
+			name: "qwen2.5 7B full",
+			raw: map[string]interface{}{
+				"model_type":              "qwen2",
+				"vocab_size":              float64(152064),
+				"hidden_size":             float64(3584),
+				"num_hidden_layers":       float64(28),
+				"num_attention_heads":     float64(28),
+				"num_key_value_heads":     float64(4),
+				"intermediate_size":       float64(18944),
+				"max_position_embeddings": float64(32768),
+				"rope_theta":              float64(1000000),
+				"eos_token_id":            float64(151645),
+				"bos_token_id":            float64(151643),
+				"sliding_window":          float64(32768),
+				"use_sliding_window":      false,
+				"rope_scaling": map[string]interface{}{
+					"type":                             "yarn",
+					"factor":                           float64(4.0),
+					"original_max_position_embeddings": float64(32768),
+				},
+			},
+			want: ModelMetadata{
+				Architecture:          "qwen2",
+				VocabSize:             152064,
+				HiddenSize:            3584,
+				NumLayers:             28,
+				NumQueryHeads:         28,
+				NumKeyValueHeads:      4,
+				IntermediateSize:      18944,
+				MaxPositionEmbeddings: 32768,
+				RopeTheta:             1000000,
+				EOSTokenID:            151645,
+				BOSTokenID:            151643,
+				SlidingWindow:         32768,
+				AttentionBias:         true,
+			},
+		},
+		{
+			name: "qwen2 minimal defaults",
+			raw: map[string]interface{}{
+				"model_type":          "qwen2",
+				"vocab_size":          float64(151936),
+				"num_hidden_layers":   float64(32),
+				"num_attention_heads": float64(40),
+			},
+			want: ModelMetadata{
+				Architecture:  "qwen2",
+				VocabSize:     151936,
+				NumLayers:     32,
+				NumQueryHeads: 40,
+				RopeTheta:     1000000,
+				AttentionBias: true,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseQwenConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("parseQwenConfig error: %v", err)
+			}
+			assertMetadataEqual(t, tc.want, *got)
+		})
+	}
+}
+
+func TestQwenConfigParser_Fixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/qwen25_7b_config.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	meta, err := parseQwenConfig(raw)
+	if err != nil {
+		t.Fatalf("parseQwenConfig error: %v", err)
+	}
+
+	assertMetadataEqual(t, ModelMetadata{
+		Architecture:          "qwen2",
+		VocabSize:             152064,
+		HiddenSize:            3584,
+		NumLayers:             28,
+		NumQueryHeads:         28,
+		NumKeyValueHeads:      4,
+		IntermediateSize:      18944,
+		MaxPositionEmbeddings: 32768,
+		RopeTheta:             1000000,
+		EOSTokenID:            151645,
+		BOSTokenID:            151643,
+		SlidingWindow:         32768,
+		AttentionBias:         true,
+	}, *meta)
+
+	if meta.RopeScaling == nil {
+		t.Fatal("RopeScaling should not be nil")
+	}
+	if meta.RopeScaling.Type != "yarn" {
+		t.Errorf("RopeScaling.Type = %q, want %q", meta.RopeScaling.Type, "yarn")
+	}
+	if meta.RopeScaling.Factor != 4.0 {
+		t.Errorf("RopeScaling.Factor = %f, want 4.0", meta.RopeScaling.Factor)
+	}
+}
+
+func TestDefaultArchConfigRegistry_MistralAndQwenRegistered(t *testing.T) {
+	reg := DefaultArchConfigRegistry()
+
+	for _, tc := range []struct {
+		modelType string
+		wantArch  string
+	}{
+		{"mistral", "mistral"},
+		{"qwen2", "qwen2"},
+	} {
+		t.Run(tc.modelType, func(t *testing.T) {
+			raw := map[string]interface{}{
+				"model_type":          tc.modelType,
+				"vocab_size":          float64(32000),
+				"num_hidden_layers":   float64(32),
+				"num_attention_heads": float64(32),
+			}
+			meta, err := reg.Parse(raw)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if meta.Architecture != tc.wantArch {
+				t.Errorf("Architecture = %q, want %q", meta.Architecture, tc.wantArch)
+			}
+		})
+	}
+}
+
 // assertMetadataEqual compares key fields of two ModelMetadata values.
 func assertMetadataEqual(t *testing.T, want, got ModelMetadata) {
 	t.Helper()
