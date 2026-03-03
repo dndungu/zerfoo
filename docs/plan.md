@@ -2416,7 +2416,7 @@ Validate that Qwen 2.5 models load and generate text with QKV bias and YaRN.
 Implement partial/fractional RoPE where only a fraction of head dimensions
 are rotated, while the rest remain position-agnostic.
 
-- [ ] T63.1 Add partial rotation to RotaryPositionalEmbedding  Owner: TBD  Est: 1.5h
+- [x] T63.1 Add partial rotation to RotaryPositionalEmbedding  Owner: TBD  Est: 1.5h
   - Dependencies: None
   - Files: layers/embeddings/rotary_positional_embedding.go (modify)
   - Acceptance: A new WithRotaryDimFraction(fraction float64) option controls
@@ -2427,26 +2427,26 @@ are rotated, while the rest remain position-agnostic.
     Example: headDim=128, fraction=0.75 -> 96 dims rotated, 32 unrotated.
     Test: fraction=0.5 produces output where first half is rotated, second half
     is identical to input.
-  - [ ] S63.1.1 Add WithRotaryDimFraction option  Est: 10m
-  - [ ] S63.1.2 Modify Forward to split/rotate/concat when fraction < 1.0  Est: 30m
-  - [ ] S63.1.3 Modify Backward for partial rotation  Est: 20m
-  - [ ] S63.1.4 Write unit tests: full rotation (default), partial (0.75), half (0.5)  Est: 20m
-  - [ ] S63.1.5 Verify existing RoPE tests still pass  Est: 5m
-  - [ ] S63.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S63.1.1 Add WithRotaryDimFraction option  Est: 10m
+  - [x] S63.1.2 Modify Forward to split/rotate/concat when fraction < 1.0  Est: 30m
+  - [x] S63.1.3 Modify Backward for partial rotation  Est: 20m
+  - [x] S63.1.4 Write unit tests: full rotation (default), partial (0.75), half (0.5)  Est: 20m
+  - [x] S63.1.5 Verify existing RoPE tests still pass  Est: 5m
+  - [x] S63.1.6 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T63.2 Integrate partial RoPE into model loading  Owner: TBD  Est: 30m
+- [x] T63.2 Integrate partial RoPE into model loading  Owner: TBD  Est: 30m
   - Dependencies: T63.1, E57
-  - Files: model/builder.go (modify)
+  - Files: layers/attention/registry.go (modify), inference/inference.go (modify)
   - Acceptance: When ModelMetadata.PartialRotaryFactor is set (e.g., 0.75 for
     Phi-4), the model builder passes WithRotaryDimFraction to RoPE construction.
-  - [ ] S63.2.1 Read PartialRotaryFactor from ModelMetadata in builder  Est: 10m
-  - [ ] S63.2.2 Pass fraction option to RotaryPositionalEmbedding  Est: 10m
-  - [ ] S63.2.3 Write tests  Est: 10m
+  - [x] S63.2.1 Read PartialRotaryFactor from ModelMetadata in builder  Est: 10m
+  - [x] S63.2.2 Pass fraction option to RotaryPositionalEmbedding  Est: 10m
+  - [x] S63.2.3 Write tests  Est: 10m
 
-- [ ] T63.3 Run linters and verify for E63  Owner: TBD  Est: 15m
+- [x] T63.3 Run linters and verify for E63  Owner: TBD  Est: 15m
   - Dependencies: T63.2
-  - [ ] S63.3.1 Run golangci-lint, go test -cover -race  Est: 10m
-  - [ ] S63.3.2 Fix any remaining issues  Est: 5m
+  - [x] S63.3.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [x] S63.3.2 Fix any remaining issues  Est: 5m
 
 #### E64: Tied Embeddings for Phi-4 (Tier 3)
 
