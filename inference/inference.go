@@ -38,6 +38,16 @@ type ModelMetadata struct {
 	EOSTokenID            int    `json:"eos_token_id"`
 	BOSTokenID            int    `json:"bos_token_id"`
 	ChatTemplate          string `json:"chat_template"`
+
+	// Extended fields for multi-architecture support.
+	IntermediateSize  int                `json:"intermediate_size"`
+	NumQueryHeads     int                `json:"num_attention_heads"`
+	NumKeyValueHeads  int                `json:"num_key_value_heads"`
+	RopeTheta         float64            `json:"rope_theta"`
+	RopeScaling       *RopeScalingConfig `json:"rope_scaling,omitempty"`
+	TieWordEmbeddings bool               `json:"tie_word_embeddings"`
+	SlidingWindow     int                `json:"sliding_window"`
+	AttentionBias     bool               `json:"attention_bias"`
 }
 
 // Option configures model loading.
