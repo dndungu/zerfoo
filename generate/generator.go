@@ -1,0 +1,232 @@
+package generate
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/zerfoo/zerfoo/compute"
+	"github.com/zerfoo/zerfoo/graph"
+	"github.com/zerfoo/zerfoo/pkg/tokenizer"
+	"github.com/zerfoo/zerfoo/tensor"
+)
+
+// ModelConfig holds model architecture parameters needed for generation.
+type ModelConfig struct {
+	VocabSize  int // Total tokens in vocabulary
+	MaxSeqLen  int // Maximum sequence length the model supports
+	EOSTokenID int // End-of-sequence token ID
+	BOSTokenID int // Beginning-of-sequence token ID
+	NumLayers  int // Number of transformer layers (for KV cache sizing)
+}
+
+// SamplingConfig controls how tokens are selected during generation.
+type SamplingConfig struct {
+	Temperature       float64  // Divide logits by this value; 0 = greedy
+	TopK              int      // Keep only top K tokens; 0 = disabled
+	TopP              float64  // Keep tokens with cumulative prob >= P; 1.0 = disabled
+	RepetitionPenalty float64  // Penalize repeated tokens; 1.0 = disabled
+	MaxNewTokens      int      // Maximum number of tokens to generate
+	StopTokenIDs      []int    // Stop when any of these token IDs are generated
+	StopStrings       []string // Stop when output contains any of these strings
+}
+
+// DefaultSamplingConfig returns a SamplingConfig with sensible defaults.
+func DefaultSamplingConfig() SamplingConfig {
+	return SamplingConfig{
+		Temperature:       1.0,
+		TopK:              0,
+		TopP:              1.0,
+		RepetitionPenalty: 1.0,
+		MaxNewTokens:      256,
+	}
+}
+
+// Generator produces text autoregressively using a loaded model graph.
+type Generator[T tensor.Numeric] struct {
+	graph     *graph.Graph[T]
+	tokenizer tokenizer.Tokenizer
+	engine    compute.Engine[T]
+	config    ModelConfig
+}
+
+// NewGenerator creates a Generator from a model graph, tokenizer, engine, and config.
+func NewGenerator[T tensor.Numeric](
+	g *graph.Graph[T],
+	tok tokenizer.Tokenizer,
+	eng compute.Engine[T],
+	cfg ModelConfig,
+) *Generator[T] {
+	return &Generator[T]{
+		graph:     g,
+		tokenizer: tok,
+		engine:    eng,
+		config:    cfg,
+	}
+}
+
+// Generate produces text from a prompt using the given sampling configuration.
+// It tokenizes the prompt, runs the autoregressive loop with KV caching, and
+// returns the generated text (excluding the prompt).
+func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc SamplingConfig) (string, error) {
+	if sc.MaxNewTokens <= 0 {
+		sc.MaxNewTokens = 256
+	}
+
+	promptIDs, err := gen.tokenizer.Encode(prompt)
+	if err != nil {
+		return "", fmt.Errorf("encode prompt: %w", err)
+	}
+	if len(promptIDs) == 0 {
+		return "", fmt.Errorf("prompt produced no tokens")
+	}
+
+	cache := NewKVCache[T](gen.config.NumLayers)
+	genCtx := WithKVCache(ctx, cache)
+
+	stopSet := make(map[int]bool, len(sc.StopTokenIDs)+1)
+	for _, id := range sc.StopTokenIDs {
+		stopSet[id] = true
+	}
+	stopSet[gen.config.EOSTokenID] = true
+
+	generatedIDs := make([]int, 0, sc.MaxNewTokens)
+
+	// Prefill: run the full prompt through the graph.
+	prefillTensor, err := gen.idsToTensor(promptIDs)
+	if err != nil {
+		return "", fmt.Errorf("create prefill tensor: %w", err)
+	}
+
+	logits, err := gen.graph.Forward(genCtx, prefillTensor)
+	if err != nil {
+		return "", fmt.Errorf("prefill forward: %w", err)
+	}
+
+	nextToken, err := gen.sampleFromLogits(logits, sc, generatedIDs)
+	if err != nil {
+		return "", fmt.Errorf("sample after prefill: %w", err)
+	}
+
+	if stopSet[nextToken] {
+		return "", nil
+	}
+	generatedIDs = append(generatedIDs, nextToken)
+
+	if stopped, text := gen.checkStop(generatedIDs, sc.StopStrings); stopped {
+		return text, nil
+	}
+
+	// Autoregressive decode loop.
+	for range sc.MaxNewTokens - 1 {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+
+		tokenTensor, tErr := gen.idsToTensor([]int{nextToken})
+		if tErr != nil {
+			return "", fmt.Errorf("create token tensor: %w", tErr)
+		}
+
+		logits, err = gen.graph.Forward(genCtx, tokenTensor)
+		if err != nil {
+			return "", fmt.Errorf("decode forward: %w", err)
+		}
+
+		nextToken, err = gen.sampleFromLogits(logits, sc, generatedIDs)
+		if err != nil {
+			return "", fmt.Errorf("sample: %w", err)
+		}
+
+		if stopSet[nextToken] {
+			break
+		}
+		generatedIDs = append(generatedIDs, nextToken)
+
+		if stopped, text := gen.checkStop(generatedIDs, sc.StopStrings); stopped {
+			return text, nil
+		}
+	}
+
+	if len(generatedIDs) == 0 {
+		return "", nil
+	}
+
+	result, err := gen.tokenizer.Decode(generatedIDs)
+	if err != nil {
+		return "", fmt.Errorf("decode output: %w", err)
+	}
+	return result, nil
+}
+
+// sampleFromLogits extracts the last-position logits from a [1, seqLen, vocabSize]
+// tensor and samples a token.
+func (gen *Generator[T]) sampleFromLogits(
+	logits *tensor.TensorNumeric[T],
+	sc SamplingConfig,
+	generatedTokens []int,
+) (int, error) {
+	shape := logits.Shape()
+	if len(shape) != 3 {
+		return 0, fmt.Errorf("expected 3D logits [batch, seq, vocab], got shape %v", shape)
+	}
+	vocabSize := shape[2]
+	seqLen := shape[1]
+
+	data := logits.Data()
+	lastStart := (seqLen - 1) * vocabSize
+	if lastStart+vocabSize > len(data) {
+		return 0, fmt.Errorf("logits data too short: %d < %d", len(data), lastStart+vocabSize)
+	}
+
+	logitsF64 := make([]float64, vocabSize)
+	for i := range vocabSize {
+		logitsF64[i] = float64(data[lastStart+i])
+	}
+
+	if sc.RepetitionPenalty > 0 && sc.RepetitionPenalty != 1.0 {
+		applyRepetitionPenalty(logitsF64, generatedTokens, sc.RepetitionPenalty)
+	}
+
+	if sc.Temperature <= 0 {
+		return argmax(logitsF64), nil
+	}
+
+	applyTemperature(logitsF64, sc.Temperature)
+
+	if sc.TopK > 0 && sc.TopK < vocabSize {
+		applyTopK(logitsF64, sc.TopK)
+	}
+
+	if sc.TopP > 0 && sc.TopP < 1.0 {
+		applyTopP(logitsF64, sc.TopP)
+	}
+
+	return sampleFromDistribution(logitsF64), nil
+}
+
+// idsToTensor converts token IDs to a [1, seqLen, 1] input tensor.
+func (gen *Generator[T]) idsToTensor(ids []int) (*tensor.TensorNumeric[T], error) {
+	data := make([]T, len(ids))
+	for i, id := range ids {
+		data[i] = T(id)
+	}
+	return tensor.New([]int{1, len(ids), 1}, data)
+}
+
+// checkStop checks if the decoded generated tokens contain any stop string.
+func (gen *Generator[T]) checkStop(generatedIDs []int, stopStrings []string) (bool, string) {
+	if len(stopStrings) == 0 {
+		return false, ""
+	}
+	decoded, err := gen.tokenizer.Decode(generatedIDs)
+	if err != nil {
+		return false, ""
+	}
+	for _, ss := range stopStrings {
+		if idx := strings.Index(decoded, ss); idx >= 0 {
+			return true, decoded[:idx]
+		}
+	}
+	return false, ""
+}

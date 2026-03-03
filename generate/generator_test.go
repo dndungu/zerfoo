@@ -1,0 +1,905 @@
+package generate
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/zerfoo/zerfoo/compute"
+	"github.com/zerfoo/zerfoo/graph"
+	"github.com/zerfoo/zerfoo/numeric"
+	"github.com/zerfoo/zerfoo/pkg/tokenizer"
+	"github.com/zerfoo/zerfoo/tensor"
+	"github.com/zerfoo/zerfoo/types"
+)
+
+func TestNewGenerator(t *testing.T) {
+	t.Run("creates generator with valid config", func(t *testing.T) {
+		cfg := ModelConfig{
+			VocabSize:  32000,
+			MaxSeqLen:  2048,
+			EOSTokenID: 2,
+			BOSTokenID: 1,
+			NumLayers:  12,
+		}
+		g := NewGenerator[float32](nil, nil, nil, cfg)
+		if g == nil {
+			t.Fatal("expected non-nil generator")
+		}
+		if g.config.VocabSize != 32000 {
+			t.Errorf("VocabSize = %d, want 32000", g.config.VocabSize)
+		}
+		if g.config.NumLayers != 12 {
+			t.Errorf("NumLayers = %d, want 12", g.config.NumLayers)
+		}
+	})
+}
+
+func TestSamplingConfigDefaults(t *testing.T) {
+	cfg := DefaultSamplingConfig()
+	if cfg.Temperature != 1.0 {
+		t.Errorf("Temperature = %f, want 1.0", cfg.Temperature)
+	}
+	if cfg.TopK != 0 {
+		t.Errorf("TopK = %d, want 0", cfg.TopK)
+	}
+	if cfg.TopP != 1.0 {
+		t.Errorf("TopP = %f, want 1.0", cfg.TopP)
+	}
+	if cfg.RepetitionPenalty != 1.0 {
+		t.Errorf("RepetitionPenalty = %f, want 1.0", cfg.RepetitionPenalty)
+	}
+	if cfg.MaxNewTokens != 256 {
+		t.Errorf("MaxNewTokens = %d, want 256", cfg.MaxNewTokens)
+	}
+}
+
+func TestModelConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ModelConfig
+	}{
+		{
+			name: "gemma3",
+			cfg: ModelConfig{
+				VocabSize:  256000,
+				MaxSeqLen:  8192,
+				EOSTokenID: 1,
+				BOSTokenID: 2,
+				NumLayers:  26,
+			},
+		},
+		{
+			name: "small",
+			cfg: ModelConfig{
+				VocabSize:  100,
+				MaxSeqLen:  128,
+				EOSTokenID: 0,
+				BOSTokenID: 1,
+				NumLayers:  2,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewGenerator[float32](nil, nil, nil, tt.cfg)
+			if g.config != tt.cfg {
+				t.Errorf("config mismatch: got %+v, want %+v", g.config, tt.cfg)
+			}
+		})
+	}
+}
+
+// fixedLogitsNode is a graph node that ignores input and always returns
+// logits where a specific token index has the highest value.
+// The output shape is [1, inputSeqLen, vocabSize].
+type fixedLogitsNode struct {
+	graph.NoParameters[float32]
+	vocabSize int
+	// tokenSequence is the sequence of token IDs to produce on each call.
+	// Wraps around if more calls than entries.
+	tokenSequence []int
+	callCount     int
+}
+
+func (n *fixedLogitsNode) OpType() string                     { return "FixedLogits" }
+func (n *fixedLogitsNode) Attributes() map[string]interface{} { return nil }
+func (n *fixedLogitsNode) OutputShape() []int                 { return []int{1, 1, n.vocabSize} }
+func (n *fixedLogitsNode) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[float32], _ ...*tensor.TensorNumeric[float32]) ([]*tensor.TensorNumeric[float32], error) {
+	return nil, nil
+}
+
+func (n *fixedLogitsNode) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	seqLen := 1
+	if len(inputs) > 0 {
+		shape := inputs[0].Shape()
+		if len(shape) >= 2 {
+			seqLen = shape[1]
+		}
+	}
+
+	data := make([]float32, seqLen*n.vocabSize)
+	// For each position, set the target token to have the highest logit.
+	for pos := range seqLen {
+		targetToken := n.tokenSequence[n.callCount%len(n.tokenSequence)]
+		offset := pos * n.vocabSize
+		for j := range n.vocabSize {
+			data[offset+j] = -10.0
+		}
+		if targetToken >= 0 && targetToken < n.vocabSize {
+			data[offset+targetToken] = 10.0
+		}
+		if pos == seqLen-1 {
+			// Only advance call count after processing the last position.
+			n.callCount++
+		}
+	}
+
+	return tensor.New([]int{1, seqLen, n.vocabSize}, data)
+}
+
+// buildTestGraph creates a simple graph with a fixedLogitsNode for testing.
+func buildTestGraph(t *testing.T, vocabSize int, tokenSequence []int) *graph.Graph[float32] {
+	t.Helper()
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	b := graph.NewBuilder[float32](engine)
+
+	in := b.Input([]int{1, 1, 1})
+	node := &fixedLogitsNode{
+		vocabSize:     vocabSize,
+		tokenSequence: tokenSequence,
+	}
+	b.AddNode(node, in)
+
+	g, err := b.Build(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// buildTestTokenizer creates a simple tokenizer with known vocabulary.
+// Tokens: <unk>=0, <s>=1, </s>=2, <pad>=3, hello=4, world=5, foo=6, bar=7
+func buildTestTokenizer() *tokenizer.WhitespaceTokenizer {
+	tok := tokenizer.NewWhitespaceTokenizer()
+	tok.AddToken("hello") // 4
+	tok.AddToken("world") // 5
+	tok.AddToken("foo")   // 6
+	tok.AddToken("bar")   // 7
+	return tok
+}
+
+// buildErrorGraph creates a graph that always errors on Forward.
+func buildErrorGraph(t *testing.T) *graph.Graph[float32] {
+	t.Helper()
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	b := graph.NewBuilder[float32](engine)
+	in := b.Input([]int{1, 1, 1})
+	node := &errorNode{}
+	b.AddNode(node, in)
+	g, err := b.Build(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// buildBadLogitsGraph creates a graph that returns valid 3D logits on first call, 2D on second.
+func buildBadLogitsGraph(t *testing.T) *graph.Graph[float32] {
+	t.Helper()
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	b := graph.NewBuilder[float32](engine)
+	in := b.Input([]int{1, 1, 1})
+	node := &badLogitsNode{}
+	b.AddNode(node, in)
+	g, err := b.Build(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// buildErrorAfterPrefillGraph creates a graph that succeeds for prefill but errors on decode.
+func buildErrorAfterPrefillGraph(t *testing.T, vocabSize int) *graph.Graph[float32] {
+	t.Helper()
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	b := graph.NewBuilder[float32](engine)
+	in := b.Input([]int{1, 1, 1})
+	node := &errorAfterPrefillNode{vocabSize: vocabSize}
+	b.AddNode(node, in)
+	g, err := b.Build(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func TestGenerate_Greedy(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// EOS = 2 (</s>). Generate tokens 6, 7, then EOS.
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			BOSTokenID: 1,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello world", SamplingConfig{
+		Temperature:  0, // greedy
+		MaxNewTokens: 10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// Should produce "foo bar" (tokens 6, 7), then stop at EOS.
+	if result != "foo bar" {
+		t.Errorf("Generate = %q, want %q", result, "foo bar")
+	}
+}
+
+func TestGenerate_MaxTokens(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Never produce EOS -- always produce token 6.
+	g := buildTestGraph(t, vocabSize, []int{6})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 3,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result != "foo foo foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo foo foo")
+	}
+}
+
+func TestGenerate_StopTokenID(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Produce 6, 7, 6 (custom stop at 7 should stop after first 7).
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 6})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+		StopTokenIDs: []int{7}, // Stop when token 7 (bar) is generated.
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// Should produce "foo" (token 6), then stop when 7 is sampled (not included).
+	if result != "foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo")
+	}
+}
+
+func TestGenerate_StopString(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Produce 6, 7, 6, 6 endlessly.
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 6, 6})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+		StopStrings:  []string{"bar"},
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// Should produce "foo " then stop before "bar".
+	if result != "foo " {
+		t.Errorf("Generate = %q, want %q", result, "foo ")
+	}
+}
+
+func TestGenerate_EmptyPrompt(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	_, err := gen.Generate(context.Background(), "", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 5,
+	})
+	if err == nil {
+		t.Error("expected error for empty prompt")
+	}
+}
+
+func TestGenerate_ImmediateEOS(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// First token is EOS.
+	g := buildTestGraph(t, vocabSize, []int{2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result != "" {
+		t.Errorf("Generate = %q, want empty string", result)
+	}
+}
+
+func TestGenerate_ContextCancellation(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	result, err := gen.Generate(ctx, "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 100,
+	})
+	// Should stop early -- either error or short result.
+	// The prefill may succeed before context check, but the loop should stop.
+	if err != nil {
+		return // Error is acceptable for canceled context.
+	}
+	// If no error, result should be short (at most 1 token from prefill).
+	tokens, _ := tok.Encode(result)
+	if len(tokens) > 2 {
+		t.Errorf("expected short result with canceled context, got %d tokens: %q", len(tokens), result)
+	}
+}
+
+func TestGenerate_WithTemperature(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// With a dominant logit, temperature sampling should still pick the right token.
+	g := buildTestGraph(t, vocabSize, []int{6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0.5, // Low temperature sharpens distribution.
+		MaxNewTokens: 5,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// With logit 10.0 vs -10.0 and temperature 0.5, token 6 has ~probability 1.
+	if result != "foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo")
+	}
+}
+
+func TestIdsToTensor(t *testing.T) {
+	gen := &Generator[float32]{}
+	got, err := gen.idsToTensor([]int{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape := got.Shape()
+	if shape[0] != 1 || shape[1] != 3 || shape[2] != 1 {
+		t.Errorf("shape = %v, want [1, 3, 1]", shape)
+	}
+	data := got.Data()
+	if data[0] != 1.0 || data[1] != 2.0 || data[2] != 3.0 {
+		t.Errorf("data = %v, want [1, 2, 3]", data)
+	}
+}
+
+func TestSampleFromLogits_InvalidShape(t *testing.T) {
+	gen := &Generator[float32]{}
+
+	// 2D tensor instead of 3D.
+	logits2D, err := tensor.New([]int{1, 8}, make([]float32, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = gen.sampleFromLogits(logits2D, SamplingConfig{Temperature: 0}, nil)
+	if err == nil {
+		t.Error("expected error for 2D logits")
+	}
+}
+
+func TestGenerate_WithTopK(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  1.0,
+		TopK:         2,
+		MaxNewTokens: 5,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// With dominant logit (10.0 vs -10.0), top-k should still pick the right token.
+	if result != "foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo")
+	}
+}
+
+func TestGenerate_WithTopP(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  1.0,
+		TopP:         0.9,
+		MaxNewTokens: 5,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result != "foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo")
+	}
+}
+
+func TestGenerate_WithRepetitionPenalty(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Produces token 6 repeatedly, then EOS.
+	g := buildTestGraph(t, vocabSize, []int{6, 6, 6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	// With a very dominant logit, even rep penalty won't change the result.
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:       0.5,
+		RepetitionPenalty: 1.5,
+		MaxNewTokens:      10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result == "" {
+		t.Error("expected non-empty result with repetition penalty")
+	}
+}
+
+func TestGenerate_DefaultMaxTokens(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	// MaxNewTokens=0 should use default (256).
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 0,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+	if result != "foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo")
+	}
+}
+
+func TestGenerate_StopStringFirstToken(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Produce bar (7) immediately.
+	g := buildTestGraph(t, vocabSize, []int{7, 6, 6})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+		StopStrings:  []string{"bar"},
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// "bar" found at position 0, so result should be empty.
+	if result != "" {
+		t.Errorf("Generate = %q, want empty", result)
+	}
+}
+
+// errorNode returns an error from Forward, simulating a graph failure.
+type errorNode struct {
+	graph.NoParameters[float32]
+}
+
+func (n *errorNode) OpType() string                     { return "Error" }
+func (n *errorNode) Attributes() map[string]interface{} { return nil }
+func (n *errorNode) OutputShape() []int                 { return []int{1, 1, 1} }
+func (n *errorNode) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[float32], _ ...*tensor.TensorNumeric[float32]) ([]*tensor.TensorNumeric[float32], error) {
+	return nil, nil
+}
+func (n *errorNode) Forward(_ context.Context, _ ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	return nil, fmt.Errorf("simulated forward error")
+}
+
+func TestGenerate_GraphForwardError(t *testing.T) {
+	tok := buildTestTokenizer()
+	g := buildErrorGraph(t)
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{VocabSize: 8, MaxSeqLen: 32, EOSTokenID: 2, NumLayers: 0},
+	)
+
+	_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 5,
+	})
+	if err == nil {
+		t.Error("expected error from graph forward failure")
+	}
+}
+
+// badLogitsNode returns a 2D tensor (wrong shape) to trigger sampleFromLogits error.
+type badLogitsNode struct {
+	graph.NoParameters[float32]
+	first bool
+}
+
+func (n *badLogitsNode) OpType() string                     { return "BadLogits" }
+func (n *badLogitsNode) Attributes() map[string]interface{} { return nil }
+func (n *badLogitsNode) OutputShape() []int                 { return []int{1, 8} }
+func (n *badLogitsNode) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[float32], _ ...*tensor.TensorNumeric[float32]) ([]*tensor.TensorNumeric[float32], error) {
+	return nil, nil
+}
+func (n *badLogitsNode) Forward(_ context.Context, _ ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	if !n.first {
+		n.first = true
+		// Return valid 3D logits with token 6 dominant for the prefill.
+		data := make([]float32, 8)
+		for i := range data {
+			data[i] = -10.0
+		}
+		data[6] = 10.0
+		return tensor.New([]int{1, 1, 8}, data)
+	}
+	// On second call, return 2D tensor to trigger error.
+	return tensor.New([]int{1, 8}, make([]float32, 8))
+}
+
+func TestGenerate_BadLogitsFromDecodeStep(t *testing.T) {
+	tok := buildTestTokenizer()
+	g := buildBadLogitsGraph(t)
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{VocabSize: 8, MaxSeqLen: 32, EOSTokenID: 2, NumLayers: 0},
+	)
+
+	_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 5,
+	})
+	if err == nil {
+		t.Error("expected error from bad logits shape in decode step")
+	}
+}
+
+// errorAfterPrefillNode returns valid logits for prefill but errors on decode.
+type errorAfterPrefillNode struct {
+	graph.NoParameters[float32]
+	callCount int
+	vocabSize int
+}
+
+func (n *errorAfterPrefillNode) OpType() string                     { return "ErrorAfterPrefill" }
+func (n *errorAfterPrefillNode) Attributes() map[string]interface{} { return nil }
+func (n *errorAfterPrefillNode) OutputShape() []int                 { return []int{1, 1, n.vocabSize} }
+func (n *errorAfterPrefillNode) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[float32], _ ...*tensor.TensorNumeric[float32]) ([]*tensor.TensorNumeric[float32], error) {
+	return nil, nil
+}
+func (n *errorAfterPrefillNode) Forward(_ context.Context, _ ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	n.callCount++
+	if n.callCount > 1 {
+		return nil, fmt.Errorf("simulated decode step error")
+	}
+	// Prefill: return valid logits with token 6 dominant.
+	data := make([]float32, n.vocabSize)
+	for i := range data {
+		data[i] = -10.0
+	}
+	data[6] = 10.0
+	return tensor.New([]int{1, 1, n.vocabSize}, data)
+}
+
+func TestGenerate_DecodeStepForwardError(t *testing.T) {
+	tok := buildTestTokenizer()
+	g := buildErrorAfterPrefillGraph(t, 8)
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{VocabSize: 8, MaxSeqLen: 32, EOSTokenID: 2, NumLayers: 0},
+	)
+
+	_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 5,
+	})
+	if err == nil {
+		t.Error("expected error from decode step forward failure")
+	}
+}
+
+func TestGenerate_AllSamplingFeatures(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	// Use all features at once.
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:       0.8,
+		TopK:              3,
+		TopP:              0.95,
+		RepetitionPenalty: 1.2,
+		MaxNewTokens:      10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result != "foo bar" {
+		t.Errorf("Generate = %q, want %q", result, "foo bar")
+	}
+}
+
+func TestCheckStop_NoStopStrings(t *testing.T) {
+	gen := &Generator[float32]{
+		tokenizer: buildTestTokenizer(),
+	}
+	stopped, _ := gen.checkStop([]int{6, 7}, nil)
+	if stopped {
+		t.Error("should not stop with no stop strings")
+	}
+}
+
+func TestCheckStop_NoMatch(t *testing.T) {
+	gen := &Generator[float32]{
+		tokenizer: buildTestTokenizer(),
+	}
+	stopped, _ := gen.checkStop([]int{6, 7}, []string{"xyz"})
+	if stopped {
+		t.Error("should not stop when no match found")
+	}
+}
+
+// errorTokenizer is a tokenizer that returns errors for testing.
+type errorTokenizer struct{}
+
+func (e *errorTokenizer) Encode(_ string) ([]int, error) {
+	return nil, fmt.Errorf("encode error")
+}
+func (e *errorTokenizer) Decode(_ []int) (string, error) {
+	return "", fmt.Errorf("decode error")
+}
+func (e *errorTokenizer) VocabSize() int                            { return 0 }
+func (e *errorTokenizer) GetToken(_ int) (string, bool)             { return "", false }
+func (e *errorTokenizer) GetID(_ string) (int, bool)                { return 0, false }
+func (e *errorTokenizer) SpecialTokens() tokenizer.SpecialTokens    { return tokenizer.SpecialTokens{} }
+
+func TestGenerate_EncodeError(t *testing.T) {
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6})
+
+	gen := NewGenerator[float32](
+		g, &errorTokenizer{},
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{VocabSize: vocabSize, MaxSeqLen: 32, EOSTokenID: 2, NumLayers: 0},
+	)
+
+	_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 5,
+	})
+	if err == nil {
+		t.Error("expected error from tokenizer encode failure")
+	}
+}
+
+func TestCheckStop_DecodeError(t *testing.T) {
+	gen := &Generator[float32]{
+		tokenizer: &errorTokenizer{},
+	}
+	stopped, _ := gen.checkStop([]int{1, 2}, []string{"test"})
+	if stopped {
+		t.Error("should not stop when decode fails")
+	}
+}
+
+// decodeErrorTokenizer encodes fine but returns error on Decode.
+type decodeErrorTokenizer struct {
+	inner tokenizer.Tokenizer
+}
+
+func (d *decodeErrorTokenizer) Encode(text string) ([]int, error) { return d.inner.Encode(text) }
+func (d *decodeErrorTokenizer) Decode(_ []int) (string, error)    { return "", fmt.Errorf("decode error") }
+func (d *decodeErrorTokenizer) VocabSize() int                    { return d.inner.VocabSize() }
+func (d *decodeErrorTokenizer) GetToken(id int) (string, bool)    { return d.inner.GetToken(id) }
+func (d *decodeErrorTokenizer) GetID(token string) (int, bool)    { return d.inner.GetID(token) }
+func (d *decodeErrorTokenizer) SpecialTokens() tokenizer.SpecialTokens {
+	return d.inner.SpecialTokens()
+}
+
+func TestGenerate_DecodeOutputError(t *testing.T) {
+	tok := buildTestTokenizer()
+	deTok := &decodeErrorTokenizer{inner: tok}
+
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{5, 2})
+
+	gen := NewGenerator[float32](
+		g, deTok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{VocabSize: vocabSize, MaxSeqLen: 32, EOSTokenID: 2, NumLayers: 0},
+	)
+
+	_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 5,
+	})
+	if err == nil {
+		t.Error("expected error from decode output failure")
+	}
+}
+
