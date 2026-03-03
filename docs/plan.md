@@ -1966,6 +1966,657 @@ Validate the full pipeline: pull model, load, generate coherent text, serve.
 
 ---
 
+### Phase 9: Multi-Architecture Open-Weight Model Support
+
+#### Phase 9 Context
+
+Phase 8 delivered an embeddable inference library with production tokenizer, KV
+cache, generation loop, streaming, model registry, high-level API, CLI, and
+OpenAI-compatible HTTP server. End-to-end generation works for Gemma 3.
+
+However, Gemma 3 is the only model architecture validated. The broader open-weights
+ecosystem has converged on a small set of architectural building blocks, but each
+model family uses them in slightly different combinations. A gap analysis of the
+top open-weight model families reveals what Zerfoo already supports and what needs
+to be added.
+
+**Gap analysis conducted on 2026 03 02:**
+
+The following model families were analyzed against Zerfoo's current layer inventory
+(56+ layers across attention, normalization, activation, core, embedding, and MoE
+categories).
+
+**Tier 1 -- Already architecturally supported (config mapping needed):**
+- Llama 3/3.1/3.2 (Meta): GQA, RoPE (base 500K), SwiGLU FFN, RMSNorm pre-norm.
+  All components already implemented. Gap is only config.json field mapping (Llama
+  uses different JSON field names than Gemma: num_hidden_layers, num_attention_heads,
+  num_key_value_heads, rope_theta, intermediate_size, etc.).
+- Llama 4 (Meta): Same as Llama 3 plus alternating MoE/dense layers. MoE already
+  implemented.
+- Mistral 7B (Mistral AI): GQA, RoPE, SwiGLU, RMSNorm, sliding window attention.
+  All implemented (sliding window in Gemma 3 GQA).
+- Mixtral 8x7B/8x22B (Mistral AI): Same as Mistral plus MoE (8 experts, top-2).
+  All implemented.
+- Mistral Large 3 (Mistral AI): 675B total, 41B active. MoE with GQA. Supported.
+
+**Tier 2 -- Minor additions required:**
+- Qwen 2.5/3 (Alibaba): GQA, RoPE (base 1M), SwiGLU, RMSNorm. Nearly identical
+  to Llama 3. Two gaps: (a) QKV bias -- Qwen adds bias terms to Q, K, V projections
+  in attention, which GQA currently lacks; (b) YaRN (Yet another RoPE extensioN)
+  for long-context support beyond training length -- requires modifying RoPE inverse
+  frequency computation with a scaling factor and attention scaling.
+
+**Tier 3 -- Moderate additions required:**
+- Phi-4/Phi-4-Mini (Microsoft): GQA (24Q/8KV for mini, 40 layers for full), RoPE
+  with partial application (25% of head dimensions are position-agnostic). Three
+  gaps: (a) partial/fractional RoPE -- only rotate a fraction of head dimensions;
+  (b) tied embeddings -- share input embedding and output LMHead weights; (c)
+  tiktoken tokenizer (o200k_base) -- different format than HuggingFace tokenizer.json
+  (though most Phi-4 models on HuggingFace now ship tokenizer.json).
+
+**Tier 4 -- Major new component required:**
+- DeepSeek V3/R1 (DeepSeek AI): Uses Multi-head Latent Attention (MLA) instead of
+  GQA. MLA compresses K/V to a low-dimensional latent vector (512 dims vs 14K for
+  standard KV cache), achieving 28x memory reduction. Requires: (a) low-rank
+  down-projection W_DKV; (b) up-projection matrices W_UK, W_UV; (c) decoupled RoPE
+  (rotate a small subvector before compression); (d) absorb mode for inference
+  (cache only latents). Also uses shared expert in MoE (1 shared + 8 routed per
+  token in V3).
+
+**Tier 5 -- Different paradigm (out of scope for Phase 9):**
+- Falcon Mamba (TII): State Space Model (SSM), not transformer-based.
+- RWKV (RWKV Foundation): Linear attention approximation via recurrence.
+- Qwen3-Next (Alibaba): Hybrid Gated DeltaNet + Gated Attention (3:1 ratio).
+  Linear attention variant.
+- These architectures require fundamentally different execution models (recurrent
+  state instead of KV cache, linear attention kernels). Deferred to a future phase.
+
+**Current Zerfoo capabilities summary:**
+
+| Component | Status | Used By |
+|-----------|--------|---------|
+| GroupedQueryAttention (GQA) | Implemented | Gemma, Llama, Qwen, Phi, Mistral |
+| RoPE (configurable base) | Implemented | All transformer models |
+| SwiGLU FFN | Implemented | Gemma, Llama, Qwen, Mistral |
+| RMSNorm (pre-norm) | Implemented | All modern LLMs |
+| Sliding window attention | Implemented | Gemma, Mistral |
+| MoE (top-k routing) | Implemented | Mixtral, Llama 4, Qwen MoE |
+| QKNorm | Implemented | Gemma 3, OLMo |
+| BPE tokenizer (tokenizer.json) | Implemented | All HuggingFace models |
+| KV cache | Implemented | All autoregressive models |
+| 4-bit quantized weights | Implemented | MatMulNBits |
+| QKV bias in attention | NOT implemented | Qwen |
+| YaRN RoPE scaling | NOT implemented | Qwen (long context) |
+| Partial/fractional RoPE | NOT implemented | Phi-4 |
+| Tied embeddings | NOT implemented | Phi-4 |
+| Multi-head Latent Attention | NOT implemented | DeepSeek V3/R1 |
+| Shared expert MoE | NOT implemented | DeepSeek V3/R1 |
+| Decoupled RoPE | NOT implemented | DeepSeek V3/R1 |
+| Multi-architecture config parsing | NOT implemented | All models |
+| Architecture-specific param naming | NOT implemented | All models |
+
+#### Phase 9 Objectives
+
+- P9-O1: Add multi-architecture config.json parsing that maps HuggingFace model
+  config fields to Zerfoo's internal ModelMetadata for Llama, Mistral, Qwen, Phi,
+  Gemma, and DeepSeek model families.
+- P9-O2: Add architecture-aware ONNX parameter name mapping so weight tensors
+  from different model families (q_proj vs wq vs Wq) resolve correctly during
+  model building.
+- P9-O3: Add QKV bias support to GroupedQueryAttention for Qwen compatibility.
+- P9-O4: Implement YaRN RoPE scaling for long-context Qwen models.
+- P9-O5: Add partial/fractional RoPE support for Phi-4.
+- P9-O6: Add tied embedding support (shared input/output weights) for Phi-4.
+- P9-O7: Implement Multi-head Latent Attention (MLA) for DeepSeek V3/R1.
+- P9-O8: Add shared expert support to MoE for DeepSeek V3/R1.
+- P9-O9: Validate each newly supported architecture with forward pass parity tests.
+
+#### Phase 9 Non-Goals
+
+- SSM/Mamba architectures (Falcon Mamba, RWKV, Jamba). Different execution paradigm.
+- Hybrid linear/quadratic attention (Qwen3-Next, Kimi Linear). Requires DeltaNet.
+- NoPE (no positional embeddings, used by SmolLM3). Minor variant, low priority.
+- Multi-Token Prediction for speculative decoding.
+- Attention sinks or learned bias logits (gpt-oss).
+- Training support for new architectures (inference only).
+- Model quantization at load time (only loading pre-quantized weights).
+- Multi-GPU inference.
+- FlashAttention or other fused attention kernels.
+- cuDNN or TensorRT integration.
+
+#### Phase 9 Constraints
+
+- Do not break existing Gemma 3 inference pipeline. All changes are additive.
+- Do not break the Engine[T] or Node[T] interfaces (project non-goal).
+- Maintain backwards compatibility with existing config.json format.
+- Pure Go. No CGo. No external C libraries.
+- Each tier is independently valuable and can be shipped separately.
+- Pre-commit hooks reject multi-directory commits.
+- All code must pass golangci-lint and go test -race.
+
+#### Phase 9 Design Decisions
+
+**Multi-architecture config parsing strategy:**
+Create an architecture registry that maps model_type strings (from HuggingFace
+config.json) to config parser functions. Each parser normalizes the model-specific
+JSON fields into a unified ModelMetadata struct. The model_type field is the standard
+HuggingFace discriminator (e.g., "llama", "mistral", "qwen2", "phi3", "gemma2",
+"deepseek_v3"). Fallback: if model_type is not recognized, attempt to parse using
+the existing generic field names.
+
+**QKV bias strategy:**
+Add optional bias fields to GroupedQueryAttention. When bias parameters are present
+in the ZMF model (named q_proj.bias, k_proj.bias, v_proj.bias), they are loaded
+and applied after the linear projection. When absent, behavior is unchanged
+(backwards compatible). The bias is added element-wise after the weight
+multiplication: Q = X * Wq + bq.
+
+**YaRN RoPE scaling strategy:**
+YaRN modifies the inverse frequencies used in RoPE. The three key changes are:
+(a) frequency scaling -- low-frequency components are scaled by a factor while
+high-frequency components are kept unchanged, with interpolation in between;
+(b) an attention scaling factor sqrt(1 + ln(s)/ln(s_orig)) applied to the
+attention logits; (c) a configurable "factor" parameter from config.json
+(rope_scaling.type="yarn", rope_scaling.factor=N). Implementation: add a
+RoPEScaling option to RotaryPositionalEmbedding that modifies the inverse
+frequency computation. This is a construction-time change, not a forward-pass
+change, so performance is unaffected.
+
+**Partial RoPE strategy:**
+Phi-4 applies RoPE to only a fraction of head dimensions (e.g., 75% rotated,
+25% position-agnostic). Implementation: add a RotaryDimFraction option to RoPE.
+During forward pass, split the input into rotated and non-rotated portions, apply
+RoPE to the rotated portion, concatenate. This requires a small change to Forward()
+but is backwards compatible (default fraction = 1.0 = full rotation).
+
+**Tied embeddings strategy:**
+When config.json has tie_word_embeddings=true, the LMHead layer reuses the token
+embedding weight matrix (transposed) instead of having its own weights. The model
+builder checks this config flag and, when true, passes the embedding weight to
+LMHead at construction time instead of loading separate lm_head weights.
+
+**MLA strategy:**
+MLA is a fundamentally different attention mechanism from GQA. Rather than
+modifying GroupedQueryAttention, implement a new MultiHeadLatentAttention[T] layer
+in layers/attention/. MLA has these components:
+(a) Down-projection: c_kv = x * W_DKV (compress to latent dimension, e.g., 512).
+(b) Up-projection: K = c_kv * W_UK, V = c_kv * W_UV (decompress for attention).
+(c) Q projection: Q = x * W_Q (standard, with optional RoPE on a subvector).
+(d) Decoupled RoPE: A small subvector of Q and K is rotated separately before
+    the main projection, to maintain position awareness through compression.
+(e) KV cache: Store only c_kv (the compressed latent) instead of full K/V.
+    Decompress on the fly during attention computation.
+(f) Absorb mode: For inference, absorb W_UK into the attention weight computation
+    to avoid explicit decompression (optional optimization).
+
+The MLA layer implements graph.Node[T] like all other layers. It is registered in
+layers/registry/registry.go as "MultiHeadLatentAttention". The model builder
+dispatches to MLA when the architecture is "deepseek_v3" or when the config
+specifies an MLA-type attention.
+
+**Shared expert MoE strategy:**
+Extend MixtureOfExperts[T] to support a shared expert that is always active in
+addition to the top-k routed experts. The shared expert processes every token
+and its output is added to the weighted sum of routed expert outputs. This
+requires adding a SharedExpert field to MixtureOfExperts and modifying Forward()
+to always include the shared expert output.
+
+---
+
+#### E57: Multi-Architecture Config Parsing
+
+Add architecture-aware config.json parsing so Zerfoo can load models from
+different HuggingFace model families without manual config translation.
+
+- [ ] T57.1 Define architecture config registry  Owner: TBD  Est: 1h
+  - Dependencies: None
+  - Files: inference/arch_config.go (new)
+  - Acceptance: An archConfigRegistry maps model_type strings to parser functions.
+    Each parser reads raw JSON (map[string]interface{}) and returns a ModelMetadata.
+    Parsers for "gemma2", "gemma3" registered (using existing field names as baseline).
+    ModelMetadata extended with new fields: IntermediateSize int, NumKeyValueHeads int,
+    RopeTheta float64, RopeScaling *RopeScalingConfig, TieWordEmbeddings bool,
+    SlidingWindow int, AttentionBias bool.
+    Fallback parser for unknown model_type attempts direct JSON unmarshal.
+  - [ ] S57.1.1 Extend ModelMetadata with new fields  Est: 15m
+  - [ ] S57.1.2 Create archConfigRegistry with Register and Parse methods  Est: 20m
+  - [ ] S57.1.3 Implement Gemma parser (baseline, existing field names)  Est: 10m
+  - [ ] S57.1.4 Write unit tests: known model_type, fallback, missing fields  Est: 15m
+  - [ ] S57.1.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T57.2 Add Llama config parser  Owner: TBD  Est: 45m
+  - Dependencies: T57.1
+  - Files: inference/arch_config.go (extend)
+  - Acceptance: Parser for model_type "llama" maps: num_hidden_layers -> NumLayers,
+    num_attention_heads -> NumQueryHeads, num_key_value_heads -> NumKeyValueHeads,
+    hidden_size -> HiddenSize, intermediate_size -> IntermediateSize,
+    rope_theta -> RopeTheta (default 500000), vocab_size -> VocabSize,
+    max_position_embeddings -> MaxPositionEmbeddings, eos_token_id -> EOSTokenID,
+    bos_token_id -> BOSTokenID. Test: parse a real Llama 3.1 8B config.json fixture
+    and verify all fields are correctly populated.
+  - [ ] S57.2.1 Implement Llama config parser with field mapping  Est: 15m
+  - [ ] S57.2.2 Add testdata/llama3_config.json fixture  Est: 10m
+  - [ ] S57.2.3 Write unit tests with fixture  Est: 15m
+  - [ ] S57.2.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T57.3 Add Mistral and Qwen config parsers  Owner: TBD  Est: 45m
+  - Dependencies: T57.1
+  - Files: inference/arch_config.go (extend)
+  - Acceptance: Parser for model_type "mistral" (nearly identical to Llama; adds
+    sliding_window field). Parser for model_type "qwen2" maps: same as Llama plus
+    use_sliding_window, attention_bias=true -> AttentionBias, rope_scaling (YaRN
+    config with type, factor, original_max_position_embeddings).
+    Test: parse Mistral 7B and Qwen 2.5 7B config.json fixtures.
+  - [ ] S57.3.1 Implement Mistral config parser  Est: 10m
+  - [ ] S57.3.2 Implement Qwen config parser with rope_scaling  Est: 15m
+  - [ ] S57.3.3 Add testdata fixtures and tests  Est: 15m
+  - [ ] S57.3.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T57.4 Add Phi and DeepSeek config parsers  Owner: TBD  Est: 45m
+  - Dependencies: T57.1
+  - Files: inference/arch_config.go (extend)
+  - Acceptance: Parser for model_type "phi3" / "phi" maps: same as Llama plus
+    partial_rotary_factor -> PartialRotaryFactor (float64, default 1.0),
+    tie_word_embeddings -> TieWordEmbeddings. Parser for model_type "deepseek_v3"
+    maps: same as Llama plus kv_lora_rank -> KVLoRADim (int, for MLA),
+    q_lora_rank -> QLoRADim, qk_rope_head_dim -> QKRopeHeadDim,
+    num_experts -> NumExperts, num_experts_per_tok -> NumExpertsPerToken,
+    n_shared_experts -> NumSharedExperts.
+  - [ ] S57.4.1 Implement Phi config parser  Est: 10m
+  - [ ] S57.4.2 Implement DeepSeek config parser  Est: 15m
+  - [ ] S57.4.3 Add testdata fixtures and tests  Est: 15m
+  - [ ] S57.4.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T57.5 Integrate config registry into inference.Load  Owner: TBD  Est: 30m
+  - Dependencies: T57.2, T57.3, T57.4
+  - Files: inference/inference.go (modify loadMetadata)
+  - Acceptance: loadMetadata first reads raw JSON to extract model_type, then
+    dispatches to the appropriate parser. Existing Gemma 3 loading continues to
+    work. New model_type values (llama, mistral, qwen2, phi3, deepseek_v3) are
+    parsed correctly. Unknown model_type falls back to generic parsing.
+  - [ ] S57.5.1 Update loadMetadata to use archConfigRegistry  Est: 15m
+  - [ ] S57.5.2 Write integration test: load Llama config, verify metadata  Est: 10m
+  - [ ] S57.5.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T57.6 Run linters and verify coverage for E57  Owner: TBD  Est: 15m
+  - Dependencies: T57.5
+  - Acceptance: golangci-lint 0 issues. go test -cover -race shows >= 95% coverage
+    on inference/arch_config.go. go vet clean.
+  - [ ] S57.6.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S57.6.2 Fix any remaining issues  Est: 5m
+
+#### E58: Architecture-Aware Parameter Name Mapping
+
+Add a parameter name resolver that maps architecture-specific weight names from
+ONNX/ZMF models to Zerfoo's internal naming conventions.
+
+- [ ] T58.1 Create parameter name resolver  Owner: TBD  Est: 1.5h
+  - Dependencies: E57
+  - Files: model/param_resolver.go (new)
+  - Acceptance: A ParamResolver maps model weight names to canonical names used
+    by Zerfoo layers. Architecture-specific mappings:
+    Llama: model.layers.{i}.self_attn.{q,k,v,o}_proj.weight
+    Gemma: model.layers.{i}.self_attn.{q,k,v,o}_proj.weight (same pattern)
+    Qwen: model.layers.{i}.self_attn.{q,k,v,o}_proj.{weight,bias}
+    Phi: model.layers.{i}.self_attn.{q,k,v,dense}_proj.weight
+    DeepSeek: model.layers.{i}.self_attn.{kv_a_proj,kv_b_proj,q_a_proj,q_b_proj,o_proj}.weight
+    FFN: model.layers.{i}.mlp.{gate_proj,up_proj,down_proj}.weight (all families)
+    Norm: model.layers.{i}.{input,post_attention}_layernorm.weight (all families)
+    The resolver is called during model building (model/builder.go) to find
+    parameters by canonical name when the ZMF parameter has a model-specific name.
+  - [ ] S58.1.1 Define ParamResolver interface and implementation  Est: 30m
+  - [ ] S58.1.2 Add Llama/Gemma/Mistral name mappings  Est: 15m
+  - [ ] S58.1.3 Add Qwen/Phi/DeepSeek name mappings  Est: 15m
+  - [ ] S58.1.4 Write unit tests for each architecture's name resolution  Est: 20m
+  - [ ] S58.1.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T58.2 Integrate parameter resolver into model builder  Owner: TBD  Est: 1h
+  - Dependencies: T58.1
+  - Files: model/builder.go (modify)
+  - Acceptance: model.BuildFromZMF uses the resolver to look up parameters when
+    the exact name is not found. Existing Gemma 3 loading still works (resolver
+    is a fallback, not a replacement). New models with different naming patterns
+    resolve correctly.
+  - [ ] S58.2.1 Add resolver lookup to parameter resolution in builder  Est: 25m
+  - [ ] S58.2.2 Write tests verifying Llama-style names resolve correctly  Est: 20m
+  - [ ] S58.2.3 Verify Gemma 3 loading is unaffected  Est: 10m
+  - [ ] S58.2.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T58.3 Run linters and verify coverage for E58  Owner: TBD  Est: 15m
+  - Dependencies: T58.2
+  - [ ] S58.3.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S58.3.2 Fix any remaining issues  Est: 5m
+
+#### E59: Llama and Mistral Validation (Tier 1)
+
+Validate that Llama 3 and Mistral models load and generate text through the
+existing pipeline with the new config parsing and parameter mapping.
+
+- [ ] T59.1 Llama 3 forward pass parity test  Owner: TBD  Est: 2h
+  - Dependencies: E57, E58
+  - Files: tests/parity/llama3_test.go (new)
+  - Acceptance: TestLlama3ForwardPass loads a Llama 3 8B ZMF model (env-gated by
+    LLAMA3_ZMF_PATH), runs a forward pass, asserts output shape [1,seqLen,V] and
+    no NaN or Inf. TestLlama3GreedyDecode runs 5-step greedy decode and asserts
+    tokens in [0, vocabSize). Skips when env var not set.
+  - [ ] S59.1.1 Create tests/parity/llama3_test.go with forward pass test  Est: 45m
+  - [ ] S59.1.2 Add greedy decode test  Est: 30m
+  - [ ] S59.1.3 Add generation test via inference API  Est: 30m
+  - [ ] S59.1.4 Run golangci-lint and go test  Est: 15m
+
+- [ ] T59.2 Mistral forward pass parity test  Owner: TBD  Est: 1h
+  - Dependencies: E57, E58
+  - Files: tests/parity/mistral_test.go (new)
+  - Acceptance: TestMistralForwardPass loads a Mistral 7B ZMF model (env-gated by
+    MISTRAL_ZMF_PATH), runs a forward pass, asserts valid output. Skips when env
+    var not set.
+  - [ ] S59.2.1 Create tests/parity/mistral_test.go  Est: 30m
+  - [ ] S59.2.2 Add greedy decode test  Est: 20m
+  - [ ] S59.2.3 Run golangci-lint and go test  Est: 10m
+
+- [ ] T59.3 Run linters and verify for E59  Owner: TBD  Est: 15m
+  - Dependencies: T59.1, T59.2
+  - [ ] S59.3.1 Run golangci-lint, go test -race  Est: 10m
+  - [ ] S59.3.2 Fix any issues  Est: 5m
+
+#### E60: QKV Bias for Qwen (Tier 2)
+
+Add optional bias terms to Q, K, V projections in GroupedQueryAttention so
+Qwen models (which use attention_bias=true) work correctly.
+
+- [ ] T60.1 Add bias support to GroupedQueryAttention  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: layers/attention/grouped_query_attention.go (modify)
+  - Acceptance: GroupedQueryAttention gains optional bias fields: qBias, kBias,
+    vBias (*tensor.TensorNumeric[T]). When present, Forward() adds bias after
+    the linear projection: Q = X * Wq + bq. When nil, behavior is unchanged
+    (backwards compatible). BuildGroupQueryAttention[T] reads bias parameters
+    from node initializers when present (e.g., "q_proj.bias"). Test: construct
+    GQA with biases, verify output differs from without bias, matches reference.
+  - [ ] S60.1.1 Add optional bias fields to GroupedQueryAttention  Est: 15m
+  - [ ] S60.1.2 Modify Forward to apply bias after projection when present  Est: 20m
+  - [ ] S60.1.3 Update BuildGroupQueryAttention to load bias params  Est: 15m
+  - [ ] S60.1.4 Write unit tests: with bias, without bias (backward compat)  Est: 25m
+  - [ ] S60.1.5 Verify existing GQA tests still pass  Est: 5m
+  - [ ] S60.1.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T60.2 Run linters and verify for E60  Owner: TBD  Est: 15m
+  - Dependencies: T60.1
+  - [ ] S60.2.1 Run golangci-lint, go test -cover -race on layers/attention/  Est: 10m
+  - [ ] S60.2.2 Fix any remaining issues  Est: 5m
+
+#### E61: YaRN RoPE Scaling (Tier 2)
+
+Implement YaRN (Yet another RoPE extensioN) scaling for long-context models.
+YaRN modifies the inverse frequencies in RoPE to support context lengths beyond
+the original training length.
+
+- [ ] T61.1 Add YaRN scaling to RotaryPositionalEmbedding  Owner: TBD  Est: 2h
+  - Dependencies: None
+  - Files: layers/embeddings/rotary_positional_embedding.go (modify)
+  - Acceptance: A new WithYaRNScaling(factor float64, origMaxLen int) option
+    modifies the inverse frequency computation. Low-frequency components (long
+    wavelength) are scaled by 1/factor. High-frequency components (short
+    wavelength, wavelength < origMaxLen) are kept unchanged. Intermediate
+    frequencies are linearly interpolated. An attention scaling factor
+    sqrt(1 + ln(factor) / ln(origMaxLen)) is stored and accessible via a
+    method. Backwards compatible: without the option, behavior is unchanged.
+    Test: verify that with factor=4, origMaxLen=8192, the resulting frequencies
+    differ from default and match the YaRN paper formulas.
+  - [ ] S61.1.1 Define RoPEScaling config struct (type, factor, origMaxLen)  Est: 10m
+  - [ ] S61.1.2 Implement WithYaRNScaling option  Est: 15m
+  - [ ] S61.1.3 Modify inverse frequency computation for YaRN  Est: 30m
+  - [ ] S61.1.4 Add AttentionScaleFactor() method  Est: 10m
+  - [ ] S61.1.5 Write unit tests: default unchanged, YaRN frequencies match reference  Est: 25m
+  - [ ] S61.1.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T61.2 Integrate YaRN config into model loading  Owner: TBD  Est: 45m
+  - Dependencies: T61.1, E57
+  - Files: model/builder.go (modify), layers/attention/group_query_attention_registry.go (modify)
+  - Acceptance: When ModelMetadata.RopeScaling is non-nil and type="yarn", the
+    model builder passes WithYaRNScaling to RoPE construction. Existing models
+    without rope_scaling are unaffected.
+  - [ ] S61.2.1 Read RopeScaling from ModelMetadata in builder  Est: 15m
+  - [ ] S61.2.2 Pass YaRN options to RotaryPositionalEmbedding construction  Est: 15m
+  - [ ] S61.2.3 Write tests  Est: 10m
+  - [ ] S61.2.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T61.3 Run linters and verify for E61  Owner: TBD  Est: 15m
+  - Dependencies: T61.2
+  - [ ] S61.3.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [ ] S61.3.2 Fix any remaining issues  Est: 5m
+
+#### E62: Qwen Validation (Tier 2)
+
+Validate that Qwen 2.5 models load and generate text with QKV bias and YaRN.
+
+- [ ] T62.1 Qwen 2.5 forward pass parity test  Owner: TBD  Est: 2h
+  - Dependencies: E57, E58, E60, E61
+  - Files: tests/parity/qwen_test.go (new)
+  - Acceptance: TestQwen25ForwardPass loads a Qwen 2.5 7B ZMF model (env-gated
+    by QWEN25_ZMF_PATH), runs a forward pass, asserts valid output shape and
+    no NaN/Inf. TestQwen25GreedyDecode runs 5-step greedy decode. Skips when
+    env var not set.
+  - [ ] S62.1.1 Create tests/parity/qwen_test.go  Est: 45m
+  - [ ] S62.1.2 Add greedy decode test  Est: 30m
+  - [ ] S62.1.3 Add generation test via inference API  Est: 30m
+  - [ ] S62.1.4 Run golangci-lint and go test  Est: 15m
+
+- [ ] T62.2 Run linters and verify for E62  Owner: TBD  Est: 15m
+  - Dependencies: T62.1
+  - [ ] S62.2.1 Run golangci-lint, go test -race  Est: 10m
+  - [ ] S62.2.2 Fix any issues  Est: 5m
+
+#### E63: Partial RoPE for Phi-4 (Tier 3)
+
+Implement partial/fractional RoPE where only a fraction of head dimensions
+are rotated, while the rest remain position-agnostic.
+
+- [ ] T63.1 Add partial rotation to RotaryPositionalEmbedding  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: layers/embeddings/rotary_positional_embedding.go (modify)
+  - Acceptance: A new WithRotaryDimFraction(fraction float64) option controls
+    what fraction of head dimensions receive rotation. Default is 1.0 (all
+    dimensions rotated, current behavior). When fraction < 1.0, the Forward()
+    method splits the input tensor into rotated and non-rotated portions along
+    the last dimension, applies RoPE to the rotated portion, and concatenates.
+    Example: headDim=128, fraction=0.75 -> 96 dims rotated, 32 unrotated.
+    Test: fraction=0.5 produces output where first half is rotated, second half
+    is identical to input.
+  - [ ] S63.1.1 Add WithRotaryDimFraction option  Est: 10m
+  - [ ] S63.1.2 Modify Forward to split/rotate/concat when fraction < 1.0  Est: 30m
+  - [ ] S63.1.3 Modify Backward for partial rotation  Est: 20m
+  - [ ] S63.1.4 Write unit tests: full rotation (default), partial (0.75), half (0.5)  Est: 20m
+  - [ ] S63.1.5 Verify existing RoPE tests still pass  Est: 5m
+  - [ ] S63.1.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T63.2 Integrate partial RoPE into model loading  Owner: TBD  Est: 30m
+  - Dependencies: T63.1, E57
+  - Files: model/builder.go (modify)
+  - Acceptance: When ModelMetadata.PartialRotaryFactor is set (e.g., 0.75 for
+    Phi-4), the model builder passes WithRotaryDimFraction to RoPE construction.
+  - [ ] S63.2.1 Read PartialRotaryFactor from ModelMetadata in builder  Est: 10m
+  - [ ] S63.2.2 Pass fraction option to RotaryPositionalEmbedding  Est: 10m
+  - [ ] S63.2.3 Write tests  Est: 10m
+
+- [ ] T63.3 Run linters and verify for E63  Owner: TBD  Est: 15m
+  - Dependencies: T63.2
+  - [ ] S63.3.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [ ] S63.3.2 Fix any remaining issues  Est: 5m
+
+#### E64: Tied Embeddings for Phi-4 (Tier 3)
+
+Add support for sharing the input token embedding weight matrix with the
+output LMHead layer, reducing model parameter count.
+
+- [ ] T64.1 Add tied embedding support to LMHead  Owner: TBD  Est: 1h
+  - Dependencies: None
+  - Files: layers/core/lm_head.go (modify)
+  - Acceptance: LMHead gains a TiedWeight field. When set, Forward() uses the
+    tied weight (transposed) instead of its own weight parameter. A factory
+    function NewTiedLMHead(engine, tiedWeight) creates an LMHead with shared
+    weights. The existing NewLMHead (with own weights) is unchanged.
+    BuildLMHead[T] checks if tie_word_embeddings=true in config and, when true,
+    finds the token embedding weight and passes it to NewTiedLMHead.
+    Test: tied LMHead produces same output as manual transpose + matmul.
+  - [ ] S64.1.1 Add TiedWeight field and NewTiedLMHead constructor  Est: 15m
+  - [ ] S64.1.2 Modify Forward to use tied weight when present  Est: 15m
+  - [ ] S64.1.3 Update BuildLMHead to handle tie_word_embeddings config  Est: 15m
+  - [ ] S64.1.4 Write unit tests: tied vs untied, verify output correctness  Est: 15m
+  - [ ] S64.1.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T64.2 Run linters and verify for E64  Owner: TBD  Est: 15m
+  - Dependencies: T64.1
+  - [ ] S64.2.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [ ] S64.2.2 Fix any remaining issues  Est: 5m
+
+#### E65: Phi-4 Validation (Tier 3)
+
+Validate Phi-4 model loading and generation with partial RoPE and tied embeddings.
+
+- [ ] T65.1 Phi-4 forward pass parity test  Owner: TBD  Est: 2h
+  - Dependencies: E57, E58, E63, E64
+  - Files: tests/parity/phi4_test.go (new)
+  - Acceptance: TestPhi4ForwardPass loads a Phi-4 ZMF model (env-gated by
+    PHI4_ZMF_PATH), runs a forward pass, asserts valid output. TestPhi4GreedyDecode
+    runs 5-step greedy decode. Skips when env var not set.
+  - [ ] S65.1.1 Create tests/parity/phi4_test.go  Est: 45m
+  - [ ] S65.1.2 Add greedy decode test  Est: 30m
+  - [ ] S65.1.3 Add generation test via inference API  Est: 30m
+  - [ ] S65.1.4 Run golangci-lint and go test  Est: 15m
+
+- [ ] T65.2 Run linters and verify for E65  Owner: TBD  Est: 15m
+  - Dependencies: T65.1
+  - [ ] S65.2.1 Run golangci-lint, go test -race  Est: 10m
+  - [ ] S65.2.2 Fix any issues  Est: 5m
+
+#### E66: Multi-head Latent Attention (Tier 4)
+
+Implement Multi-head Latent Attention (MLA) as used in DeepSeek V3/R1. MLA
+replaces GQA with low-rank KV compression, dramatically reducing KV cache size.
+
+- [ ] T66.1 Implement MultiHeadLatentAttention layer  Owner: TBD  Est: 4h
+  - Dependencies: None
+  - Files: layers/attention/multi_head_latent_attention.go (new)
+  - Acceptance: MultiHeadLatentAttention[T] struct with fields: W_DKV (down-projection
+    to compress KV, shape [hidden, kv_lora_dim]), W_UK (up-projection for keys,
+    shape [kv_lora_dim, num_heads * head_dim]), W_UV (up-projection for values,
+    shape [kv_lora_dim, num_heads * head_dim]), W_Q (query projection,
+    shape [hidden, num_heads * head_dim]), W_O (output projection). Configurable:
+    kv_lora_dim (default 512), num_heads, head_dim. Forward:
+    (a) Compress: c_kv = x * W_DKV (shape: [batch, seq, kv_lora_dim])
+    (b) Decompress: K = c_kv * W_UK, V = c_kv * W_UV
+    (c) Q = x * W_Q
+    (d) Apply RoPE to Q and a subvector of K (decoupled RoPE)
+    (e) Standard scaled dot-product attention: softmax(Q * K^T / sqrt(d)) * V
+    (f) Output projection: O * W_O
+    KV cache stores c_kv (compressed latent) instead of full K/V.
+    Test: construct MLA with small dims, verify output shape is correct,
+    verify KV cache stores compressed latent of correct shape.
+  - [ ] S66.1.1 Define MultiHeadLatentAttention struct with all weight fields  Est: 30m
+  - [ ] S66.1.2 Implement Forward: down-project, up-project, attention, output  Est: 60m
+  - [ ] S66.1.3 Implement KV cache integration (cache c_kv, decompress on read)  Est: 30m
+  - [ ] S66.1.4 Implement decoupled RoPE (rotate subvector of Q and K)  Est: 30m
+  - [ ] S66.1.5 Write unit tests: output shape, cache shape, attention correctness  Est: 30m
+  - [ ] S66.1.6 Run golangci-lint and go test -cover  Est: 10m
+
+- [ ] T66.2 Add BuildMultiHeadLatentAttention and register  Owner: TBD  Est: 1h
+  - Dependencies: T66.1
+  - Files: layers/attention/mla_registry.go (new), layers/registry/registry.go (modify)
+  - Acceptance: BuildMultiHeadLatentAttention[T] reads kv_lora_dim, num_heads,
+    head_dim, qk_rope_head_dim from node attributes. Loads W_DKV, W_UK, W_UV,
+    W_Q, W_O from node parameters. Registered as "MultiHeadLatentAttention" in
+    RegisterAll. Test: build from attributes and verify Forward works.
+  - [ ] S66.2.1 Implement BuildMultiHeadLatentAttention  Est: 25m
+  - [ ] S66.2.2 Register "MultiHeadLatentAttention" in RegisterAll  Est: 5m
+  - [ ] S66.2.3 Write unit tests for builder  Est: 20m
+  - [ ] S66.2.4 Run golangci-lint and go test -cover  Est: 10m
+
+- [ ] T66.3 Run linters and verify for E66  Owner: TBD  Est: 15m
+  - Dependencies: T66.2
+  - [ ] S66.3.1 Run golangci-lint, go test -cover -race on layers/attention/  Est: 10m
+  - [ ] S66.3.2 Fix any remaining issues  Est: 5m
+
+#### E67: Shared Expert MoE (Tier 4)
+
+Add shared expert support to MixtureOfExperts, where one expert processes
+every token in addition to the top-k routed experts.
+
+- [ ] T67.1 Add shared expert to MixtureOfExperts  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: layers/core/moe.go (modify)
+  - Acceptance: MixtureOfExperts gains a SharedExpert field (graph.Node[T]).
+    When SharedExpert is non-nil, Forward() runs the shared expert on every
+    token and adds its output to the weighted sum of routed expert outputs.
+    When nil, behavior is unchanged (backwards compatible). BuildMixtureOfExperts
+    checks for n_shared_experts config and loads shared expert weights if present.
+    Test: with shared expert, output equals (shared_output + weighted_routed_output).
+  - [ ] S67.1.1 Add SharedExpert field to MixtureOfExperts  Est: 10m
+  - [ ] S67.1.2 Modify Forward to include shared expert output  Est: 20m
+  - [ ] S67.1.3 Update builder to load shared expert  Est: 15m
+  - [ ] S67.1.4 Write unit tests: with shared, without shared (backward compat)  Est: 25m
+  - [ ] S67.1.5 Verify existing MoE tests still pass  Est: 5m
+  - [ ] S67.1.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T67.2 Run linters and verify for E67  Owner: TBD  Est: 15m
+  - Dependencies: T67.1
+  - [ ] S67.2.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [ ] S67.2.2 Fix any remaining issues  Est: 5m
+
+#### E68: DeepSeek V3 Validation (Tier 4)
+
+Validate DeepSeek V3 model loading and generation with MLA and shared MoE.
+
+- [ ] T68.1 DeepSeek V3 forward pass parity test  Owner: TBD  Est: 3h
+  - Dependencies: E57, E58, E66, E67
+  - Files: tests/parity/deepseek_test.go (new)
+  - Acceptance: TestDeepSeekV3ForwardPass loads a DeepSeek V3 ZMF model (env-gated
+    by DEEPSEEK_ZMF_PATH), runs a forward pass, asserts valid output shape and
+    no NaN/Inf. TestDeepSeekV3GreedyDecode runs 5-step greedy decode. Skips when
+    env var not set.
+  - Risk: DeepSeek V3 is 671B parameters total. Testing may require a smaller
+    variant or a subset of layers.
+  - [ ] S68.1.1 Create tests/parity/deepseek_test.go  Est: 60m
+  - [ ] S68.1.2 Add greedy decode test  Est: 45m
+  - [ ] S68.1.3 Add generation test via inference API  Est: 30m
+  - [ ] S68.1.4 Run golangci-lint and go test  Est: 15m
+
+- [ ] T68.2 Run linters and verify for E68  Owner: TBD  Est: 15m
+  - Dependencies: T68.1
+  - [ ] S68.2.1 Run golangci-lint, go test -race  Est: 10m
+  - [ ] S68.2.2 Fix any issues  Est: 5m
+
+#### E69: Phase 9 Final Verification
+
+Run the full quality gate suite after all Phase 9 work is complete.
+
+- [ ] T69.1 Run full test suite with coverage and race detector  Owner: TBD  Est: 30m
+  - Dependencies: E57, E58, E59, E60, E61, E62, E63, E64, E65, E66, E67, E68
+  - Acceptance: go test ./... -cover -race passes. All new code >= 90% coverage.
+    No regressions in existing tests. All parity tests skip gracefully when model
+    files are not present.
+  - [ ] S69.1.1 Run go test ./... -cover -race  Est: 15m
+  - [ ] S69.1.2 Verify coverage thresholds  Est: 10m
+  - [ ] S69.1.3 Fix any regressions  Est: 5m
+
+- [ ] T69.2 Run linters and verify  Owner: TBD  Est: 15m
+  - Dependencies: T69.1
+  - Acceptance: golangci-lint 0 issues. go vet clean.
+  - [ ] S69.2.1 Run golangci-lint run ./...  Est: 5m
+  - [ ] S69.2.2 Run go vet ./...  Est: 5m
+  - [ ] S69.2.3 Fix any remaining issues  Est: 5m
+
+- [ ] T69.3 Update documentation  Owner: TBD  Est: 45m
+  - Dependencies: T69.2
+  - Acceptance: docs/plan.md Phase 9 tasks marked complete. docs/design.md updated
+    with multi-architecture support section listing all supported model families,
+    their config fields, and any architecture-specific notes.
+  - [ ] S69.3.1 Update docs/plan.md  Est: 15m
+  - [ ] S69.3.2 Update docs/design.md with supported architectures table  Est: 20m
+  - [ ] S69.3.3 Update hand-off notes  Est: 10m
+
+---
+
 ## 4. Timeline and Milestones
 
 | ID | Milestone | Dependencies | Exit Criteria |
@@ -1999,6 +2650,17 @@ Validate the full pipeline: pull model, load, generate coherent text, serve.
 | M41 | High-level API | E54 | inference.Load + Model.Generate + Model.Chat + Model.Embed working |
 | M42 | CLI commands | E55 | zerfoo pull/run/serve commands working |
 | M43 | Phase 8 complete | E56 | End-to-end: Gemma 3 generates coherent text; serve API tested |
+| M44 | Multi-arch config | E57 | Config parsers for Llama, Mistral, Qwen, Phi, DeepSeek registered |
+| M45 | Param name resolver | E58 | Architecture-specific weight names resolve during model building |
+| M46 | Tier 1 validated | E59 | Llama 3 and Mistral forward pass parity tests pass |
+| M47 | Tier 2 features | E60, E61 | QKV bias in GQA; YaRN RoPE scaling implemented |
+| M48 | Tier 2 validated | E62 | Qwen 2.5 forward pass parity test passes |
+| M49 | Tier 3 features | E63, E64 | Partial RoPE; tied embeddings implemented |
+| M50 | Tier 3 validated | E65 | Phi-4 forward pass parity test passes |
+| M51 | MLA implemented | E66 | MultiHeadLatentAttention layer registered and tested |
+| M52 | Tier 4 features | E67 | Shared expert MoE implemented |
+| M53 | Tier 4 validated | E68 | DeepSeek V3 forward pass parity test passes |
+| M54 | Phase 9 complete | E69 | Full suite green; all architectures documented |
 
 ### Recommended Sequence
 
@@ -2060,6 +2722,28 @@ Parallelism opportunities:
 35. **E55** (CLI Commands) -- Depends on E53 (pull) + E54 (run/serve)
 36. **E56** (End-to-End Validation) -- After all Phase 8 epics
 
+**Phase 9 (Multi-Architecture Support):**
+37. **E57** (Config Parsing) -- Foundation; no Phase 9 deps
+38. **E58** (Param Name Resolver) -- Depends on E57
+39. **E59** (Llama/Mistral Validation) -- Depends on E57, E58; Tier 1
+40. **E60** (QKV Bias) -- Independent of E57; can parallel
+41. **E61** (YaRN RoPE) -- Independent; can parallel with E60
+42. **E62** (Qwen Validation) -- Depends on E57, E58, E60, E61; Tier 2
+43. **E63** (Partial RoPE) -- Independent; can parallel with E60/E61
+44. **E64** (Tied Embeddings) -- Independent; can parallel
+45. **E65** (Phi-4 Validation) -- Depends on E57, E58, E63, E64; Tier 3
+46. **E66** (MLA) -- Independent of all above; can start early
+47. **E67** (Shared MoE) -- Independent; can parallel with E66
+48. **E68** (DeepSeek Validation) -- Depends on E57, E58, E66, E67; Tier 4
+49. **E69** (Final Verification) -- After all Phase 9 epics
+
+Parallelism opportunities:
+- E57 is the only serial dependency for validation epics (E59, E62, E65, E68)
+- E60, E61, E63, E64, E66, E67 are all independent layer implementations; run all in parallel
+- E59 (Tier 1) can start as soon as E57+E58 are done
+- E62 depends on E60+E61; E65 depends on E63+E64; E68 depends on E66+E67
+- Each tier is independently shippable
+
 Parallelism opportunities:
 - E49 + E50 + E53 are all independent foundations; run in parallel
 - E51 starts after E49 + E50
@@ -2105,6 +2789,8 @@ A task is done when:
 ---
 
 ## 6. Progress Log
+
+- **2026 03 02 (update 22):** Change Summary: Added Phase 9 -- Multi-Architecture Open-Weight Model Support. Comprehensive gap analysis of major open-weight model families (Llama 3, Mistral, Mixtral, Qwen 2.5/3, Phi-4, DeepSeek V3/R1, Falcon Mamba, RWKV) against Zerfoo's 56+ layer inventory. Findings: Tier 1 (Llama, Mistral, Mixtral) already architecturally supported, need only config.json parsing and parameter name mapping. Tier 2 (Qwen) needs QKV bias in GQA and YaRN RoPE scaling. Tier 3 (Phi-4) needs partial/fractional RoPE and tied embeddings. Tier 4 (DeepSeek V3/R1) needs Multi-head Latent Attention (MLA) and shared expert MoE. Tier 5 (SSM/Mamba/RWKV/DeltaNet) deferred as different paradigm. New epics: E57 (multi-architecture config parsing with registry), E58 (parameter name resolver for architecture-specific weight naming), E59 (Llama/Mistral validation), E60 (QKV bias for Qwen), E61 (YaRN RoPE scaling), E62 (Qwen validation), E63 (partial RoPE for Phi-4), E64 (tied embeddings for Phi-4), E65 (Phi-4 validation), E66 (Multi-head Latent Attention for DeepSeek), E67 (shared expert MoE for DeepSeek), E68 (DeepSeek validation), E69 (final verification). 31 tasks, ~35 hours estimated. Added milestones M44-M54. Each tier is independently shippable.
 
 - **2026 03 02 (update 21):** Change Summary: Completed E56 (End-to-End Validation) and Phase 8. T56.1: Gemma 3 e2e generation test (tests/parity/gemma3_generation_test.go) using inference.Load with dirRegistry mock, greedy determinism, streaming parity, and chat generation. Skips when GEMMA3_MODEL_DIR/GEMMA3_ZMF_PATH not set. T56.2: HTTP serve integration tests (TestChatCompletion_StreamParity, TestCompletion_StreamParity) verifying SSE events are well-formed and concatenated content matches non-streaming. T56.3: Full test suite passes with -race (55 packages), all Phase 8 packages >= 90% coverage (generate 95%, inference 96.4%, serve 96.4%), golangci-lint 0 issues, go vet clean. T56.4: Updated docs/design.md with inference pipeline section (11.2), updated package layout, updated data flow diagram, added known limitations. Updated hand-off notes for Phase 8 complete status. Commit: 6145789.
 
@@ -2157,6 +2843,7 @@ A task is done when:
 - **Phase 6 status:** Complete. Open weights model import (Gemma 3, SigLIP, Kimi-VL). All operators registered and tested.
 - **Phase 7 status:** Complete. Dead code removed (pkg/prelude, tests/helpers, 7 dead test files). Layer registration consolidated (no more init()). Graph.Forward/Backward thread-safe via sync.Mutex.
 - **Phase 8 status:** Complete. Embeddable Go-native inference library. Production BPE tokenizer (tokenizer.json), KV cache, autoregressive generation loop with sampling (temperature, topK, topP, repetition penalty), streaming via TokenStream, model registry with local cache, high-level API (inference.Load/Generate/GenerateStream/Chat), CLI commands (pull/run/serve), OpenAI-compatible HTTP server (SSE streaming). Coverage: generate 95%, inference 96.4%, serve 96.4%, registry 91.2%, tokenizer 90.9%.
+- **Phase 9 status:** Planned (not started). Multi-architecture open-weight model support. Tier 1 (Llama/Mistral) needs config mapping only. Tier 2 (Qwen) needs QKV bias + YaRN. Tier 3 (Phi-4) needs partial RoPE + tied embeddings. Tier 4 (DeepSeek) needs MLA + shared MoE. 31 tasks across 13 epics (E57-E69).
 - **GPU hardware validation:** Blocked on GCP GPU quota (E29).
 - **Key files to read first:**
   - inference/inference.go -- High-level API: Load, Generate, Chat, GenerateStream
@@ -2273,6 +2960,22 @@ A task is done when:
 | CI/CD | 9/10 | No changes from Phase 7 |
 | Developer Experience | 9/10 | 3-line model loading and generation (E54); ollama-style CLI (E55) |
 
+### Target Scorecard (After Phase 9)
+
+| Category | Target | How Achieved |
+|----------|--------|-------------|
+| Architecture | 10/10 | Multi-architecture config parsing (E57); MLA attention variant (E66) |
+| Core Functionality | 10/10 | 6 model families supported: Gemma, Llama, Mistral, Qwen, Phi, DeepSeek |
+| Testing | 10/10 | Parity tests for all supported architectures (E59, E62, E65, E68) |
+| Error Handling | 9/10 | No changes from Phase 8 |
+| Security | 8/10 | No changes from Phase 8 |
+| Observability | 8/10 | No changes from Phase 8 |
+| Configuration | 10/10 | Architecture-aware config parsing with HuggingFace field mapping (E57) |
+| Operations | 10/10 | No changes from Phase 8 |
+| Documentation | 10/10 | Supported architectures table in design.md (T69.3) |
+| CI/CD | 9/10 | No changes from Phase 8 |
+| Model Coverage | 10/10 | Covers >90% of open-weight model downloads on HuggingFace |
+
 ### New Packages and Files Created
 
 | Package / File | Purpose | Epic |
@@ -2334,3 +3037,12 @@ A task is done when:
 | cmd/cli/serve.go | zerfoo serve HTTP server command | E55 |
 | serve/server.go | OpenAI-compatible HTTP API server (net/http) | E55 |
 | tests/parity/gemma3_generation_test.go | End-to-end generation parity test | E56 |
+| inference/arch_config.go | Multi-architecture config.json parsing | E57 |
+| model/param_resolver.go | Architecture-specific parameter name resolution | E58 |
+| tests/parity/llama3_test.go | Llama 3 forward pass parity test | E59 |
+| tests/parity/mistral_test.go | Mistral forward pass parity test | E59 |
+| tests/parity/qwen_test.go | Qwen 2.5 forward pass parity test | E62 |
+| tests/parity/phi4_test.go | Phi-4 forward pass parity test | E65 |
+| layers/attention/multi_head_latent_attention.go | Multi-head Latent Attention (MLA) for DeepSeek | E66 |
+| layers/attention/mla_registry.go | MLA builder and registry integration | E66 |
+| tests/parity/deepseek_test.go | DeepSeek V3 forward pass parity test | E68 |
