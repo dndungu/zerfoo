@@ -611,6 +611,153 @@ func TestBuildGroupQueryAttention_OddHeadDim(t *testing.T) {
 	}
 }
 
+// makeNonZeroParam creates a parameter with non-zero data for testing.
+func makeNonZeroParam(t *testing.T, name string, shape []int) *graph.Parameter[float32] {
+	t.Helper()
+	total := 1
+	for _, d := range shape {
+		total *= d
+	}
+	data := make([]float32, total)
+	for i := range data {
+		data[i] = float32(i%7+1) * 0.01
+	}
+	weight, err := tensor.New[float32](shape, data)
+	if err != nil {
+		t.Fatalf("tensor.New failed: %v", err)
+	}
+	p, err := graph.NewParameter(name, weight, tensor.New[float32])
+	if err != nil {
+		t.Fatalf("NewParameter failed: %v", err)
+	}
+	return p
+}
+
+func TestBuildGroupQueryAttention_WithBias(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	modelDim := 16
+	numQ := 4
+	numKV := 2
+	headDim := modelDim / numQ
+	kvDim := headDim * numKV
+
+	// Use non-zero weights so bias has observable effect
+	wq := makeNonZeroParam(t, "attn_wq", []int{modelDim, modelDim})
+	wk := makeNonZeroParam(t, "attn_wk", []int{modelDim, kvDim})
+	wv := makeNonZeroParam(t, "attn_wv", []int{modelDim, kvDim})
+	wo := makeNonZeroParam(t, "attn_wo", []int{modelDim, modelDim})
+
+	// Create bias params with non-zero values
+	qBias := makeNonZeroParam(t, "attn_wq_bias", []int{modelDim})
+	kBias := makeNonZeroParam(t, "attn_wk_bias", []int{kvDim})
+	vBias := makeNonZeroParam(t, "attn_wv_bias", []int{kvDim})
+
+	attrs := map[string]interface{}{
+		"model_dim":           modelDim,
+		"num_query_heads":     numQ,
+		"num_key_value_heads": numKV,
+		"rope_base":           10000.0,
+		"max_seq_len":         64,
+	}
+
+	input, err := tensor.New[float32]([]int{1, 4, modelDim}, nil)
+	if err != nil {
+		t.Fatalf("tensor.New failed: %v", err)
+	}
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.01
+	}
+
+	// Build and run WITHOUT bias
+	paramsNoBias := map[string]*graph.Parameter[float32]{
+		"attn_wq": wq, "attn_wk": wk, "attn_wv": wv, "attn_wo": wo,
+	}
+	nodeNoBias, err := BuildGroupQueryAttention[float32](engine, ops, "attn", paramsNoBias, attrs)
+	if err != nil {
+		t.Fatalf("BuildGroupQueryAttention without bias failed: %v", err)
+	}
+	outNoBias, err := nodeNoBias.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward without bias failed: %v", err)
+	}
+
+	// Build and run WITH bias
+	paramsWithBias := map[string]*graph.Parameter[float32]{
+		"attn_wq": wq, "attn_wk": wk, "attn_wv": wv, "attn_wo": wo,
+		"attn_wq_bias": qBias, "attn_wk_bias": kBias, "attn_wv_bias": vBias,
+	}
+	nodeWithBias, err := BuildGroupQueryAttention[float32](engine, ops, "attn", paramsWithBias, attrs)
+	if err != nil {
+		t.Fatalf("BuildGroupQueryAttention with bias failed: %v", err)
+	}
+	outWithBias, err := nodeWithBias.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward with bias failed: %v", err)
+	}
+
+	// Outputs should differ
+	biasData := outWithBias.Data()
+	noBiasData := outNoBias.Data()
+	allSame := true
+	for i := range biasData {
+		if biasData[i] != noBiasData[i] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		t.Error("output with bias should differ from output without bias")
+	}
+}
+
+func TestBuildGroupQueryAttention_WithPartialBias(t *testing.T) {
+	// Only Q bias present — should still work (K, V get nil bias)
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	modelDim := 16
+	numQ := 4
+	numKV := 2
+	headDim := modelDim / numQ
+	kvDim := headDim * numKV
+
+	params := map[string]*graph.Parameter[float32]{
+		"attn_wq":      makeParam(t, "attn_wq", []int{modelDim, modelDim}),
+		"attn_wk":      makeParam(t, "attn_wk", []int{modelDim, kvDim}),
+		"attn_wv":      makeParam(t, "attn_wv", []int{modelDim, kvDim}),
+		"attn_wo":      makeParam(t, "attn_wo", []int{modelDim, modelDim}),
+		"attn_wq_bias": makeParam(t, "attn_wq_bias", []int{modelDim}),
+	}
+
+	attrs := map[string]interface{}{
+		"model_dim":           modelDim,
+		"num_query_heads":     numQ,
+		"num_key_value_heads": numKV,
+		"rope_base":           10000.0,
+		"max_seq_len":         64,
+	}
+
+	node, err := BuildGroupQueryAttention[float32](engine, ops, "attn", params, attrs)
+	if err != nil {
+		t.Fatalf("BuildGroupQueryAttention with partial bias failed: %v", err)
+	}
+
+	input, err := tensor.New[float32]([]int{1, 4, modelDim}, nil)
+	if err != nil {
+		t.Fatalf("tensor.New failed: %v", err)
+	}
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.01
+	}
+
+	_, err = node.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward with partial bias failed: %v", err)
+	}
+}
+
 func TestBuildGroupQueryAttention_MissingParams(t *testing.T) {
 	ops := numeric.Float32Ops{}
 	engine := compute.NewCPUEngine[float32](ops)
