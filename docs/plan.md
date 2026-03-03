@@ -2325,21 +2325,24 @@ existing pipeline with the new config parsing and parameter mapping.
 Add optional bias terms to Q, K, V projections in GroupedQueryAttention so
 Qwen models (which use attention_bias=true) work correctly.
 
-- [ ] T60.1 Add bias support to GroupedQueryAttention  Owner: TBD  Est: 1.5h
+- [x] T60.1 Add bias support to GroupedQueryAttention  Owner: TBD  Est: 1.5h
   - Dependencies: None
-  - Files: layers/attention/grouped_query_attention.go (modify)
+  - Files: layers/attention/registry.go (modify), grouped_query_attention_extended_test.go (modify)
   - Acceptance: GroupedQueryAttention gains optional bias fields: qBias, kBias,
     vBias (*tensor.TensorNumeric[T]). When present, Forward() adds bias after
     the linear projection: Q = X * Wq + bq. When nil, behavior is unchanged
     (backwards compatible). BuildGroupQueryAttention[T] reads bias parameters
     from node initializers when present (e.g., "q_proj.bias"). Test: construct
     GQA with biases, verify output differs from without bias, matches reference.
-  - [ ] S60.1.1 Add optional bias fields to GroupedQueryAttention  Est: 15m
-  - [ ] S60.1.2 Modify Forward to apply bias after projection when present  Est: 20m
-  - [ ] S60.1.3 Update BuildGroupQueryAttention to load bias params  Est: 15m
-  - [ ] S60.1.4 Write unit tests: with bias, without bias (backward compat)  Est: 25m
-  - [ ] S60.1.5 Verify existing GQA tests still pass  Est: 5m
-  - [ ] S60.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - Note: Bias is handled by the existing Dense layer (core.NewDenseFromParams
+    accepts *Bias). No new fields needed on GQA struct itself — the registry
+    builder (optionalBias helper) looks up bias params and passes to Dense.
+  - [x] S60.1.1 Add optional bias fields to GroupedQueryAttention  Est: 15m  (via Dense layer)
+  - [x] S60.1.2 Modify Forward to apply bias after projection when present  Est: 20m  (Dense handles this)
+  - [x] S60.1.3 Update BuildGroupQueryAttention to load bias params  Est: 15m
+  - [x] S60.1.4 Write unit tests: with bias, without bias (backward compat)  Est: 25m
+  - [x] S60.1.5 Verify existing GQA tests still pass  Est: 5m
+  - [x] S60.1.6 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T60.2 Run linters and verify for E60  Owner: TBD  Est: 15m
   - Dependencies: T60.1
