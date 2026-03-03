@@ -2305,15 +2305,15 @@ existing pipeline with the new config parsing and parameter mapping.
   - [x] S59.1.3 Add generation test via inference API  Est: 30m
   - [x] S59.1.4 Run golangci-lint and go test  Est: 15m
 
-- [ ] T59.2 Mistral forward pass parity test  Owner: TBD  Est: 1h
+- [x] T59.2 Mistral forward pass parity test  Owner: TBD  Est: 1h
   - Dependencies: E57, E58
   - Files: tests/parity/mistral_test.go (new)
   - Acceptance: TestMistralForwardPass loads a Mistral 7B ZMF model (env-gated by
     MISTRAL_ZMF_PATH), runs a forward pass, asserts valid output. Skips when env
     var not set.
-  - [ ] S59.2.1 Create tests/parity/mistral_test.go  Est: 30m
-  - [ ] S59.2.2 Add greedy decode test  Est: 20m
-  - [ ] S59.2.3 Run golangci-lint and go test  Est: 10m
+  - [x] S59.2.1 Create tests/parity/mistral_test.go  Est: 30m
+  - [x] S59.2.2 Add greedy decode test  Est: 20m
+  - [x] S59.2.3 Run golangci-lint and go test  Est: 10m
 
 - [ ] T59.3 Run linters and verify for E59  Owner: TBD  Est: 15m
   - Dependencies: T59.1, T59.2
