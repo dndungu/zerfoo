@@ -443,3 +443,149 @@ func TestRotaryPositionalEmbedding_YaRN_ForwardBackward(t *testing.T) {
 		t.Errorf("gradient shape = %v, want %v", grads[0].Shape(), input.Shape())
 	}
 }
+
+func TestRotaryPositionalEmbedding_PartialRotation_Default(t *testing.T) {
+	// Default fraction (1.0) should produce same output as explicit 1.0.
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	headDim := 8
+	seqLen := 4
+	base := 10000.0
+
+	rpeDefault, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, seqLen, WithRotaryBase(base))
+	if err != nil {
+		t.Fatalf("default RoPE failed: %v", err)
+	}
+
+	rpeFull, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, seqLen,
+		WithRotaryBase(base),
+		WithRotaryDimFraction(1.0),
+	)
+	if err != nil {
+		t.Fatalf("fraction=1.0 RoPE failed: %v", err)
+	}
+
+	input, _ := tensor.New[float32]([]int{1, seqLen, headDim}, nil)
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.1
+	}
+
+	outDefault, err := rpeDefault.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("default Forward failed: %v", err)
+	}
+
+	outFull, err := rpeFull.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("fraction=1.0 Forward failed: %v", err)
+	}
+
+	for i, v := range outDefault.Data() {
+		if v != outFull.Data()[i] {
+			t.Errorf("default vs fraction=1.0 differ at index %d: %f != %f", i, v, outFull.Data()[i])
+			break
+		}
+	}
+}
+
+func TestRotaryPositionalEmbedding_PartialRotation_Half(t *testing.T) {
+	// fraction=0.5 with headDim=8: 4 dims rotated, 4 dims unchanged.
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	headDim := 8
+	seqLen := 4
+	base := 10000.0
+
+	rpe, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, seqLen,
+		WithRotaryBase(base),
+		WithRotaryDimFraction(0.5),
+	)
+	if err != nil {
+		t.Fatalf("fraction=0.5 RoPE failed: %v", err)
+	}
+
+	input, _ := tensor.New[float32]([]int{1, seqLen, headDim}, nil)
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.1
+	}
+
+	output, err := rpe.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(output.Shape(), input.Shape()) {
+		t.Fatalf("output shape = %v, want %v", output.Shape(), input.Shape())
+	}
+
+	// The last 4 dims of each position should be unchanged (pass-through).
+	rotDim := 4 // headDim * 0.5
+	for pos := 0; pos < seqLen; pos++ {
+		for d := rotDim; d < headDim; d++ {
+			idx := pos*headDim + d
+			if output.Data()[idx] != input.Data()[idx] {
+				t.Errorf("pos=%d dim=%d: output=%f should equal input=%f (unrotated region)",
+					pos, d, output.Data()[idx], input.Data()[idx])
+			}
+		}
+	}
+
+	// The first 4 dims should differ (at least for pos > 0).
+	anyDiffer := false
+	for pos := 1; pos < seqLen; pos++ {
+		for d := 0; d < rotDim; d++ {
+			idx := pos*headDim + d
+			if output.Data()[idx] != input.Data()[idx] {
+				anyDiffer = true
+				break
+			}
+		}
+		if anyDiffer {
+			break
+		}
+	}
+	if !anyDiffer {
+		t.Error("rotated region should differ from input for pos > 0")
+	}
+}
+
+func TestRotaryPositionalEmbedding_PartialRotation_ForwardBackward(t *testing.T) {
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	rpe, err := NewRotaryPositionalEmbedding[float32](ctx, engine, 8, 16,
+		WithRotaryBase(10000.0),
+		WithRotaryDimFraction(0.75),
+	)
+	if err != nil {
+		t.Fatalf("partial RoPE failed: %v", err)
+	}
+
+	input, _ := tensor.New[float32]([]int{2, 8, 8}, nil)
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%5+1) * 0.01
+	}
+
+	out, err := rpe.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	dOut, _ := tensor.New[float32](out.Shape(), nil)
+	for i := range dOut.Data() {
+		dOut.Data()[i] = 1.0
+	}
+
+	grads, err := rpe.Backward(ctx, types.FullBackprop, dOut)
+	if err != nil {
+		t.Fatalf("Backward failed: %v", err)
+	}
+	if len(grads) != 1 {
+		t.Errorf("expected 1 gradient, got %d", len(grads))
+	}
+	if !reflect.DeepEqual(grads[0].Shape(), input.Shape()) {
+		t.Errorf("gradient shape = %v, want %v", grads[0].Shape(), input.Shape())
+	}
+}
