@@ -2212,7 +2212,7 @@ different HuggingFace model families without manual config translation.
   - [x] S57.3.3 Add testdata fixtures and tests  Est: 15m
   - [x] S57.3.4 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T57.4 Add Phi and DeepSeek config parsers  Owner: TBD  Est: 45m
+- [x] T57.4 Add Phi and DeepSeek config parsers  Owner: Claude  Est: 45m  Completed: 2026 03 03
   - Dependencies: T57.1
   - Files: inference/arch_config.go (extend)
   - Acceptance: Parser for model_type "phi3" / "phi" maps: same as Llama plus
@@ -2222,10 +2222,10 @@ different HuggingFace model families without manual config translation.
     q_lora_rank -> QLoRADim, qk_rope_head_dim -> QKRopeHeadDim,
     num_experts -> NumExperts, num_experts_per_tok -> NumExpertsPerToken,
     n_shared_experts -> NumSharedExperts.
-  - [ ] S57.4.1 Implement Phi config parser  Est: 10m
-  - [ ] S57.4.2 Implement DeepSeek config parser  Est: 15m
-  - [ ] S57.4.3 Add testdata fixtures and tests  Est: 15m
-  - [ ] S57.4.4 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S57.4.1 Implement Phi config parser  Est: 10m
+  - [x] S57.4.2 Implement DeepSeek config parser  Est: 15m
+  - [x] S57.4.3 Add testdata fixtures and tests  Est: 15m
+  - [x] S57.4.4 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T57.5 Integrate config registry into inference.Load  Owner: TBD  Est: 30m
   - Dependencies: T57.2, T57.3, T57.4
