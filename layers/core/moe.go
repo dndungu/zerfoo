@@ -185,13 +185,14 @@ var _ graph.Node[float32] = (*MoEGate[float32])(nil)
 // Tech debt: ZMF sub-graph loading is not yet supported; experts are not
 // populated by BuildMixtureOfExperts.
 type MixtureOfExperts[T tensor.Numeric] struct {
-	engine      compute.Engine[T]
-	ops         numeric.Arithmetic[T]
-	gate        *MoEGate[T]
-	experts     []graph.Node[T]
-	numExperts  int
-	topK        int
-	outputShape []int
+	engine       compute.Engine[T]
+	ops          numeric.Arithmetic[T]
+	gate         *MoEGate[T]
+	experts      []graph.Node[T]
+	SharedExpert graph.Node[T] // optional: runs on every token, output added to routed sum
+	numExperts   int
+	topK         int
+	outputShape  []int
 }
 
 // NewMixtureOfExperts creates a MixtureOfExperts layer.
@@ -243,6 +244,18 @@ func (m *MixtureOfExperts[T]) Forward(ctx context.Context, inputs ...*tensor.Ten
 			return nil, fmt.Errorf("MixtureOfExperts: create token tensor: %w", terr)
 		}
 
+		// Shared expert: runs on every token.
+		if m.SharedExpert != nil {
+			sharedOut, serr := m.SharedExpert.Forward(ctx, token)
+			if serr != nil {
+				return nil, fmt.Errorf("MixtureOfExperts: shared expert forward: %w", serr)
+			}
+			sharedData := sharedOut.Data()
+			for d := 0; d < modelDim && d < len(sharedData); d++ {
+				outData[t*modelDim+d] = m.ops.Add(outData[t*modelDim+d], sharedData[d])
+			}
+		}
+
 		for k := 0; k < m.topK; k++ {
 			expertIdx := indices[t][k]
 			if expertIdx >= len(m.experts) {
@@ -277,11 +290,15 @@ func (m *MixtureOfExperts[T]) Backward(_ context.Context, _ types.BackwardMode, 
 func (m *MixtureOfExperts[T]) OpType() string { return "MixtureOfExperts" }
 
 // Attributes returns the layer configuration.
-func (m *MixtureOfExperts[T]) Attributes() map[string]interface{} {
-	return map[string]interface{}{
+func (m *MixtureOfExperts[T]) Attributes() map[string]any {
+	attrs := map[string]any{
 		"num_experts": m.numExperts,
 		"top_k":       m.topK,
 	}
+	if m.SharedExpert != nil {
+		attrs["has_shared_expert"] = true
+	}
+	return attrs
 }
 
 // OutputShape returns the output shape from the last forward call.
