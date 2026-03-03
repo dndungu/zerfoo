@@ -20,7 +20,7 @@ func newCUDADevice(deviceID int) *cudaDevice {
 	return &cudaDevice{
 		id:        fmt.Sprintf("cuda:%d", deviceID),
 		deviceID:  deviceID,
-		allocator: NewCUDAAllocator(),
+		allocator: NewCUDAAllocator(deviceID),
 	}
 }
 
