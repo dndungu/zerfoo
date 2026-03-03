@@ -113,6 +113,11 @@ func NewGlobalAttentionFromParams[T tensor.Numeric](gqa *GroupedQueryAttention[T
 	}
 }
 
+// SetLayerIndex sets the layer index for KV cache routing.
+func (ga *GlobalAttention[T]) SetLayerIndex(idx int) {
+	ga.gqa.LayerIndex = idx
+}
+
 // Parameters returns the parameters of the GlobalAttention layer.
 func (ga *GlobalAttention[T]) Parameters() []*graph.Parameter[T] {
 	return ga.gqa.Parameters()
