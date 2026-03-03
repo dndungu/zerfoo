@@ -2453,7 +2453,7 @@ are rotated, while the rest remain position-agnostic.
 Add support for sharing the input token embedding weight matrix with the
 output LMHead layer, reducing model parameter count.
 
-- [ ] T64.1 Add tied embedding support to LMHead  Owner: TBD  Est: 1h
+- [x] T64.1 Add tied embedding support to LMHead  Owner: TBD  Est: 1h
   - Dependencies: None
   - Files: layers/core/lm_head.go (modify)
   - Acceptance: LMHead gains a TiedWeight field. When set, Forward() uses the
@@ -2463,16 +2463,16 @@ output LMHead layer, reducing model parameter count.
     BuildLMHead[T] checks if tie_word_embeddings=true in config and, when true,
     finds the token embedding weight and passes it to NewTiedLMHead.
     Test: tied LMHead produces same output as manual transpose + matmul.
-  - [ ] S64.1.1 Add TiedWeight field and NewTiedLMHead constructor  Est: 15m
-  - [ ] S64.1.2 Modify Forward to use tied weight when present  Est: 15m
-  - [ ] S64.1.3 Update BuildLMHead to handle tie_word_embeddings config  Est: 15m
-  - [ ] S64.1.4 Write unit tests: tied vs untied, verify output correctness  Est: 15m
-  - [ ] S64.1.5 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S64.1.1 Add TiedWeight field and NewTiedLMHead constructor  Est: 15m
+  - [x] S64.1.2 Modify Forward to use tied weight when present  Est: 15m
+  - [x] S64.1.3 Update BuildLMHead to handle tie_word_embeddings config  Est: 15m
+  - [x] S64.1.4 Write unit tests: tied vs untied, verify output correctness  Est: 15m
+  - [x] S64.1.5 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T64.2 Run linters and verify for E64  Owner: TBD  Est: 15m
+- [x] T64.2 Run linters and verify for E64  Owner: TBD  Est: 15m
   - Dependencies: T64.1
-  - [ ] S64.2.1 Run golangci-lint, go test -cover -race  Est: 10m
-  - [ ] S64.2.2 Fix any remaining issues  Est: 5m
+  - [x] S64.2.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [x] S64.2.2 Fix any remaining issues  Est: 5m
 
 #### E65: Phi-4 Validation (Tier 3)
 
