@@ -19,7 +19,16 @@ import (
 type BuildOption func(*buildConfig)
 
 type buildConfig struct {
-	resolver ParamResolver
+	resolver         ParamResolver
+	globalAttributes map[string]interface{}
+}
+
+// WithGlobalAttributes injects extra key-value pairs into every node's
+// attribute map during graph construction. This is used, for example, to
+// propagate rope_scaling_* config from config.json into every GQA node
+// without requiring the ZMF file to carry these attributes.
+func WithGlobalAttributes(attrs map[string]interface{}) BuildOption {
+	return func(c *buildConfig) { c.globalAttributes = attrs }
 }
 
 // WithParamResolver supplies an architecture-aware parameter name resolver.
@@ -115,6 +124,12 @@ func BuildFromZMF[T tensor.Numeric](
 		}
 
 		attributes := convertAttributes(nodeProto.Attributes)
+		// Merge global attributes (e.g. rope_scaling) into per-node attributes.
+		for k, v := range cfg.globalAttributes {
+			if _, exists := attributes[k]; !exists {
+				attributes[k] = v
+			}
+		}
 
 		node, err := layerBuilder(engine, ops, nodeProto.Name, params, attributes)
 		if err != nil {
