@@ -122,24 +122,22 @@ func buildTestModel(t *testing.T, vocabSize int, tokenSequence []int) *Model {
 // --- loadMetadata tests ---
 
 func TestLoadMetadata(t *testing.T) {
-	t.Run("valid config", func(t *testing.T) {
+	t.Run("gemma config with model_type", func(t *testing.T) {
 		dir := t.TempDir()
-		cfg := ModelMetadata{
-			Architecture:          "gemma3",
-			VocabSize:             256000,
-			HiddenSize:            2048,
-			NumLayers:             26,
-			MaxPositionEmbeddings: 8192,
-			EOSTokenID:            1,
-			BOSTokenID:            2,
-			ChatTemplate:          "gemma",
-		}
-		data, err := json.Marshal(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
+		raw := `{
+			"model_type": "gemma3",
+			"vocab_size": 262144,
+			"hidden_size": 2048,
+			"num_hidden_layers": 26,
+			"num_attention_heads": 8,
+			"num_key_value_heads": 4,
+			"max_position_embeddings": 8192,
+			"eos_token_id": 1,
+			"bos_token_id": 2,
+			"chat_template": "gemma"
+		}`
 		path := filepath.Join(dir, "config.json")
-		if err := os.WriteFile(path, data, 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 			t.Fatal(err)
 		}
 
@@ -147,14 +145,70 @@ func TestLoadMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loadMetadata error: %v", err)
 		}
-		if got.VocabSize != 256000 {
-			t.Errorf("VocabSize = %d, want 256000", got.VocabSize)
+		if got.VocabSize != 262144 {
+			t.Errorf("VocabSize = %d, want 262144", got.VocabSize)
 		}
 		if got.Architecture != "gemma3" {
 			t.Errorf("Architecture = %q, want %q", got.Architecture, "gemma3")
 		}
+		if got.NumLayers != 26 {
+			t.Errorf("NumLayers = %d, want 26", got.NumLayers)
+		}
 		if got.ChatTemplate != "gemma" {
 			t.Errorf("ChatTemplate = %q, want %q", got.ChatTemplate, "gemma")
+		}
+	})
+
+	t.Run("llama config from fixture", func(t *testing.T) {
+		got, err := loadMetadata("testdata/llama3_config.json")
+		if err != nil {
+			t.Fatalf("loadMetadata error: %v", err)
+		}
+		if got.Architecture != "llama" {
+			t.Errorf("Architecture = %q, want %q", got.Architecture, "llama")
+		}
+		if got.VocabSize != 128256 {
+			t.Errorf("VocabSize = %d, want 128256", got.VocabSize)
+		}
+		if got.HiddenSize != 4096 {
+			t.Errorf("HiddenSize = %d, want 4096", got.HiddenSize)
+		}
+		if got.NumLayers != 32 {
+			t.Errorf("NumLayers = %d, want 32", got.NumLayers)
+		}
+		if got.NumQueryHeads != 32 {
+			t.Errorf("NumQueryHeads = %d, want 32", got.NumQueryHeads)
+		}
+		if got.NumKeyValueHeads != 8 {
+			t.Errorf("NumKeyValueHeads = %d, want 8", got.NumKeyValueHeads)
+		}
+		if got.RopeTheta != 500000 {
+			t.Errorf("RopeTheta = %f, want 500000", got.RopeTheta)
+		}
+	})
+
+	t.Run("unknown model_type uses fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		raw := `{
+			"model_type": "future_model",
+			"vocab_size": 50000,
+			"num_hidden_layers": 12,
+			"hidden_size": 768
+		}`
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := loadMetadata(path)
+		if err != nil {
+			t.Fatalf("loadMetadata error: %v", err)
+		}
+		if got.Architecture != "future_model" {
+			t.Errorf("Architecture = %q, want %q", got.Architecture, "future_model")
+		}
+		if got.VocabSize != 50000 {
+			t.Errorf("VocabSize = %d, want 50000", got.VocabSize)
 		}
 	})
 
