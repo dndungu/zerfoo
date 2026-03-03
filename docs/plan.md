@@ -1852,7 +1852,7 @@ Create the inference/ package providing one-liner model loading and generation.
 
 Add user-facing CLI commands for pulling, running, and serving models.
 
-- [ ] T55.1 Implement zerfoo pull command  Owner: TBD  Est: 45m
+- [x] T55.1 Implement zerfoo pull command  Owner: TBD  Est: 45m  Done: 2026-03-02
   - Dependencies: E53
   - Files: cmd/cli/pull.go (new), cmd/zerfoo/main.go (modify)
   - Acceptance: `zerfoo pull <model-id>` downloads and caches the model. Flags:
@@ -1860,13 +1860,13 @@ Add user-facing CLI commands for pulling, running, and serving models.
     (download bytes / total). On completion, prints model path and size. If
     already cached, prints "already up to date" and exits. Test: verify command
     parses flags and calls registry.Pull.
-  - [ ] S55.1.1 Create cmd/cli/pull.go with PullCommand  Est: 15m
-  - [ ] S55.1.2 Implement progress display (download bytes / total)  Est: 10m
-  - [ ] S55.1.3 Register pull command in cmd/zerfoo/main.go  Est: 5m
-  - [ ] S55.1.4 Write tests for flag parsing and pull invocation  Est: 10m
-  - [ ] S55.1.5 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S55.1.1 Create cmd/cli/pull.go with PullCommand  Est: 15m
+  - [x] S55.1.2 Implement progress display (download bytes / total)  Est: 10m
+  - [x] S55.1.3 Register pull command in cmd/zerfoo/main.go  Est: 5m
+  - [x] S55.1.4 Write tests for flag parsing and pull invocation  Est: 10m
+  - [x] S55.1.5 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T55.2 Implement zerfoo run command  Owner: TBD  Est: 1h
+- [x] T55.2 Implement zerfoo run command  Owner: TBD  Est: 1h  Done: 2026-03-02
   - Dependencies: E54
   - Files: cmd/cli/run.go (new), cmd/zerfoo/main.go (modify)
   - Acceptance: `zerfoo run <model-id>` starts an interactive prompt-response loop.
@@ -1875,14 +1875,14 @@ Add user-facing CLI commands for pulling, running, and serving models.
     repeats until EOF or Ctrl-C. Uses Model.Chat for multi-turn conversation
     (maintains message history). Test: verify command parses flags and calls
     Model.Chat with correct messages.
-  - [ ] S55.2.1 Create cmd/cli/run.go with RunCommand  Est: 20m
-  - [ ] S55.2.2 Implement interactive loop with stdin reading  Est: 15m
-  - [ ] S55.2.3 Implement streaming output to stdout  Est: 10m
-  - [ ] S55.2.4 Register run command in cmd/zerfoo/main.go  Est: 5m
-  - [ ] S55.2.5 Write tests  Est: 10m
-  - [ ] S55.2.6 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S55.2.1 Create cmd/cli/run.go with RunCommand  Est: 20m
+  - [x] S55.2.2 Implement interactive loop with stdin reading  Est: 15m
+  - [x] S55.2.3 Implement streaming output to stdout  Est: 10m
+  - [x] S55.2.4 Register run command in cmd/zerfoo/main.go  Est: 5m
+  - [x] S55.2.5 Write tests  Est: 10m
+  - [x] S55.2.6 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T55.3 Implement zerfoo serve command  Owner: TBD  Est: 2h
+- [x] T55.3 Implement zerfoo serve command  Owner: TBD  Est: 2h  Done: 2026-03-02
   - Dependencies: E54
   - Files: cmd/cli/serve.go (new), serve/server.go (new), cmd/zerfoo/main.go (modify)
   - Acceptance: `zerfoo serve <model-id> --port 8080` starts an HTTP server with
@@ -1895,22 +1895,24 @@ Add user-facing CLI commands for pulling, running, and serving models.
     Server uses net/http only (no external router). Graceful shutdown on SIGTERM
     via shutdown.Coordinator. Test: httptest server, verify chat completion
     response format, verify SSE streaming format.
-  - [ ] S55.3.1 Create serve/server.go with Server struct and route registration  Est: 20m
-  - [ ] S55.3.2 Implement POST /v1/chat/completions handler  Est: 25m
-  - [ ] S55.3.3 Implement POST /v1/completions handler  Est: 15m
-  - [ ] S55.3.4 Implement GET /v1/models handler  Est: 10m
-  - [ ] S55.3.5 Implement SSE streaming for stream=true requests  Est: 20m
-  - [ ] S55.3.6 Create cmd/cli/serve.go with ServeCommand  Est: 15m
-  - [ ] S55.3.7 Register serve command in cmd/zerfoo/main.go  Est: 5m
-  - [ ] S55.3.8 Write tests with httptest for all endpoints  Est: 25m
-  - [ ] S55.3.9 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S55.3.1 Create serve/server.go with Server struct and route registration  Est: 20m
+  - [x] S55.3.2 Implement POST /v1/chat/completions handler  Est: 25m
+  - [x] S55.3.3 Implement POST /v1/completions handler  Est: 15m
+  - [x] S55.3.4 Implement GET /v1/models handler  Est: 10m
+  - [x] S55.3.5 Implement SSE streaming for stream=true requests  Est: 20m
+  - [x] S55.3.6 Create cmd/cli/serve.go with ServeCommand  Est: 15m
+  - [x] S55.3.7 Register serve command in cmd/zerfoo/main.go  Est: 5m
+  - [x] S55.3.8 Write tests with httptest for all endpoints  Est: 25m
+  - [x] S55.3.9 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T55.4 Run linters and verify coverage for E55  Owner: TBD  Est: 15m
+- [x] T55.4 Run linters and verify coverage for E55  Owner: TBD  Est: 15m  Done: 2026-03-02
   - Dependencies: T55.3
   - Acceptance: golangci-lint 0 issues. go test -cover -race passes. Coverage
     >= 95% on new packages.
-  - [ ] S55.4.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
-  - [ ] S55.4.2 Fix any remaining issues  Est: 5m
+  - Notes: serve package 96.4%, cmd/cli 92.3% (pre-existing framework.go/worker.go
+    pull overall down; E55-specific files: pull 96%, run 99%, serve 84%).
+  - [x] S55.4.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [x] S55.4.2 Fix any remaining issues  Est: 5m
 
 #### E56: End-to-End Validation
 
