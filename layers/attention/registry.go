@@ -68,11 +68,11 @@ func buildGroupedQueryAttention[T tensor.Numeric](
 		return nil, fmt.Errorf("missing required parameter: %s_wo", name)
 	}
 
-	// Construct sub-layers from parameters
-	wqDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wq), nil) // Assuming no bias for now
-	wkDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wk), nil)
-	wvDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wv), nil)
-	woDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wo), nil)
+	// Construct sub-layers from parameters, with optional bias
+	wqDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wq), optionalBias(engine, ops, params, name+"_wq_bias"))
+	wkDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wk), optionalBias(engine, ops, params, name+"_wk_bias"))
+	wvDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wv), optionalBias(engine, ops, params, name+"_wv_bias"))
+	woDense := core.NewDenseFromParams(core.NewLinearFromParam(engine, wo), optionalBias(engine, ops, params, name+"_wo_bias"))
 
 	headDim := modelDim / numQueryHeads
 
@@ -85,6 +85,20 @@ func buildGroupedQueryAttention[T tensor.Numeric](
 		engine, ops, modelDim, numQueryHeads, numKeyValueHeads,
 		wqDense, wkDense, wvDense, woDense, rope,
 	)
+}
+
+// optionalBias returns a *core.Bias[T] if the named parameter exists, nil otherwise.
+func optionalBias[T tensor.Numeric](
+	engine compute.Engine[T],
+	ops numeric.Arithmetic[T],
+	params map[string]*graph.Parameter[T],
+	key string,
+) *core.Bias[T] {
+	p, ok := params[key]
+	if !ok {
+		return nil
+	}
+	return core.NewBiasFromParam(engine, ops, p)
 }
 
 //nolint:unused // retained for completeness; may be used by future registry wiring
