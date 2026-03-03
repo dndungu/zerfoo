@@ -148,13 +148,19 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 	zmfPath := filepath.Join(info.Path, "model.zmf")
 	eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
 
-	var buildOpts []model.BuildOption
+	globalAttrs := map[string]interface{}{}
 	if meta.RopeScaling != nil && meta.RopeScaling.Type == "yarn" {
-		buildOpts = append(buildOpts, model.WithGlobalAttributes(map[string]interface{}{
-			"rope_scaling_type":         meta.RopeScaling.Type,
-			"rope_scaling_factor":       meta.RopeScaling.Factor,
-			"rope_scaling_orig_max_len": meta.RopeScaling.OriginalMaxPositionEmbeddings,
-		}))
+		globalAttrs["rope_scaling_type"] = meta.RopeScaling.Type
+		globalAttrs["rope_scaling_factor"] = meta.RopeScaling.Factor
+		globalAttrs["rope_scaling_orig_max_len"] = meta.RopeScaling.OriginalMaxPositionEmbeddings
+	}
+	if meta.PartialRotaryFactor > 0 && meta.PartialRotaryFactor < 1.0 {
+		globalAttrs["partial_rotary_factor"] = meta.PartialRotaryFactor
+	}
+
+	var buildOpts []model.BuildOption
+	if len(globalAttrs) > 0 {
+		buildOpts = append(buildOpts, model.WithGlobalAttributes(globalAttrs))
 	}
 
 	mdl, err := model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath, buildOpts...)
