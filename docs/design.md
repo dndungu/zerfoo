@@ -607,7 +607,9 @@ Documented exceptions (unreachable `tensor.New` error paths):
 
 - Table-driven tests using standard `testing` package (no testify).
 - Parity tests comparing GPU vs CPU output for every GPU-accelerated method.
-- Model parity tests gated by env vars (GEMMA3_ZMF_PATH, SIGLIP_ZMF_PATH, KIMI_CONNECTOR_ZMF_PATH).
+- Model parity tests gated by env vars (GEMMA3_ZMF_PATH, SIGLIP_ZMF_PATH, KIMI_CONNECTOR_ZMF_PATH,
+  LLAMA3_ZMF_PATH, MISTRAL_ZMF_PATH, QWEN25_ZMF_PATH, PHI4_ZMF_PATH, DEEPSEEK_ZMF_PATH).
+- Parity tests cover 6 model families: Gemma 3, Llama 3, Mistral, Qwen 2.5, Phi-4, DeepSeek V3.
 - Integration tests for cross-package workflows.
 - Numerical gradient checking via finite differences.
 - MockEngine for unit testing layers in isolation.
@@ -856,3 +858,26 @@ parameter count for the LM head.
 (e.g., `rope_scaling`, `partial_rotary_factor`, `n_shared_experts`) and maps them
 to the common metadata struct. Global attributes (rope scaling, partial rotation)
 are injected via `model.WithGlobalAttributes` during graph construction.
+
+### 12.4 Parameter Name Resolver
+
+`model.ParamResolver` maps architecture-specific weight names (e.g., Llama's
+`q_proj.weight` vs DeepSeek's `kv_a_proj.weight`) to canonical names used by
+Zerfoo layer builders. Called as a fallback during model building when exact
+parameter names are not found. See [ADR-005](adr/005-multi-architecture-support.md).
+
+---
+
+## 13. Architectural Decision Records
+
+Stable design decisions extracted from the implementation plan into self-contained
+ADR files in `docs/adr/`.
+
+| ADR | Title | Phase | Key Decision |
+|-----|-------|-------|-------------|
+| [001](adr/001-enterprise-production-readiness.md) | Enterprise Production Readiness | 4+7 | Logging, metrics, config, health, CI gates, dead code removal, graph thread safety |
+| [002](adr/002-distributed-training-protocol.md) | Distributed Training Protocol | 5 | Star-topology AllReduce, counter-based Barrier, WorkerNode lifecycle |
+| [003](adr/003-open-weights-model-import.md) | Open Weights Model Import | 6 | 4-bit weights, Conv2d strategy, MoE design, 13 new operators |
+| [004](adr/004-embeddable-inference-library.md) | Embeddable Inference Library | 8 | BPE tokenizer, KV cache, generation loop, sampling, streaming, serve |
+| [005](adr/005-multi-architecture-support.md) | Multi-Architecture Support | 9 | Config registry, param resolver, YaRN, partial RoPE, MLA, shared MoE |
+| [006](adr/006-gpu-engine-architecture.md) | GPU Engine Architecture | 2-3 | CUDA float32, memory pool, cuBLAS row-major, OOM fallback, parity tolerances |
