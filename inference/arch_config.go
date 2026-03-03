@@ -45,6 +45,8 @@ func DefaultArchConfigRegistry() *ArchConfigRegistry {
 	r.Register("gemma2", parseGemmaConfig)
 	r.Register("gemma3", parseGemmaConfig)
 	r.Register("llama", parseLlamaConfig)
+	r.Register("mistral", parseMistralConfig)
+	r.Register("qwen2", parseQwenConfig)
 	return r
 }
 
@@ -89,6 +91,57 @@ func parseLlamaConfig(raw map[string]interface{}) (*ModelMetadata, error) {
 	}
 	if meta.RopeTheta == 0 {
 		meta.RopeTheta = 500000 // Llama 3 default
+	}
+	return meta, nil
+}
+
+// parseMistralConfig parses Mistral-family config.json fields.
+// Nearly identical to Llama but adds sliding_window and defaults rope_theta to 10000.
+func parseMistralConfig(raw map[string]interface{}) (*ModelMetadata, error) {
+	meta := &ModelMetadata{
+		Architecture:          getString(raw, "model_type"),
+		VocabSize:             getInt(raw, "vocab_size"),
+		HiddenSize:            getInt(raw, "hidden_size"),
+		NumLayers:             getInt(raw, "num_hidden_layers"),
+		NumQueryHeads:         getInt(raw, "num_attention_heads"),
+		NumKeyValueHeads:      getInt(raw, "num_key_value_heads"),
+		IntermediateSize:      getInt(raw, "intermediate_size"),
+		MaxPositionEmbeddings: getInt(raw, "max_position_embeddings"),
+		EOSTokenID:            getInt(raw, "eos_token_id"),
+		BOSTokenID:            getInt(raw, "bos_token_id"),
+		RopeTheta:             getFloat(raw, "rope_theta"),
+		TieWordEmbeddings:     getBool(raw, "tie_word_embeddings"),
+		SlidingWindow:         getInt(raw, "sliding_window"),
+		RopeScaling:           getRopeScaling(raw),
+	}
+	if meta.RopeTheta == 0 {
+		meta.RopeTheta = 10000 // Mistral default
+	}
+	return meta, nil
+}
+
+// parseQwenConfig parses Qwen2-family config.json fields.
+// Qwen models always use attention bias and default rope_theta to 1000000.
+func parseQwenConfig(raw map[string]interface{}) (*ModelMetadata, error) {
+	meta := &ModelMetadata{
+		Architecture:          getString(raw, "model_type"),
+		VocabSize:             getInt(raw, "vocab_size"),
+		HiddenSize:            getInt(raw, "hidden_size"),
+		NumLayers:             getInt(raw, "num_hidden_layers"),
+		NumQueryHeads:         getInt(raw, "num_attention_heads"),
+		NumKeyValueHeads:      getInt(raw, "num_key_value_heads"),
+		IntermediateSize:      getInt(raw, "intermediate_size"),
+		MaxPositionEmbeddings: getInt(raw, "max_position_embeddings"),
+		EOSTokenID:            getInt(raw, "eos_token_id"),
+		BOSTokenID:            getInt(raw, "bos_token_id"),
+		RopeTheta:             getFloat(raw, "rope_theta"),
+		TieWordEmbeddings:     getBool(raw, "tie_word_embeddings"),
+		SlidingWindow:         getInt(raw, "sliding_window"),
+		AttentionBias:         true, // Qwen always uses attention bias
+		RopeScaling:           getRopeScaling(raw),
+	}
+	if meta.RopeTheta == 0 {
+		meta.RopeTheta = 1000000 // Qwen default
 	}
 	return meta, nil
 }
