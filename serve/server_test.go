@@ -475,6 +475,165 @@ func TestHandleCompletions_StreamError(t *testing.T) {
 	}
 }
 
+// --- Integration: SSE parity ---
+
+func TestChatCompletion_StreamParity(t *testing.T) {
+	mdl := buildTestModel(t)
+	srv := NewServer(mdl)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Non-streaming request.
+	body := `{"messages":[{"role":"user","content":"hello"}],"max_tokens":5}`
+	resp := doPost(t, ts.URL+"/v1/chat/completions", "application/json", body)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var result ChatCompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Verify JSON structure.
+	if result.ID == "" {
+		t.Error("response ID should not be empty")
+	}
+	if result.Object != "chat.completion" {
+		t.Errorf("Object = %q, want %q", result.Object, "chat.completion")
+	}
+	if result.Model != "test-model" {
+		t.Errorf("Model = %q, want %q", result.Model, "test-model")
+	}
+	if len(result.Choices) != 1 {
+		t.Fatalf("Choices len = %d, want 1", len(result.Choices))
+	}
+	nonStreamContent := result.Choices[0].Message.Content
+
+	// Streaming request.
+	streamBody := `{"messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":5}`
+	streamResp := doPost(t, ts.URL+"/v1/chat/completions", "application/json", streamBody)
+	defer func() { _ = streamResp.Body.Close() }()
+
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", streamResp.StatusCode)
+	}
+
+	// Parse SSE events to extract concatenated content.
+	raw, _ := io.ReadAll(streamResp.Body)
+	streamContent := extractSSEChatContent(t, string(raw))
+
+	if nonStreamContent != streamContent {
+		t.Errorf("stream/non-stream content mismatch:\n  non-stream: %q\n  stream:     %q",
+			nonStreamContent, streamContent)
+	}
+}
+
+func TestCompletion_StreamParity(t *testing.T) {
+	mdl := buildTestModel(t)
+	srv := NewServer(mdl)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Non-streaming.
+	body := `{"prompt":"hello","max_tokens":5}`
+	resp := doPost(t, ts.URL+"/v1/completions", "application/json", body)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var result CompletionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Object != "text_completion" {
+		t.Errorf("Object = %q, want %q", result.Object, "text_completion")
+	}
+	if result.Model != "test-model" {
+		t.Errorf("Model = %q, want %q", result.Model, "test-model")
+	}
+	nonStreamText := result.Choices[0].Text
+
+	// Streaming.
+	streamBody := `{"prompt":"hello","stream":true,"max_tokens":5}`
+	streamResp := doPost(t, ts.URL+"/v1/completions", "application/json", streamBody)
+	defer func() { _ = streamResp.Body.Close() }()
+
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want 200", streamResp.StatusCode)
+	}
+
+	raw, _ := io.ReadAll(streamResp.Body)
+	streamText := extractSSECompletionText(t, string(raw))
+
+	if nonStreamText != streamText {
+		t.Errorf("stream/non-stream text mismatch:\n  non-stream: %q\n  stream:     %q",
+			nonStreamText, streamText)
+	}
+}
+
+// extractSSEChatContent parses SSE data lines and concatenates delta.content fields.
+func extractSSEChatContent(t *testing.T, raw string) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			t.Logf("skip unparseable SSE chunk: %s", data)
+			continue
+		}
+		if len(chunk.Choices) > 0 {
+			sb.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	return sb.String()
+}
+
+// extractSSECompletionText parses SSE data lines and concatenates text fields.
+func extractSSECompletionText(t *testing.T, raw string) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Text string `json:"text"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			t.Logf("skip unparseable SSE chunk: %s", data)
+			continue
+		}
+		if len(chunk.Choices) > 0 {
+			sb.WriteString(chunk.Choices[0].Text)
+		}
+	}
+	return sb.String()
+}
+
 // --- Close ---
 
 func TestServer_Close(t *testing.T) {
