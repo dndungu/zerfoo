@@ -2168,7 +2168,7 @@ to always include the shared expert output.
 Add architecture-aware config.json parsing so Zerfoo can load models from
 different HuggingFace model families without manual config translation.
 
-- [ ] T57.1 Define architecture config registry  Owner: TBD  Est: 1h
+- [x] T57.1 Define architecture config registry  Owner: Claude  Est: 1h  Completed: 2026 03 02
   - Dependencies: None
   - Files: inference/arch_config.go (new)
   - Acceptance: An archConfigRegistry maps model_type strings to parser functions.
@@ -2178,11 +2178,11 @@ different HuggingFace model families without manual config translation.
     RopeTheta float64, RopeScaling *RopeScalingConfig, TieWordEmbeddings bool,
     SlidingWindow int, AttentionBias bool.
     Fallback parser for unknown model_type attempts direct JSON unmarshal.
-  - [ ] S57.1.1 Extend ModelMetadata with new fields  Est: 15m
-  - [ ] S57.1.2 Create archConfigRegistry with Register and Parse methods  Est: 20m
-  - [ ] S57.1.3 Implement Gemma parser (baseline, existing field names)  Est: 10m
-  - [ ] S57.1.4 Write unit tests: known model_type, fallback, missing fields  Est: 15m
-  - [ ] S57.1.5 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S57.1.1 Extend ModelMetadata with new fields  Est: 15m
+  - [x] S57.1.2 Create archConfigRegistry with Register and Parse methods  Est: 20m
+  - [x] S57.1.3 Implement Gemma parser (baseline, existing field names)  Est: 10m
+  - [x] S57.1.4 Write unit tests: known model_type, fallback, missing fields  Est: 15m
+  - [x] S57.1.5 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T57.2 Add Llama config parser  Owner: TBD  Est: 45m
   - Dependencies: T57.1
