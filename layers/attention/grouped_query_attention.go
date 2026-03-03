@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/zerfoo/zerfoo/compute"
+	"github.com/zerfoo/zerfoo/generate"
 	"github.com/zerfoo/zerfoo/graph"
 	"github.com/zerfoo/zerfoo/layers/core"
 	"github.com/zerfoo/zerfoo/layers/embeddings" // For RoPE
@@ -30,6 +31,9 @@ type GroupedQueryAttention[T tensor.Numeric] struct {
 	rope *embeddings.RotaryPositionalEmbedding[T] // Rotary positional embedding
 
 	scaledDotProductAttention *ScaledDotProductAttention[T]
+
+	// LayerIndex identifies this layer within a model for KV cache indexing.
+	LayerIndex int
 
 	// Cached tensors for backward pass
 	qProj           *tensor.TensorNumeric[T] // Projected Q
@@ -225,6 +229,9 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 	batchSize := input.Shape()[0]
 	seqLen := input.Shape()[1]
 
+	// Check for KV cache in context.
+	cache, hasCache := generate.GetKVCache[T](ctx)
+
 	// 1. Linear projections for Q, K, V
 	qProj, err := gqa.wq.Forward(ctx, input)
 	if err != nil {
@@ -317,6 +324,45 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 		return nil, err
 	}
 
+	// KV Cache: store K/V per KV-head in shape [batch*numKVHeads, seq_len, headDim],
+	// then retrieve full cached K/V for attention computation.
+	// kvSeqLen tracks the K/V sequence length (may differ from Q seqLen when cached).
+	kvSeqLen := seqLen
+	if hasCache {
+		// Flatten K/V from [batch, numKVHeads, seqLen, headDim] to [batch*numKVHeads, seqLen, headDim]
+		// for storage and concat in the cache.
+		kFlat, reshapeErr := gqa.engine.Reshape(ctx, kHeadsRoPE, []int{batchSize * gqa.numKeyValueHeads, seqLen, gqa.headDim})
+		if reshapeErr != nil {
+			return nil, reshapeErr
+		}
+		vFlat, reshapeErr := gqa.engine.Reshape(ctx, vHeads, []int{batchSize * gqa.numKeyValueHeads, seqLen, gqa.headDim})
+		if reshapeErr != nil {
+			return nil, reshapeErr
+		}
+
+		if err := cache.Update(gqa.LayerIndex, kFlat, vFlat); err != nil {
+			return nil, fmt.Errorf("kv cache update: %w", err)
+		}
+
+		// Retrieve full cached K/V.
+		lkv, ok := cache.Get(gqa.LayerIndex)
+		if !ok {
+			return nil, fmt.Errorf("kv cache: layer %d missing after update", gqa.LayerIndex)
+		}
+
+		// Unflatten back to [batch, numKVHeads, cachedSeqLen, headDim].
+		cachedSeqLen := lkv.Key.Shape()[1]
+		kHeadsRoPE, err = gqa.engine.Reshape(ctx, lkv.Key, []int{batchSize, gqa.numKeyValueHeads, cachedSeqLen, gqa.headDim})
+		if err != nil {
+			return nil, err
+		}
+		vHeads, err = gqa.engine.Reshape(ctx, lkv.Value, []int{batchSize, gqa.numKeyValueHeads, cachedSeqLen, gqa.headDim})
+		if err != nil {
+			return nil, err
+		}
+		kvSeqLen = cachedSeqLen
+	}
+
 	// 3. Grouped Query Attention: Replicate K, V heads for each Query head group
 	// (batch, num_query_heads, seq_len, head_dim)
 	// (batch, num_kv_heads, seq_len, kv_head_dim)
@@ -326,14 +372,14 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 		replicationFactor := gqa.numQueryHeads / gqa.numKeyValueHeads
 		// Replicate kHeads and vHeads along the head dimension
 		// (batch, num_kv_heads, seq_len, kv_head_dim) -> (batch, num_query_heads, seq_len, kv_head_dim)
-		kHeadsExpanded, err := gqa.engine.Repeat(ctx, kHeadsRoPE, 1, replicationFactor)
-		if err != nil {
-			return nil, err
+		kHeadsExpanded, expandErr := gqa.engine.Repeat(ctx, kHeadsRoPE, 1, replicationFactor)
+		if expandErr != nil {
+			return nil, expandErr
 		}
 
-		vHeadsExpanded, err := gqa.engine.Repeat(ctx, vHeads, 1, replicationFactor)
-		if err != nil {
-			return nil, err
+		vHeadsExpanded, expandErr := gqa.engine.Repeat(ctx, vHeads, 1, replicationFactor)
+		if expandErr != nil {
+			return nil, expandErr
 		}
 
 		kHeadsRoPE = kHeadsExpanded
@@ -342,17 +388,18 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 
 	// 4. Apply Scaled Dot-Product Attention
 	// Reshape to (batch_size * num_heads, seq_len, head_dim) for SDPA.
+	// Q uses seqLen (current tokens), K/V use kvSeqLen (may include cached tokens).
 	qForSDPA, err := gqa.engine.Reshape(ctx, qHeadsRoPE, []int{batchSize * gqa.numQueryHeads, seqLen, gqa.headDim})
 	if err != nil {
 		return nil, err
 	}
 
-	kForSDPA, err := gqa.engine.Reshape(ctx, kHeadsRoPE, []int{batchSize * gqa.numQueryHeads, seqLen, gqa.headDim})
+	kForSDPA, err := gqa.engine.Reshape(ctx, kHeadsRoPE, []int{batchSize * gqa.numQueryHeads, kvSeqLen, gqa.headDim})
 	if err != nil {
 		return nil, err
 	}
 
-	vForSDPA, err := gqa.engine.Reshape(ctx, vHeads, []int{batchSize * gqa.numQueryHeads, seqLen, gqa.headDim})
+	vForSDPA, err := gqa.engine.Reshape(ctx, vHeads, []int{batchSize * gqa.numQueryHeads, kvSeqLen, gqa.headDim})
 	if err != nil {
 		return nil, err
 	}
