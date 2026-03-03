@@ -758,6 +758,85 @@ func TestBuildGroupQueryAttention_WithPartialBias(t *testing.T) {
 	}
 }
 
+func TestBuildGroupQueryAttention_WithYaRNScaling(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+
+	modelDim := 16
+	numQ := 4
+	numKV := 2
+	headDim := modelDim / numQ
+	kvDim := headDim * numKV
+
+	wq := makeNonZeroParam(t, "attn_wq", []int{modelDim, modelDim})
+	wk := makeNonZeroParam(t, "attn_wk", []int{modelDim, kvDim})
+	wv := makeNonZeroParam(t, "attn_wv", []int{modelDim, kvDim})
+	wo := makeNonZeroParam(t, "attn_wo", []int{modelDim, modelDim})
+
+	params := map[string]*graph.Parameter[float32]{
+		"attn_wq": wq, "attn_wk": wk, "attn_wv": wv, "attn_wo": wo,
+	}
+
+	input, err := tensor.New[float32]([]int{1, 4, modelDim}, nil)
+	if err != nil {
+		t.Fatalf("tensor.New failed: %v", err)
+	}
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.01
+	}
+
+	// Build WITHOUT YaRN
+	attrsNoYaRN := map[string]interface{}{
+		"model_dim":           modelDim,
+		"num_query_heads":     numQ,
+		"num_key_value_heads": numKV,
+		"rope_base":           10000.0,
+		"max_seq_len":         64,
+	}
+	nodeNoYaRN, err := BuildGroupQueryAttention[float32](engine, ops, "attn", params, attrsNoYaRN)
+	if err != nil {
+		t.Fatalf("Build without YaRN failed: %v", err)
+	}
+	outNoYaRN, err := nodeNoYaRN.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward without YaRN failed: %v", err)
+	}
+
+	// Build WITH YaRN scaling
+	attrsYaRN := map[string]interface{}{
+		"model_dim":                modelDim,
+		"num_query_heads":          numQ,
+		"num_key_value_heads":      numKV,
+		"rope_base":                10000.0,
+		"max_seq_len":              64,
+		"rope_scaling_type":        "yarn",
+		"rope_scaling_factor":      4.0,
+		"rope_scaling_orig_max_len": 32,
+	}
+	nodeYaRN, err := BuildGroupQueryAttention[float32](engine, ops, "attn", params, attrsYaRN)
+	if err != nil {
+		t.Fatalf("Build with YaRN failed: %v", err)
+	}
+	outYaRN, err := nodeYaRN.Forward(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Forward with YaRN failed: %v", err)
+	}
+
+	// Outputs should differ
+	noYaRNData := outNoYaRN.Data()
+	yaRNData := outYaRN.Data()
+	allSame := true
+	for i := range noYaRNData {
+		if noYaRNData[i] != yaRNData[i] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		t.Error("output with YaRN should differ from output without YaRN")
+	}
+}
+
 func TestBuildGroupQueryAttention_MissingParams(t *testing.T) {
 	ops := numeric.Float32Ops{}
 	engine := compute.NewCPUEngine[float32](ops)
