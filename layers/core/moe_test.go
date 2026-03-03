@@ -405,3 +405,77 @@ func TestMixtureOfExperts_HiddenStates1D(t *testing.T) {
 		t.Error("expected error for 1D hiddenStates")
 	}
 }
+
+func TestMixtureOfExperts_WithSharedExpert(t *testing.T) {
+	eng := makeFloat32Engine()
+	ops := numeric.Float32Ops{}
+	gate := NewMoEGate[float32](eng, ops, 1)
+
+	experts := []graph.Node[float32]{&identityExpert{}}
+	moe := NewMixtureOfExperts[float32](eng, ops, gate, experts, 1, 1)
+	moe.SharedExpert = &scale2Expert{} // shared expert multiplies by 2
+
+	// hiddenStates [1, 2]: single token [3, 4]
+	hs, _ := tensor.New[float32]([]int{1, 2}, []float32{3, 4})
+	// gateWeight [1, 2]: single expert
+	gw, _ := tensor.New[float32]([]int{1, 2}, []float32{1, 0})
+
+	out, err := moe.Forward(context.Background(), hs, gw)
+	if err != nil {
+		t.Fatalf("Forward with shared expert failed: %v", err)
+	}
+
+	data := out.Data()
+	// Expected: shared(token) + routed(token)
+	// shared = scale2([3,4]) = [6,8]
+	// routed = identity([3,4]) * 1.0 = [3,4]
+	// total = [9, 12]
+	if math.Abs(float64(data[0])-9.0) > 1e-4 || math.Abs(float64(data[1])-12.0) > 1e-4 {
+		t.Errorf("output = [%f, %f], want [9, 12]", data[0], data[1])
+	}
+}
+
+func TestMixtureOfExperts_WithoutSharedExpert_BackwardCompat(t *testing.T) {
+	// Verify that nil SharedExpert produces the same result as before.
+	eng := makeFloat32Engine()
+	ops := numeric.Float32Ops{}
+	gate := NewMoEGate[float32](eng, ops, 1)
+
+	experts := []graph.Node[float32]{&identityExpert{}}
+	moe := NewMixtureOfExperts[float32](eng, ops, gate, experts, 1, 1)
+	// SharedExpert is nil by default.
+
+	hs, _ := tensor.New[float32]([]int{1, 2}, []float32{3, 4})
+	gw, _ := tensor.New[float32]([]int{1, 2}, []float32{1, 0})
+
+	out, err := moe.Forward(context.Background(), hs, gw)
+	if err != nil {
+		t.Fatalf("Forward without shared expert failed: %v", err)
+	}
+
+	data := out.Data()
+	// identity expert, weight 1.0: output = [3, 4]
+	if math.Abs(float64(data[0])-3.0) > 1e-4 || math.Abs(float64(data[1])-4.0) > 1e-4 {
+		t.Errorf("output = [%f, %f], want [3, 4]", data[0], data[1])
+	}
+}
+
+func TestMixtureOfExperts_SharedExpert_Attributes(t *testing.T) {
+	eng := makeFloat32Engine()
+	ops := numeric.Float32Ops{}
+	gate := NewMoEGate[float32](eng, ops, 1)
+	moe := NewMixtureOfExperts[float32](eng, ops, gate, nil, 2, 1)
+
+	// Without shared expert.
+	attrs := moe.Attributes()
+	if _, ok := attrs["has_shared_expert"]; ok {
+		t.Error("expected no has_shared_expert attribute when SharedExpert is nil")
+	}
+
+	// With shared expert.
+	moe.SharedExpert = &identityExpert{}
+	attrs = moe.Attributes()
+	if v, ok := attrs["has_shared_expert"]; !ok || v != true {
+		t.Error("expected has_shared_expert=true when SharedExpert is set")
+	}
+}
