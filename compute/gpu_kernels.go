@@ -28,7 +28,7 @@ func getDevicePtr[T tensor.Numeric](e *GPUEngine[T], t *tensor.TensorNumeric[T])
 	n := len(data)
 	byteSize := n * f32Size
 
-	devPtr, err := e.pool.Alloc(byteSize)
+	devPtr, err := e.pool.Alloc(0, byteSize)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -36,13 +36,13 @@ func getDevicePtr[T tensor.Numeric](e *GPUEngine[T], t *tensor.TensorNumeric[T])
 	aF32 := *(*[]float32)(unsafe.Pointer(&data))
 
 	if err := cuda.Memcpy(devPtr, unsafe.Pointer(&aF32[0]), byteSize, cuda.MemcpyHostToDevice); err != nil {
-		e.pool.Free(devPtr, byteSize)
+		e.pool.Free(0, devPtr, byteSize)
 
 		return nil, nil, err
 	}
 
 	cleanup := func() {
-		e.pool.Free(devPtr, byteSize)
+		e.pool.Free(0, devPtr, byteSize)
 	}
 
 	return devPtr, cleanup, nil
@@ -107,20 +107,20 @@ func gpuBinaryOp[T tensor.Numeric](
 
 	byteSize := n * f32Size
 
-	devC, err := e.pool.Alloc(byteSize)
+	devC, err := e.pool.Alloc(0, byteSize)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := kernelFn(devA, devB, devC, n, e.streamPtr()); err != nil {
-		e.pool.Free(devC, byteSize)
+		e.pool.Free(0, devC, byteSize)
 
 		return nil, err
 	}
 
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devC, byteSize)
+			e.pool.Free(0, devC, byteSize)
 
 			return nil, err
 		}
@@ -152,20 +152,20 @@ func gpuUnaryOp[T tensor.Numeric](
 
 	byteSize := n * f32Size
 
-	devC, err := e.pool.Alloc(byteSize)
+	devC, err := e.pool.Alloc(0, byteSize)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := kernelFn(devA, devC, n, e.streamPtr()); err != nil {
-		e.pool.Free(devC, byteSize)
+		e.pool.Free(0, devC, byteSize)
 
 		return nil, err
 	}
 
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devC, byteSize)
+			e.pool.Free(0, devC, byteSize)
 
 			return nil, err
 		}
@@ -198,20 +198,20 @@ func gpuScalarOp[T tensor.Numeric](
 
 	byteSize := n * f32Size
 
-	devC, err := e.pool.Alloc(byteSize)
+	devC, err := e.pool.Alloc(0, byteSize)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := kernelFn(devA, scalar, devC, n, e.streamPtr()); err != nil {
-		e.pool.Free(devC, byteSize)
+		e.pool.Free(0, devC, byteSize)
 
 		return nil, err
 	}
 
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devC, byteSize)
+			e.pool.Free(0, devC, byteSize)
 
 			return nil, err
 		}
@@ -355,20 +355,20 @@ func (e *GPUEngine[T]) gpuFill(ctx context.Context, t *tensor.TensorNumeric[T], 
 	n := t.GetStorage().Len()
 	byteSize := n * f32Size
 
-	devPtr, err := e.pool.Alloc(byteSize)
+	devPtr, err := e.pool.Alloc(0, byteSize)
 	if err != nil {
 		return e.cpu.Fill(ctx, t, value)
 	}
 
 	if err := kernels.Fill(devPtr, toFloat32(value), n, e.streamPtr()); err != nil {
-		e.pool.Free(devPtr, byteSize)
+		e.pool.Free(0, devPtr, byteSize)
 
 		return err
 	}
 
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devPtr, byteSize)
+			e.pool.Free(0, devPtr, byteSize)
 
 			return err
 		}
@@ -376,7 +376,7 @@ func (e *GPUEngine[T]) gpuFill(ctx context.Context, t *tensor.TensorNumeric[T], 
 
 	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, n)
 	if err != nil {
-		e.pool.Free(devPtr, byteSize)
+		e.pool.Free(0, devPtr, byteSize)
 
 		return err
 	}
@@ -452,7 +452,7 @@ func (e *GPUEngine[T]) gpuSum(ctx context.Context, a *tensor.TensorNumeric[T], a
 
 	outByteSize := numStripes * f32Size
 
-	devOut, err := e.pool.Alloc(outByteSize)
+	devOut, err := e.pool.Alloc(0, outByteSize)
 	if err != nil {
 		e.oomFallbackCount.Add(1)
 		e.logger.Warn("Sum: GPU output alloc failed, falling back to CPU", "error", err.Error())
@@ -461,14 +461,14 @@ func (e *GPUEngine[T]) gpuSum(ctx context.Context, a *tensor.TensorNumeric[T], a
 	}
 
 	if err := kernels.SumAxis(devIn, devOut, outer, inner, axisSize, e.streamPtr()); err != nil {
-		e.pool.Free(devOut, outByteSize)
+		e.pool.Free(0, devOut, outByteSize)
 
 		return nil, err
 	}
 
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devOut, outByteSize)
+			e.pool.Free(0, devOut, outByteSize)
 
 			return nil, err
 		}
@@ -557,7 +557,7 @@ func (e *GPUEngine[T]) gpuSoftmax(ctx context.Context, a *tensor.TensorNumeric[T
 
 	byteSize := n * f32Size
 
-	devOut, err := e.pool.Alloc(byteSize)
+	devOut, err := e.pool.Alloc(0, byteSize)
 	if err != nil {
 		e.oomFallbackCount.Add(1)
 		e.logger.Warn("Softmax: GPU output alloc failed, falling back to CPU", "error", err.Error())
@@ -566,14 +566,14 @@ func (e *GPUEngine[T]) gpuSoftmax(ctx context.Context, a *tensor.TensorNumeric[T
 	}
 
 	if err := kernels.Softmax(devIn, devOut, outer, inner, axisSize, e.streamPtr()); err != nil {
-		e.pool.Free(devOut, byteSize)
+		e.pool.Free(0, devOut, byteSize)
 
 		return nil, err
 	}
 
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devOut, byteSize)
+			e.pool.Free(0, devOut, byteSize)
 
 			return nil, err
 		}

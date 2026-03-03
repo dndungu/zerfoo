@@ -210,7 +210,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	cMatSize := m * n
 
 	// Allocate device output.
-	devCTotal, err := e.pool.Alloc(batchSize * cMatSize * elemSize)
+	devCTotal, err := e.pool.Alloc(0, batchSize*cMatSize*elemSize)
 	if err != nil {
 		e.oomFallbackCount.Add(1)
 		e.logger.Warn("MatMul: GPU output alloc failed, falling back to CPU", "error", err.Error())
@@ -235,7 +235,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 		// cuBLAS Sgemm
 		if err := cublas.Sgemm(e.handle, m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC); err != nil {
-			e.pool.Free(devCTotal, batchSize*cMatSize*elemSize)
+			e.pool.Free(0, devCTotal, batchSize*cMatSize*elemSize)
 
 			return nil, fmt.Errorf("MatMul: cublasSgemm batch %d: %w", batch, err)
 		}
@@ -244,7 +244,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	// Synchronize stream before creating the storage.
 	if e.stream != nil {
 		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(devCTotal, batchSize*cMatSize*elemSize)
+			e.pool.Free(0, devCTotal, batchSize*cMatSize*elemSize)
 
 			return nil, fmt.Errorf("MatMul: stream sync: %w", err)
 		}
