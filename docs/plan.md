@@ -2575,7 +2575,7 @@ every token in addition to the top-k routed experts.
 
 Validate DeepSeek V3 model loading and generation with MLA and shared MoE.
 
-- [ ] T68.1 DeepSeek V3 forward pass parity test  Owner: TBD  Est: 3h
+- [x] T68.1 DeepSeek V3 forward pass parity test  Owner: TBD  Est: 3h
   - Dependencies: E57, E58, E66, E67
   - Files: tests/parity/deepseek_test.go (new)
   - Acceptance: TestDeepSeekV3ForwardPass loads a DeepSeek V3 ZMF model (env-gated
@@ -2584,15 +2584,15 @@ Validate DeepSeek V3 model loading and generation with MLA and shared MoE.
     env var not set.
   - Risk: DeepSeek V3 is 671B parameters total. Testing may require a smaller
     variant or a subset of layers.
-  - [ ] S68.1.1 Create tests/parity/deepseek_test.go  Est: 60m
-  - [ ] S68.1.2 Add greedy decode test  Est: 45m
-  - [ ] S68.1.3 Add generation test via inference API  Est: 30m
-  - [ ] S68.1.4 Run golangci-lint and go test  Est: 15m
+  - [x] S68.1.1 Create tests/parity/deepseek_test.go  Est: 60m
+  - [x] S68.1.2 Add greedy decode test  Est: 45m
+  - [x] S68.1.3 Add generation test via inference API  Est: 30m
+  - [x] S68.1.4 Run golangci-lint and go test  Est: 15m
 
-- [ ] T68.2 Run linters and verify for E68  Owner: TBD  Est: 15m
+- [x] T68.2 Run linters and verify for E68  Owner: TBD  Est: 15m
   - Dependencies: T68.1
-  - [ ] S68.2.1 Run golangci-lint, go test -race  Est: 10m
-  - [ ] S68.2.2 Fix any issues  Est: 5m
+  - [x] S68.2.1 Run golangci-lint, go test -race  Est: 10m
+  - [x] S68.2.2 Fix any issues  Est: 5m
 
 #### E69: Phase 9 Final Verification
 
