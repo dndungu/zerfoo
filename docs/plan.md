@@ -2227,16 +2227,16 @@ different HuggingFace model families without manual config translation.
   - [x] S57.4.3 Add testdata fixtures and tests  Est: 15m
   - [x] S57.4.4 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T57.5 Integrate config registry into inference.Load  Owner: TBD  Est: 30m
+- [x] T57.5 Integrate config registry into inference.Load  Owner: Claude  Est: 30m  Completed: 2026 03 03
   - Dependencies: T57.2, T57.3, T57.4
   - Files: inference/inference.go (modify loadMetadata)
   - Acceptance: loadMetadata first reads raw JSON to extract model_type, then
     dispatches to the appropriate parser. Existing Gemma 3 loading continues to
     work. New model_type values (llama, mistral, qwen2, phi3, deepseek_v3) are
     parsed correctly. Unknown model_type falls back to generic parsing.
-  - [ ] S57.5.1 Update loadMetadata to use archConfigRegistry  Est: 15m
-  - [ ] S57.5.2 Write integration test: load Llama config, verify metadata  Est: 10m
-  - [ ] S57.5.3 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S57.5.1 Update loadMetadata to use archConfigRegistry  Est: 15m
+  - [x] S57.5.2 Write integration test: load Llama config, verify metadata  Est: 10m
+  - [x] S57.5.3 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T57.6 Run linters and verify coverage for E57  Owner: TBD  Est: 15m
   - Dependencies: T57.5
