@@ -1353,6 +1353,604 @@ Run the full quality gate suite after all Phase 7 work is complete.
 
 ---
 
+### Phase 8: Embeddable Go-Native Inference Library
+
+#### Phase 8 Context
+
+Phases 1-7 built a production-grade ML framework with clean interfaces, GPU
+support, distributed training, and open-weights model import (Gemma 3, Kimi-VL).
+However, running inference on an imported model requires extensive manual wiring:
+
+1. Download ONNX model files from HuggingFace manually.
+2. Convert ONNX to ZMF using zonnx CLI.
+3. Write Go code to create an Engine, load the ZMF file, build a graph.
+4. Tokenize input using the whitespace-only tokenizer (wrong for real models).
+5. Call Graph.Forward() in a manual loop for autoregressive generation.
+6. No KV cache -- every forward pass recomputes the full sequence (O(n^2)).
+7. No sampling strategies -- only argmax (greedy) exists in test code.
+8. No streaming output -- callers must wait for full generation to complete.
+
+Phase 8 transforms zerfoo into an embeddable inference library that users can
+`go get` and use with minimal code:
+
+    m, _ := inference.Load("google/gemma-3-4b-it")
+    resp, _ := m.Generate(ctx, "Explain quantum computing")
+    fmt.Println(resp)
+
+This requires: production tokenizer, KV cache, generation loop with sampling,
+model registry with auto-download, high-level API, streaming, and CLI commands.
+
+#### Phase 8 Objectives
+
+- P8-O1: Replace whitespace tokenizer with production BPE implementation that
+  loads HuggingFace tokenizer.json format. Pure Go, no CGo.
+- P8-O2: Implement KV cache for attention layers to enable efficient
+  autoregressive generation (O(n) per step instead of O(n^2)).
+- P8-O3: Implement autoregressive generation loop with configurable sampling
+  (greedy, temperature, top-k, top-p, repetition penalty).
+- P8-O4: Add streaming token delivery via callback interface.
+- P8-O5: Implement model registry with local caching and automatic download
+  from HuggingFace, including ONNX-to-ZMF conversion.
+- P8-O6: Create high-level inference API (inference.Load, Model.Generate,
+  Model.Chat, Model.Embed) requiring minimal boilerplate.
+- P8-O7: Add CLI commands (pull, run, serve) for interactive use and HTTP
+  serving with OpenAI-compatible API.
+- P8-O8: Validate end-to-end with Gemma 3 generating coherent text.
+
+#### Phase 8 Non-Goals
+
+- Training or fine-tuning through the high-level API.
+- Multi-model serving (one model per serve instance).
+- GPU memory management optimization (use existing Engine memory tracking).
+- Beam search or other advanced decoding strategies beyond top-k/top-p.
+- Quantization at inference time (only loading pre-quantized weights).
+- Custom model architecture plugins (only architectures known to the registry).
+- WebSocket transport for streaming (SSE only for HTTP serve).
+- Authentication or rate limiting on the serve endpoint.
+
+#### Phase 8 Constraints
+
+- Pure Go. No CGo. No external C libraries for tokenization.
+- Use Go standard library for HTTP server (net/http), JSON (encoding/json),
+  file I/O (os, io). Minimize new dependencies.
+- Tokenizer must load HuggingFace tokenizer.json format (widely available for
+  all major open-weights models).
+- KV cache must not break existing Graph.Forward() callers -- cache is opt-in
+  via a GenerationContext wrapper around context.Context.
+- Model registry must work offline after initial pull (all files cached locally).
+- HTTP serve endpoint must be compatible with OpenAI API format for tool
+  interoperability.
+
+#### Phase 8 Design Decisions
+
+**Tokenizer format and algorithm:**
+Use HuggingFace tokenizer.json as the canonical format. This JSON file contains:
+vocabulary (token to ID mapping), merge rules (for BPE), pre-tokenizer config,
+normalizer config, and special tokens. The BPE merge loop is implemented in pure
+Go: split input into bytes, iteratively merge the highest-priority adjacent pair
+according to the merge rules, return token IDs. Pre-tokenization (byte-level
+BPE prefix, whitespace splitting) is handled before the merge loop.
+SentencePiece .model files are NOT supported directly; users convert to
+tokenizer.json using HuggingFace tokenizers library (Python) as a one-time step.
+Most models on HuggingFace already ship tokenizer.json.
+
+**KV cache architecture:**
+A GenerationContext struct embeds context.Context and carries a *KVCache pointer.
+KVCache is a struct with per-layer storage: []LayerKV where LayerKV holds K and V
+tensors (appended on each step). Attention layers (GroupQueryAttention,
+GlobalAttention) check for KVCache in the context. If present, the layer:
+(a) appends the current step's K/V to the cache, (b) uses the full cached K/V
+for attention computation, (c) returns output for the current step only. This
+avoids recomputing attention over the full prefix. Graph.Forward() signature does
+not change (it takes context.Context; GenerationContext satisfies the interface).
+Callers who do not set a KVCache get the existing behavior (full recompute).
+
+**Generation loop design:**
+A Generator struct holds references to the loaded graph, tokenizer, engine, and
+model config. Generate(ctx, tokens, config) runs the autoregressive loop:
+1. Encode prompt to token IDs.
+2. Run graph.Forward(genCtx, inputTensor) to get logits [1, seqLen, vocabSize].
+3. Extract logits for the last position.
+4. Apply temperature scaling (divide by T).
+5. Apply top-k filtering (keep top K, set rest to -inf).
+6. Apply top-p filtering (keep smallest set with cumulative prob >= P).
+7. Apply repetition penalty (divide logits for previously seen tokens by penalty).
+8. Sample from the distribution (or argmax for greedy).
+9. Append sampled token to sequence, update KV cache position.
+10. If streaming, deliver token via callback.
+11. Check stop conditions (EOS token, max tokens, stop strings).
+12. Repeat from step 2 with only the new token as input (KV cache handles prefix).
+
+**Model registry layout:**
+Models are cached under a configurable directory (default: ~/.zerfoo/models/).
+Directory structure: <cache_dir>/<org>/<model_name>/ containing:
+- model.zmf (the ZMF model file)
+- tokenizer.json (HuggingFace tokenizer)
+- config.json (model metadata: architecture, vocab_size, hidden_size,
+  num_layers, max_position_embeddings, eos_token_id, bos_token_id)
+Pull operation: download ONNX files from HuggingFace Hub API, convert to ZMF
+using zonnx converter (called as Go library, not subprocess), copy tokenizer.json
+and generate config.json from ONNX metadata.
+
+**HTTP serve API:**
+Standard net/http server. Two endpoints compatible with OpenAI API format:
+POST /v1/chat/completions (chat format) and POST /v1/completions (raw prompt).
+Streaming via Server-Sent Events (SSE) when stream=true in request body.
+GET /v1/models returns the loaded model metadata.
+
+---
+
+#### E49: Production Tokenizer
+
+Replace the whitespace-only tokenizer in pkg/tokenizer/ with a production BPE
+implementation that loads HuggingFace tokenizer.json format. Pure Go, no CGo.
+
+- [x] T49.1 Define Tokenizer interface and data types  Owner: TBD  Est: 45m  Completed: 2026 03 02
+  - Dependencies: None
+  - Files: pkg/tokenizer/tokenizer.go (rewrite)
+  - Acceptance: Tokenizer interface with methods: Encode(text string) ([]int, error),
+    Decode(ids []int) (string, error), VocabSize() int, GetToken(id int) (string, bool),
+    GetID(token string) (int, bool), SpecialTokens() SpecialTokens. SpecialTokens struct
+    with BOS, EOS, PAD, UNK token IDs. Existing WhitespaceTokenizer refactored to
+    implement the new interface (backwards compatibility in tests).
+  - [ ] S49.1.1 Define Tokenizer interface in pkg/tokenizer/tokenizer.go  Est: 15m
+  - [ ] S49.1.2 Define SpecialTokens and TokenizerConfig structs  Est: 10m
+  - [ ] S49.1.3 Refactor existing WhitespaceTokenizer to implement new interface  Est: 10m
+  - [ ] S49.1.4 Write interface compliance tests  Est: 10m
+
+- [x] T49.2 Implement BPE merge algorithm  Owner: TBD  Est: 1.5h  Completed: 2026 03 02
+  - Dependencies: T49.1
+  - Files: pkg/tokenizer/bpe.go (new)
+  - Acceptance: BPETokenizer struct implementing Tokenizer. Fields: vocab map[string]int,
+    reverseVocab map[int]string, merges []MergePair (ordered by priority),
+    mergeRanks map[MergePair]int. Encode: split text into pre-tokens (bytes or
+    characters depending on config), apply BPE merges iteratively (merge highest
+    priority pair first), return token IDs. Decode: map IDs back to strings,
+    concatenate, handle byte-level BPE decoding (convert byte tokens to UTF-8).
+    Test: encode("hello world") with a known small vocabulary produces expected IDs.
+    Test: encode then decode round-trips for ASCII and Unicode text.
+  - [ ] S49.2.1 Implement MergePair struct and merge rank lookup  Est: 15m
+  - [ ] S49.2.2 Implement core BPE merge loop  Est: 30m
+  - [ ] S49.2.3 Implement byte-level BPE pre-tokenization (GPT-2 style byte encoding)  Est: 20m
+  - [ ] S49.2.4 Implement Decode with byte-level post-processing  Est: 15m
+  - [ ] S49.2.5 Write unit tests: small vocab, round-trip, Unicode, empty input  Est: 20m
+  - [ ] S49.2.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T49.3 Implement tokenizer.json loader  Owner: TBD  Est: 1.5h  Completed: 2026 03 02
+  - Dependencies: T49.2
+  - Files: pkg/tokenizer/loader.go (new)
+  - Acceptance: LoadFromJSON(path string) (*BPETokenizer, error) reads a HuggingFace
+    tokenizer.json file. Parses: model.vocab (map), model.merges (list of "token1 token2"
+    strings), added_tokens (special tokens with IDs), pre_tokenizer config. Supports
+    byte-level BPE (type="ByteLevel") and basic pre-tokenizer types (Whitespace,
+    ByteLevel, Sequence). Normalizer support: NFC, NFD, Lowercase, Strip (applied in
+    order). Test: load a testdata/tokenizer.json fixture, encode a known prompt, verify
+    token IDs match Python HuggingFace tokenizer output for the same input.
+  - [ ] S49.3.1 Define JSON schema structs matching tokenizer.json format  Est: 20m
+  - [ ] S49.3.2 Implement LoadFromJSON with vocab and merge parsing  Est: 25m
+  - [ ] S49.3.3 Implement pre-tokenizer dispatch (ByteLevel, Whitespace, Sequence)  Est: 20m
+  - [ ] S49.3.4 Implement normalizer chain (NFC, Lowercase, Strip)  Est: 15m
+  - [ ] S49.3.5 Write tests with testdata/tokenizer.json fixture  Est: 15m
+  - [ ] S49.3.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T49.4 Add special token handling  Owner: TBD  Est: 30m  Completed: 2026 03 02
+  - Dependencies: T49.3
+  - Files: pkg/tokenizer/bpe.go (modify)
+  - Acceptance: BPETokenizer.EncodeWithSpecialTokens(text string, addBOS bool,
+    addEOS bool) ([]int, error) wraps Encode and prepends BOS / appends EOS.
+    Special tokens loaded from tokenizer.json added_tokens section. Special tokens
+    are not subject to BPE merging (matched and replaced before BPE).
+    Test: EncodeWithSpecialTokens prepends BOS and appends EOS when requested.
+  - [ ] S49.4.1 Extract special token IDs from added_tokens in loader  Est: 10m
+  - [ ] S49.4.2 Implement EncodeWithSpecialTokens  Est: 10m
+  - [ ] S49.4.3 Write tests for BOS/EOS injection  Est: 10m
+
+- [x] T49.5 Run linters and verify coverage for E49  Owner: TBD  Est: 15m  Completed: 2026 03 02
+  - Dependencies: T49.4
+  - Acceptance: golangci-lint 0 issues on pkg/tokenizer/. go test -cover -race
+    shows >= 95% coverage. go vet clean.
+  - [ ] S49.5.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S49.5.2 Fix any remaining issues  Est: 5m
+
+#### E50: KV Cache
+
+Implement key-value caching for attention layers to enable efficient
+autoregressive generation. Without caching, each new token recomputes
+attention over the entire sequence prefix (O(n^2) total over n steps).
+
+- [x] T50.1 Define KVCache and GenerationContext  Owner: TBD  Est: 45m  Completed: 2026 03 02
+  - Dependencies: None
+  - Files: generate/kvcache.go (new), generate/context.go (new)
+  - Acceptance: KVCache struct with layers []LayerKV. LayerKV has Key and Value
+    fields (each *tensor.TensorNumeric[float32]). Methods: Get(layer int) (*LayerKV,
+    bool), Update(layer int, newK, newV *tensor.TensorNumeric[float32]) error
+    (concatenates along sequence dimension), SeqLen() int, Reset().
+    GenerationContext struct embeds context.Context and holds *KVCache.
+    WithKVCache(ctx, cache) returns GenerationContext.
+    GetKVCache(ctx) returns (*KVCache, bool). Test: create cache, update twice,
+    verify K/V shapes grow along sequence dimension.
+  - [ ] S50.1.1 Create generate/kvcache.go with KVCache and LayerKV structs  Est: 15m
+  - [ ] S50.1.2 Implement Update (concat along seq dim) and Get methods  Est: 15m
+  - [ ] S50.1.3 Create generate/context.go with GenerationContext, WithKVCache, GetKVCache  Est: 10m
+  - [ ] S50.1.4 Write unit tests: update/get round-trip, multi-layer, reset  Est: 15m
+  - [ ] S50.1.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T50.2 Add cache-aware Forward to GroupQueryAttention  Owner: TBD  Est: 1.5h  Completed: 2026 03 02
+  - Dependencies: T50.1
+  - Files: layers/attention/group_query_attention.go (modify)
+  - Acceptance: GroupQueryAttention.Forward checks for KVCache in context via
+    GetKVCache. If present: (a) compute Q, K, V projections for current input only,
+    (b) call cache.Update(layerIdx, K, V) to append to cache, (c) retrieve full
+    cached K, V for attention computation, (d) compute attention scores using full
+    K/V but only current Q, (e) return output for current positions only. If no
+    cache: existing behavior unchanged. Layer index set at construction via a new
+    LayerIndex field. Test: cached forward for 3 sequential single-token inputs
+    produces same output as uncached forward for the full 3-token sequence.
+  - Risk: Must not break existing non-cached callers. Guard all cache logic behind
+    if-cache-present checks.
+  - [ ] S50.2.1 Add LayerIndex field to GroupQueryAttention  Est: 5m
+  - [ ] S50.2.2 Add cache check at start of Forward  Est: 10m
+  - [ ] S50.2.3 Implement cache update path (project Q/K/V, append K/V to cache)  Est: 30m
+  - [ ] S50.2.4 Implement cached attention computation (full K/V, current Q)  Est: 20m
+  - [ ] S50.2.5 Write test: cached vs uncached produce identical results  Est: 20m
+  - [ ] S50.2.6 Verify existing attention tests still pass  Est: 5m
+  - [ ] S50.2.7 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T50.3 Add cache-aware Forward to GlobalAttention  Owner: TBD  Est: 1h  Completed: 2026 03 02
+  - Dependencies: T50.1
+  - Files: layers/attention/global_attention.go (modify)
+  - Acceptance: Same KV cache integration as T50.2 but for GlobalAttention.
+    GlobalAttention uses the same KV cache mechanism via GetKVCache.
+    Test: cached vs uncached produce identical output.
+  - [ ] S50.3.1 Add LayerIndex field and cache check to GlobalAttention.Forward  Est: 15m
+  - [ ] S50.3.2 Implement cache update and cached attention path  Est: 25m
+  - [ ] S50.3.3 Write test: cached vs uncached parity  Est: 15m
+  - [ ] S50.3.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T50.4 Run linters and verify coverage for E50  Owner: TBD  Est: 15m  Completed: 2026 03 02
+  - Dependencies: T50.2, T50.3
+  - Acceptance: golangci-lint 0 issues on generate/ and layers/attention/.
+    go test -cover -race passes. Coverage >= 95% on new code.
+  - [ ] S50.4.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S50.4.2 Fix any remaining issues  Est: 5m
+
+#### E51: Autoregressive Generation Loop
+
+Implement the token-by-token generation loop with configurable sampling
+strategies. This is the core of autoregressive text generation.
+
+- [ ] T51.1 Define Generator struct and SamplingConfig  Owner: TBD  Est: 30m
+  - Dependencies: E49, E50
+  - Files: generate/generator.go (new)
+  - Acceptance: Generator struct with fields: graph *graph.Graph[float32],
+    tokenizer tokenizer.Tokenizer, engine compute.Engine[float32], config
+    ModelConfig. SamplingConfig struct: Temperature float64 (default 1.0),
+    TopK int (default 0 = disabled), TopP float64 (default 1.0 = disabled),
+    RepetitionPenalty float64 (default 1.0 = disabled), MaxNewTokens int
+    (default 256), StopTokenIDs []int, StopStrings []string.
+    NewGenerator(graph, tokenizer, engine, config) *Generator constructor.
+    ModelConfig struct: VocabSize int, MaxSeqLen int, EOSTokenID int,
+    BOSTokenID int, NumLayers int.
+  - [ ] S51.1.1 Create generate/generator.go with Generator, SamplingConfig, ModelConfig  Est: 15m
+  - [ ] S51.1.2 Implement NewGenerator constructor  Est: 10m
+  - [ ] S51.1.3 Write constructor tests  Est: 10m
+
+- [ ] T51.2 Implement greedy decode  Owner: TBD  Est: 1h
+  - Dependencies: T51.1
+  - Files: generate/generator.go (modify)
+  - Acceptance: Generator.Generate(ctx context.Context, prompt string,
+    config SamplingConfig) (string, error). With Temperature=0 (greedy mode):
+    tokenize prompt, run forward pass, extract last-position logits, take argmax,
+    append token, repeat. Stop on EOS or MaxNewTokens. Decode output tokens to
+    string. Test: with a mock graph that returns predictable logits, verify the
+    generated sequence matches expected argmax path.
+  - [ ] S51.2.1 Implement tokenization and initial forward pass  Est: 15m
+  - [ ] S51.2.2 Implement argmax sampling  Est: 10m
+  - [ ] S51.2.3 Implement autoregressive loop with KV cache  Est: 20m
+  - [ ] S51.2.4 Implement stop condition checking (EOS, max tokens)  Est: 10m
+  - [ ] S51.2.5 Write tests with mock graph: greedy decode correctness  Est: 15m
+  - [ ] S51.2.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T51.3 Implement temperature, top-k, and top-p sampling  Owner: TBD  Est: 1.5h
+  - Dependencies: T51.2
+  - Files: generate/sampling.go (new)
+  - Acceptance: applyTemperature(logits []float32, temp float64) divides logits
+    by temp. applyTopK(logits []float32, k int) sets all but top-k logits to
+    -Inf. applyTopP(logits []float32, p float64) sorts by probability, computes
+    cumulative sum, sets logits below cumulative threshold to -Inf.
+    sampleFromDistribution(logits []float32, rng *rand.Rand) int applies softmax
+    then weighted random selection. Each function is a separate testable unit.
+    Test: temperature=0.5 sharpens distribution. top-k=2 zeros all but 2.
+    top-p=0.9 keeps tokens covering 90% cumulative probability.
+  - [ ] S51.3.1 Implement applyTemperature  Est: 10m
+  - [ ] S51.3.2 Implement applyTopK  Est: 15m
+  - [ ] S51.3.3 Implement applyTopP (sort, cumsum, filter)  Est: 25m
+  - [ ] S51.3.4 Implement sampleFromDistribution (softmax + weighted sample)  Est: 15m
+  - [ ] S51.3.5 Integrate sampling into Generator.Generate  Est: 10m
+  - [ ] S51.3.6 Write unit tests for each sampling function  Est: 20m
+  - [ ] S51.3.7 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T51.4 Implement repetition penalty  Owner: TBD  Est: 30m
+  - Dependencies: T51.3
+  - Files: generate/sampling.go (modify)
+  - Acceptance: applyRepetitionPenalty(logits []float32, generatedTokens []int,
+    penalty float64) -- for each token in generatedTokens, divide its logit by
+    penalty if positive, multiply by penalty if negative. Test: penalty > 1.0
+    reduces probability of previously generated tokens.
+  - [ ] S51.4.1 Implement applyRepetitionPenalty  Est: 10m
+  - [ ] S51.4.2 Integrate into sampling pipeline  Est: 5m
+  - [ ] S51.4.3 Write unit tests  Est: 10m
+  - [ ] S51.4.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T51.5 Implement stop string detection  Owner: TBD  Est: 30m
+  - Dependencies: T51.2
+  - Files: generate/generator.go (modify)
+  - Acceptance: After each token is generated, decode the recent tokens to text
+    and check if any StopStrings appear. If found, truncate output before the stop
+    string and return. Test: stop string "END" causes generation to stop when
+    tokens decode to contain "END".
+  - [ ] S51.5.1 Implement stop string buffer and check  Est: 15m
+  - [ ] S51.5.2 Write tests for stop string detection  Est: 10m
+  - [ ] S51.5.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T51.6 Run linters and verify coverage for E51  Owner: TBD  Est: 15m
+  - Dependencies: T51.5
+  - Acceptance: golangci-lint 0 issues on generate/. go test -cover -race
+    shows >= 95% coverage. go vet clean.
+  - [ ] S51.6.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S51.6.2 Fix any remaining issues  Est: 5m
+
+#### E52: Streaming Output
+
+Add token-by-token delivery during generation via a callback interface.
+
+- [ ] T52.1 Define TokenStream interface and integrate with Generator  Owner: TBD  Est: 45m
+  - Dependencies: E51
+  - Files: generate/stream.go (new), generate/generator.go (modify)
+  - Acceptance: TokenStream interface with OnToken(token string, done bool) error.
+    Generator.GenerateStream(ctx, prompt, config, stream TokenStream) error delivers
+    each decoded token via stream.OnToken as it is generated. If OnToken returns
+    an error, generation stops. When generation completes (EOS or max tokens),
+    OnToken is called with done=true. Test: mock stream collects all tokens;
+    verify concatenation equals Generate() output.
+  - [ ] S52.1.1 Create generate/stream.go with TokenStream interface  Est: 10m
+  - [ ] S52.1.2 Implement GenerateStream method  Est: 15m
+  - [ ] S52.1.3 Write tests: collect stream tokens, verify parity with non-stream  Est: 15m
+  - [ ] S52.1.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T52.2 Run linters and verify coverage for E52  Owner: TBD  Est: 10m
+  - Dependencies: T52.1
+  - Acceptance: golangci-lint 0 issues. Coverage >= 95%.
+  - [ ] S52.2.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+
+#### E53: Model Registry and Auto-Download
+
+Implement local model caching with automatic download and ONNX-to-ZMF conversion.
+
+- [x] T53.1 Define ModelRegistry interface and local cache layout  Owner: TBD  Est: 45m  Completed: 2026 03 02
+  - Dependencies: None
+  - Files: registry/registry.go (new)
+  - Acceptance: ModelRegistry interface: Pull(ctx, modelID string) (*ModelInfo, error),
+    Get(modelID string) (*ModelInfo, bool), List() []ModelInfo,
+    Delete(modelID string) error. ModelInfo struct: ID string, Path string (local dir),
+    Architecture string, VocabSize int, MaxSeqLen int, Size int64 (bytes).
+    LocalRegistry struct implementing ModelRegistry with configurable cache directory
+    (default ~/.zerfoo/models/). Cache layout: <cacheDir>/<org>/<model>/
+    containing model.zmf, tokenizer.json, config.json.
+  - [ ] S53.1.1 Create registry/registry.go with interface and ModelInfo struct  Est: 15m
+  - [ ] S53.1.2 Implement LocalRegistry with Get, List, Delete  Est: 20m
+  - [ ] S53.1.3 Write tests for Get (missing/present), List, Delete  Est: 15m
+  - [ ] S53.1.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T53.2 Implement HuggingFace download and ONNX-to-ZMF conversion  Owner: TBD  Est: 2h  Completed: 2026 03 02
+  - Dependencies: T53.1
+  - Files: registry/pull.go (new)
+  - Acceptance: LocalRegistry.Pull(ctx, "google/gemma-3-4b-it") downloads ONNX
+    model files from HuggingFace Hub using HTTP API (net/http, no external library),
+    converts ONNX to ZMF using the zonnx converter package (imported as Go library),
+    copies tokenizer.json from the HuggingFace download, generates config.json from
+    model metadata. Downloads are resumable (Content-Range header). Progress is
+    reported via a callback. Test: mock HTTP server serves fake ONNX + tokenizer.json;
+    verify Pull creates expected directory structure.
+  - Risk: HuggingFace API may require authentication for gated models. Implement
+    optional token support via HF_TOKEN env var or config.
+  - [ ] S53.2.1 Implement HuggingFace file listing (GET /api/models/<id>)  Est: 20m
+  - [ ] S53.2.2 Implement file download with progress callback  Est: 25m
+  - [ ] S53.2.3 Implement ONNX-to-ZMF conversion step (call zonnx converter as lib)  Est: 25m
+  - [ ] S53.2.4 Implement tokenizer.json and config.json extraction  Est: 15m
+  - [ ] S53.2.5 Add HF_TOKEN support for gated models  Est: 10m
+  - [ ] S53.2.6 Write tests with httptest mock server  Est: 20m
+  - [ ] S53.2.7 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T53.3 Run linters and verify coverage for E53  Owner: TBD  Est: 15m  Completed: 2026 03 02
+  - Dependencies: T53.2
+  - Acceptance: golangci-lint 0 issues on registry/. go test -cover -race
+    shows >= 95% coverage. go vet clean.
+  - [ ] S53.3.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S53.3.2 Fix any remaining issues  Est: 5m
+
+#### E54: High-Level Inference API
+
+Create the inference/ package providing one-liner model loading and generation.
+
+- [ ] T54.1 Implement inference.Load  Owner: TBD  Est: 1.5h
+  - Dependencies: E49, E50, E51, E53
+  - Files: inference/inference.go (new)
+  - Acceptance: inference.Load(modelID string, opts ...Option) (*Model, error).
+    Options: WithCacheDir(string), WithDevice("cpu"/"cuda"), WithMaxSeqLen(int).
+    Load pulls the model if not cached (via ModelRegistry), loads tokenizer
+    from tokenizer.json, loads ZMF model, builds graph, creates engine.
+    Returns *Model ready for generation. Test: with pre-populated cache dir,
+    Load succeeds and model.Generate produces output.
+  - [ ] S54.1.1 Create inference/inference.go with Load function  Est: 20m
+  - [ ] S54.1.2 Implement Option pattern (WithCacheDir, WithDevice, WithMaxSeqLen)  Est: 15m
+  - [ ] S54.1.3 Implement model loading pipeline (registry, tokenizer, graph, engine)  Est: 30m
+  - [ ] S54.1.4 Write tests with pre-populated fixture cache  Est: 20m
+  - [ ] S54.1.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T54.2 Implement Model.Generate and Model.GenerateStream  Owner: TBD  Est: 1h
+  - Dependencies: T54.1
+  - Files: inference/inference.go (modify)
+  - Acceptance: Model.Generate(ctx, prompt string, opts ...GenerateOption) (string, error).
+    GenerateOptions: WithTemperature(float64), WithTopK(int), WithTopP(float64),
+    WithMaxTokens(int), WithRepetitionPenalty(float64), WithStopStrings(...string).
+    Model.GenerateStream(ctx, prompt, handler TokenStream, opts...) error.
+    Both delegate to generate.Generator internally. Test: Generate returns non-empty
+    string. GenerateStream delivers tokens matching Generate output.
+  - [ ] S54.2.1 Implement Model.Generate with GenerateOption  Est: 20m
+  - [ ] S54.2.2 Implement Model.GenerateStream  Est: 15m
+  - [ ] S54.2.3 Write tests  Est: 20m
+  - [ ] S54.2.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T54.3 Implement Model.Chat  Owner: TBD  Est: 1h
+  - Dependencies: T54.2
+  - Files: inference/chat.go (new)
+  - Acceptance: Model.Chat(ctx, messages []Message, opts ...GenerateOption)
+    (Response, error). Message struct: Role string ("system", "user", "assistant"),
+    Content string. Response struct: Content string, TokensUsed int.
+    Chat formats messages into the model's prompt template (configurable via
+    config.json chat_template field, default Gemma 3 format:
+    "<start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n").
+    Calls Generate internally with the formatted prompt. Test: format messages
+    correctly, generate response.
+  - [ ] S54.3.1 Create inference/chat.go with Message, Response, chat template  Est: 15m
+  - [ ] S54.3.2 Implement prompt formatting from messages  Est: 15m
+  - [ ] S54.3.3 Implement Model.Chat  Est: 15m
+  - [ ] S54.3.4 Write tests for prompt formatting and chat flow  Est: 15m
+  - [ ] S54.3.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T54.4 Implement Model.Embed  Owner: TBD  Est: 45m
+  - Dependencies: T54.1
+  - Files: inference/embed.go (new)
+  - Acceptance: Model.Embed(ctx, text string) ([]float32, error). Tokenizes text,
+    runs forward pass, extracts hidden state from the last layer (before LM head),
+    mean-pools across sequence positions, returns float32 vector. Returns error
+    if model does not support embeddings. Test: embed returns vector of expected
+    dimension.
+  - [ ] S54.4.1 Create inference/embed.go  Est: 15m
+  - [ ] S54.4.2 Implement hidden state extraction and mean pooling  Est: 15m
+  - [ ] S54.4.3 Write tests  Est: 10m
+  - [ ] S54.4.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T54.5 Run linters and verify coverage for E54  Owner: TBD  Est: 15m
+  - Dependencies: T54.4
+  - Acceptance: golangci-lint 0 issues on inference/. go test -cover -race
+    shows >= 95% coverage. go vet clean.
+  - [ ] S54.5.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S54.5.2 Fix any remaining issues  Est: 5m
+
+#### E55: CLI Commands
+
+Add user-facing CLI commands for pulling, running, and serving models.
+
+- [ ] T55.1 Implement zerfoo pull command  Owner: TBD  Est: 45m
+  - Dependencies: E53
+  - Files: cmd/cli/pull.go (new), cmd/zerfoo/main.go (modify)
+  - Acceptance: `zerfoo pull <model-id>` downloads and caches the model. Flags:
+    --cache-dir (override default), --token (HuggingFace token). Shows progress
+    (download bytes / total). On completion, prints model path and size. If
+    already cached, prints "already up to date" and exits. Test: verify command
+    parses flags and calls registry.Pull.
+  - [ ] S55.1.1 Create cmd/cli/pull.go with PullCommand  Est: 15m
+  - [ ] S55.1.2 Implement progress display (download bytes / total)  Est: 10m
+  - [ ] S55.1.3 Register pull command in cmd/zerfoo/main.go  Est: 5m
+  - [ ] S55.1.4 Write tests for flag parsing and pull invocation  Est: 10m
+  - [ ] S55.1.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T55.2 Implement zerfoo run command  Owner: TBD  Est: 1h
+  - Dependencies: E54
+  - Files: cmd/cli/run.go (new), cmd/zerfoo/main.go (modify)
+  - Acceptance: `zerfoo run <model-id>` starts an interactive prompt-response loop.
+    Flags: --temperature, --top-k, --top-p, --max-tokens, --system (system prompt).
+    Reads user input from stdin, generates response with streaming output to stdout,
+    repeats until EOF or Ctrl-C. Uses Model.Chat for multi-turn conversation
+    (maintains message history). Test: verify command parses flags and calls
+    Model.Chat with correct messages.
+  - [ ] S55.2.1 Create cmd/cli/run.go with RunCommand  Est: 20m
+  - [ ] S55.2.2 Implement interactive loop with stdin reading  Est: 15m
+  - [ ] S55.2.3 Implement streaming output to stdout  Est: 10m
+  - [ ] S55.2.4 Register run command in cmd/zerfoo/main.go  Est: 5m
+  - [ ] S55.2.5 Write tests  Est: 10m
+  - [ ] S55.2.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T55.3 Implement zerfoo serve command  Owner: TBD  Est: 2h
+  - Dependencies: E54
+  - Files: cmd/cli/serve.go (new), serve/server.go (new), cmd/zerfoo/main.go (modify)
+  - Acceptance: `zerfoo serve <model-id> --port 8080` starts an HTTP server with
+    OpenAI-compatible API endpoints:
+    POST /v1/chat/completions -- accepts messages array, returns chat completion.
+    POST /v1/completions -- accepts prompt string, returns completion.
+    GET /v1/models -- returns model metadata.
+    When request includes "stream": true, response uses Server-Sent Events (SSE)
+    with data: {"choices":[{"delta":{"content":"token"}}]} format.
+    Server uses net/http only (no external router). Graceful shutdown on SIGTERM
+    via shutdown.Coordinator. Test: httptest server, verify chat completion
+    response format, verify SSE streaming format.
+  - [ ] S55.3.1 Create serve/server.go with Server struct and route registration  Est: 20m
+  - [ ] S55.3.2 Implement POST /v1/chat/completions handler  Est: 25m
+  - [ ] S55.3.3 Implement POST /v1/completions handler  Est: 15m
+  - [ ] S55.3.4 Implement GET /v1/models handler  Est: 10m
+  - [ ] S55.3.5 Implement SSE streaming for stream=true requests  Est: 20m
+  - [ ] S55.3.6 Create cmd/cli/serve.go with ServeCommand  Est: 15m
+  - [ ] S55.3.7 Register serve command in cmd/zerfoo/main.go  Est: 5m
+  - [ ] S55.3.8 Write tests with httptest for all endpoints  Est: 25m
+  - [ ] S55.3.9 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T55.4 Run linters and verify coverage for E55  Owner: TBD  Est: 15m
+  - Dependencies: T55.3
+  - Acceptance: golangci-lint 0 issues. go test -cover -race passes. Coverage
+    >= 95% on new packages.
+  - [ ] S55.4.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S55.4.2 Fix any remaining issues  Est: 5m
+
+#### E56: End-to-End Validation
+
+Validate the full pipeline: pull model, load, generate coherent text, serve.
+
+- [ ] T56.1 Gemma 3 end-to-end generation test  Owner: TBD  Est: 1.5h
+  - Dependencies: E49, E50, E51, E54
+  - Files: tests/parity/gemma3_generation_test.go (new)
+  - Acceptance: Test skips when GEMMA3_ZMF_PATH not set. Loads Gemma 3 model via
+    inference.Load (from local ZMF path). Generates 20 tokens from prompt
+    "The capital of France is". Output is non-empty, contains no NaN, and
+    tokenizes back to valid token IDs. With greedy decode (temperature=0),
+    output is deterministic across runs. With KV cache enabled, output matches
+    non-cached output.
+  - [ ] S56.1.1 Create tests/parity/gemma3_generation_test.go  Est: 30m
+  - [ ] S56.1.2 Test greedy generation determinism  Est: 20m
+  - [ ] S56.1.3 Test KV cache parity with uncached  Est: 20m
+  - [ ] S56.1.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T56.2 HTTP serve integration test  Owner: TBD  Est: 1h
+  - Dependencies: E55
+  - Files: serve/server_test.go (extend)
+  - Acceptance: Start serve with a mock model. Send POST /v1/chat/completions
+    with messages. Verify response has correct JSON structure (id, object,
+    choices array, usage). Send same request with stream=true. Verify SSE events
+    are well-formed and concatenated content matches non-streaming response.
+  - [ ] S56.2.1 Write non-streaming chat completion integration test  Est: 20m
+  - [ ] S56.2.2 Write streaming SSE integration test  Est: 20m
+  - [ ] S56.2.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T56.3 Run full test suite  Owner: TBD  Est: 30m
+  - Dependencies: T56.1, T56.2
+  - Acceptance: go test ./... -race passes. No regressions in existing packages.
+    All new packages >= 95% coverage.
+  - [ ] S56.3.1 Run go test ./... -cover -race  Est: 15m
+  - [ ] S56.3.2 Verify new packages meet coverage threshold  Est: 10m
+  - [ ] S56.3.3 Run golangci-lint run ./...  Est: 5m
+
+- [ ] T56.4 Update documentation  Owner: TBD  Est: 30m
+  - Dependencies: T56.3
+  - Acceptance: docs/plan.md Phase 8 tasks marked complete. docs/design.md updated
+    with: inference API section, model registry, tokenizer, KV cache, generation
+    loop, serve API. Hand-off notes updated.
+  - [ ] S56.4.1 Update docs/plan.md  Est: 10m
+  - [ ] S56.4.2 Update docs/design.md  Est: 15m
+  - [ ] S56.4.3 Update hand-off notes  Est: 5m
+
+---
+
 ## 4. Timeline and Milestones
 
 | ID | Milestone | Dependencies | Exit Criteria |
@@ -1378,6 +1976,14 @@ Run the full quality gate suite after all Phase 7 work is complete.
 | M33 | Registration consolidated | E45 | No init() in layers/; single RegisterAll entry point |
 | M34 | Graph thread-safe | E46 | Concurrent Forward passes without data races |
 | M35 | Phase 7 complete | E48 | Full suite green; docs updated; all quality gates pass |
+| M36 | Production tokenizer | E49 | BPE tokenizer loads tokenizer.json; encode/decode round-trips correctly |
+| M37 | KV cache working | E50 | Cached attention produces identical output to uncached; O(n) per step |
+| M38 | Generation loop | E51 | Greedy + sampling generation with stop conditions |
+| M39 | Streaming output | E52 | Token-by-token delivery via callback; parity with non-streaming |
+| M40 | Model registry | E53 | Pull downloads from HuggingFace, converts ONNX to ZMF, caches locally |
+| M41 | High-level API | E54 | inference.Load + Model.Generate + Model.Chat + Model.Embed working |
+| M42 | CLI commands | E55 | zerfoo pull/run/serve commands working |
+| M43 | Phase 8 complete | E56 | End-to-end: Gemma 3 generates coherent text; serve API tested |
 
 ### Recommended Sequence
 
@@ -1429,6 +2035,24 @@ Parallelism opportunities:
 - E47 must wait for E44-E46 to complete
 - E48 must wait for E47
 
+**Phase 8 (Embeddable Inference Library):**
+29. **E49** (Tokenizer) -- Foundation; no Phase 8 deps; can start immediately
+30. **E50** (KV Cache) -- Foundation; no Phase 8 deps; parallel with E49
+31. **E53** (Model Registry) -- Foundation; no Phase 8 deps; parallel with E49/E50
+32. **E51** (Generation Loop) -- Depends on E49 (tokenizer) + E50 (KV cache)
+33. **E52** (Streaming) -- Depends on E51 (generation loop)
+34. **E54** (High-Level API) -- Depends on E49, E50, E51, E52, E53
+35. **E55** (CLI Commands) -- Depends on E53 (pull) + E54 (run/serve)
+36. **E56** (End-to-End Validation) -- After all Phase 8 epics
+
+Parallelism opportunities:
+- E49 + E50 + E53 are all independent foundations; run in parallel
+- E51 starts after E49 + E50
+- E52 starts after E51
+- E55.T55.1 (pull command) can start as soon as E53 is done, parallel with E51/E52
+- E54 integrates everything; starts after E49, E50, E51, E52, E53
+- E55.T55.2 and E55.T55.3 depend on E54
+
 ---
 
 ## 5. Operating Procedure
@@ -1466,6 +2090,8 @@ A task is done when:
 ---
 
 ## 6. Progress Log
+
+- **2026 03 02 (update 18):** Change Summary: Added Phase 8 -- Embeddable Go-Native Inference Library. Strategic direction chosen: position zerfoo as an embeddable Go-native inference library (Direction B from brainstorm). Gap analysis identified 8 critical gaps: whitespace-only tokenizer, no generation loop, no KV cache, no streaming, no high-level API, no model registry, no auto-download, no serve API. New epics: E49 (production BPE tokenizer loading tokenizer.json), E50 (KV cache for attention layers), E51 (autoregressive generation with sampling), E52 (streaming output), E53 (model registry with HuggingFace download and ONNX-to-ZMF conversion), E54 (high-level inference API: Load/Generate/Chat/Embed), E55 (CLI: pull/run/serve with OpenAI-compatible HTTP API), E56 (end-to-end validation). 28 tasks, ~30 hours estimated. Added milestones M36-M43. Pure Go, no CGo, no external dependencies beyond existing ones.
 
 - **2026 03 02 (update 17):** Change Summary: Completed Phase 7 -- Architecture Cleanup. E44: Deleted pkg/prelude (empty), tests/helpers/wire.go (4 nil interface stubs), 7 dead test files (17 always-skipping tests) in tests/parity and tests/numerics, and the empty tests/numerics directory. E45: Exported buildFFN as BuildFFN in layers/core/registry.go, removed init() and float16/model imports, added FFN registration to layers/registry/RegisterAll(). E46: Added sync.Mutex to graph.Graph protecting memo map in Forward and Backward; wrote TestGraph_ConcurrentForward (8 goroutines, passes with -race). E47: Updated docs/design.md (removed pkg/prelude, graph thread-safety limitation, dead test references; added concurrency and registration notes). E48: Full verification pending. Commits: c5d6c5f, 615bca8, c9271c1, 1f96736, 4e11b5a, 4cc2282, 225326c, e0d3fc9.
 
@@ -1509,6 +2135,7 @@ A task is done when:
 - **Phase 5 status:** Complete. Concrete DistributedServiceServer, GrpcStrategy, WorkerNode, CLI worker command. 96% coverage.
 - **Phase 6 status:** Complete. Open weights model import (Gemma 3, SigLIP, Kimi-VL). All operators registered and tested.
 - **Phase 7 status:** Complete. Dead code removed (pkg/prelude, tests/helpers, 7 dead test files). Layer registration consolidated (no more init()). Graph.Forward/Backward thread-safe via sync.Mutex.
+- **Phase 8 status:** Not started. Embeddable inference library: production BPE tokenizer, KV cache, generation loop with sampling, streaming, model registry with auto-download, high-level API (inference.Load/Generate/Chat/Embed), CLI commands (pull/run/serve), OpenAI-compatible HTTP serve. 8 epics (E49-E56), 28 tasks.
 - **GPU hardware validation:** Blocked on GCP GPU quota (E29).
 - **Key files to read first:**
   - compute/engine.go -- Engine[T] interface (34 methods)
@@ -1609,6 +2236,22 @@ A task is done when:
 | Documentation | 10/10 | Consolidated to single docs/design.md; stale refs removed (E47) |
 | CI/CD | 9/10 | No changes from Phase 6 |
 
+### Target Scorecard (After Phase 8)
+
+| Category | Target | How Achieved |
+|----------|--------|-------------|
+| Architecture | 10/10 | No changes from Phase 7 |
+| Core Functionality | 10/10 | Production tokenizer, KV cache, generation loop (E49-E52) |
+| Testing | 10/10 | End-to-end generation tests, serve integration tests (E56) |
+| Error Handling | 9/10 | No changes from Phase 7 |
+| Security | 8/10 | HF_TOKEN support for gated models (T53.2) |
+| Observability | 8/10 | No changes from Phase 7 |
+| Configuration | 9/10 | Model config.json, inference options, CLI flags (E53, E54, E55) |
+| Operations | 10/10 | CLI pull/run/serve, OpenAI-compatible HTTP API (E55) |
+| Documentation | 10/10 | Design doc updated with inference pipeline (T56.4) |
+| CI/CD | 9/10 | No changes from Phase 7 |
+| Developer Experience | 9/10 | 3-line model loading and generation (E54); ollama-style CLI (E55) |
+
 ### New Packages and Files Created
 
 | Package / File | Purpose | Epic |
@@ -1653,3 +2296,20 @@ A task is done when:
 | zonnx/pkg/importer/layers/batch_norm.go | zonnx builder for BatchNormalization | E39 |
 | zonnx/pkg/importer/layers/resize.go | zonnx builder for Resize | E39 |
 | zonnx/pkg/importer/layers/moe.go | zonnx builders for MoEGate and MixtureOfExperts | E40 |
+| pkg/tokenizer/bpe.go | Production BPE tokenizer implementation | E49 |
+| pkg/tokenizer/loader.go | HuggingFace tokenizer.json loader | E49 |
+| generate/kvcache.go | KV cache for attention layers | E50 |
+| generate/context.go | GenerationContext with KV cache carrier | E50 |
+| generate/generator.go | Autoregressive generation loop | E51 |
+| generate/sampling.go | Temperature, top-k, top-p, repetition penalty | E51 |
+| generate/stream.go | TokenStream interface for streaming output | E52 |
+| registry/registry.go | ModelRegistry interface and LocalRegistry | E53 |
+| registry/pull.go | HuggingFace download and ONNX-to-ZMF conversion | E53 |
+| inference/inference.go | High-level Load, Model.Generate, Model.GenerateStream | E54 |
+| inference/chat.go | Model.Chat with prompt template formatting | E54 |
+| inference/embed.go | Model.Embed with mean pooling | E54 |
+| cmd/cli/pull.go | zerfoo pull CLI command | E55 |
+| cmd/cli/run.go | zerfoo run interactive REPL command | E55 |
+| cmd/cli/serve.go | zerfoo serve HTTP server command | E55 |
+| serve/server.go | OpenAI-compatible HTTP API server (net/http) | E55 |
+| tests/parity/gemma3_generation_test.go | End-to-end generation parity test | E56 |
