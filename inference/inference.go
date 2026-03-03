@@ -12,6 +12,7 @@ import (
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/generate"
+	"github.com/zerfoo/zerfoo/graph"
 	"github.com/zerfoo/zerfoo/model"
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/pkg/tokenizer"
@@ -133,12 +134,24 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		return nil, fmt.Errorf("load model: %w", err)
 	}
 
+	return assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen), nil
+}
+
+// assembleModel wires together loaded components into a ready-to-use Model.
+func assembleModel(
+	g *graph.Graph[float32],
+	tok tokenizer.Tokenizer,
+	eng compute.Engine[float32],
+	meta *ModelMetadata,
+	info *registry.ModelInfo,
+	maxSeqLenOverride int,
+) *Model {
 	maxSeqLen := meta.MaxPositionEmbeddings
-	if o.maxSeqLen > 0 {
-		maxSeqLen = o.maxSeqLen
+	if maxSeqLenOverride > 0 {
+		maxSeqLen = maxSeqLenOverride
 	}
 
-	gen := generate.NewGenerator(mdl.Graph, tok, eng, generate.ModelConfig{
+	gen := generate.NewGenerator(g, tok, eng, generate.ModelConfig{
 		VocabSize:  meta.VocabSize,
 		MaxSeqLen:  maxSeqLen,
 		EOSTokenID: meta.EOSTokenID,
@@ -152,7 +165,7 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		engine:    eng,
 		config:    *meta,
 		info:      info,
-	}, nil
+	}
 }
 
 // loadMetadata reads and parses config.json.
