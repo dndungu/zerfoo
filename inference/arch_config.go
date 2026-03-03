@@ -44,6 +44,7 @@ func DefaultArchConfigRegistry() *ArchConfigRegistry {
 	r.Register("gemma", parseGemmaConfig)
 	r.Register("gemma2", parseGemmaConfig)
 	r.Register("gemma3", parseGemmaConfig)
+	r.Register("llama", parseLlamaConfig)
 	return r
 }
 
@@ -65,6 +66,29 @@ func parseGemmaConfig(raw map[string]interface{}) (*ModelMetadata, error) {
 	}
 	if meta.RopeTheta == 0 {
 		meta.RopeTheta = 10000 // Gemma default
+	}
+	return meta, nil
+}
+
+// parseLlamaConfig parses Llama-family config.json fields.
+func parseLlamaConfig(raw map[string]interface{}) (*ModelMetadata, error) {
+	meta := &ModelMetadata{
+		Architecture:          getString(raw, "model_type"),
+		VocabSize:             getInt(raw, "vocab_size"),
+		HiddenSize:            getInt(raw, "hidden_size"),
+		NumLayers:             getInt(raw, "num_hidden_layers"),
+		NumQueryHeads:         getInt(raw, "num_attention_heads"),
+		NumKeyValueHeads:      getInt(raw, "num_key_value_heads"),
+		IntermediateSize:      getInt(raw, "intermediate_size"),
+		MaxPositionEmbeddings: getInt(raw, "max_position_embeddings"),
+		EOSTokenID:            getInt(raw, "eos_token_id"),
+		BOSTokenID:            getInt(raw, "bos_token_id"),
+		RopeTheta:             getFloat(raw, "rope_theta"),
+		TieWordEmbeddings:     getBool(raw, "tie_word_embeddings"),
+		RopeScaling:           getRopeScaling(raw),
+	}
+	if meta.RopeTheta == 0 {
+		meta.RopeTheta = 500000 // Llama 3 default
 	}
 	return meta, nil
 }

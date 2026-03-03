@@ -1,6 +1,8 @@
 package inference
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -263,6 +265,144 @@ func TestRopeScalingConfig_FromRaw(t *testing.T) {
 	if meta.RopeScaling.OriginalMaxPositionEmbeddings != 32768 {
 		t.Errorf("RopeScaling.OriginalMaxPositionEmbeddings = %d, want 32768",
 			meta.RopeScaling.OriginalMaxPositionEmbeddings)
+	}
+}
+
+func TestLlamaConfigParser(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  map[string]interface{}
+		want ModelMetadata
+	}{
+		{
+			name: "llama3.1 8B full",
+			raw: map[string]interface{}{
+				"model_type":              "llama",
+				"vocab_size":              float64(128256),
+				"hidden_size":             float64(4096),
+				"num_hidden_layers":       float64(32),
+				"num_attention_heads":     float64(32),
+				"num_key_value_heads":     float64(8),
+				"intermediate_size":       float64(14336),
+				"max_position_embeddings": float64(131072),
+				"rope_theta":              float64(500000),
+				"eos_token_id":            float64(128001),
+				"bos_token_id":            float64(128000),
+				"tie_word_embeddings":     false,
+				"rope_scaling": map[string]interface{}{
+					"type":                             "llama3",
+					"factor":                           float64(8.0),
+					"original_max_position_embeddings": float64(8192),
+				},
+			},
+			want: ModelMetadata{
+				Architecture:          "llama",
+				VocabSize:             128256,
+				HiddenSize:            4096,
+				NumLayers:             32,
+				NumQueryHeads:         32,
+				NumKeyValueHeads:      8,
+				IntermediateSize:      14336,
+				MaxPositionEmbeddings: 131072,
+				RopeTheta:             500000,
+				EOSTokenID:            128001,
+				BOSTokenID:            128000,
+			},
+		},
+		{
+			name: "llama minimal without rope_theta defaults to 500000",
+			raw: map[string]interface{}{
+				"model_type":          "llama",
+				"vocab_size":          float64(32000),
+				"num_hidden_layers":   float64(32),
+				"num_attention_heads": float64(32),
+			},
+			want: ModelMetadata{
+				Architecture:  "llama",
+				VocabSize:     32000,
+				NumLayers:     32,
+				NumQueryHeads: 32,
+				RopeTheta:     500000,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseLlamaConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("parseLlamaConfig error: %v", err)
+			}
+			assertMetadataEqual(t, tc.want, *got)
+		})
+	}
+}
+
+func TestLlamaConfigParser_Fixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/llama3_config.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+
+	meta, err := parseLlamaConfig(raw)
+	if err != nil {
+		t.Fatalf("parseLlamaConfig error: %v", err)
+	}
+
+	assertMetadataEqual(t, ModelMetadata{
+		Architecture:          "llama",
+		VocabSize:             128256,
+		HiddenSize:            4096,
+		NumLayers:             32,
+		NumQueryHeads:         32,
+		NumKeyValueHeads:      8,
+		IntermediateSize:      14336,
+		MaxPositionEmbeddings: 131072,
+		RopeTheta:             500000,
+		EOSTokenID:            128001,
+		BOSTokenID:            128000,
+	}, *meta)
+
+	// Verify RoPE scaling was parsed.
+	if meta.RopeScaling == nil {
+		t.Fatal("RopeScaling should not be nil")
+	}
+	if meta.RopeScaling.Type != "llama3" {
+		t.Errorf("RopeScaling.Type = %q, want %q", meta.RopeScaling.Type, "llama3")
+	}
+	if meta.RopeScaling.Factor != 8.0 {
+		t.Errorf("RopeScaling.Factor = %f, want 8.0", meta.RopeScaling.Factor)
+	}
+	if meta.RopeScaling.OriginalMaxPositionEmbeddings != 8192 {
+		t.Errorf("RopeScaling.OriginalMaxPositionEmbeddings = %d, want 8192",
+			meta.RopeScaling.OriginalMaxPositionEmbeddings)
+	}
+}
+
+func TestDefaultArchConfigRegistry_LlamaRegistered(t *testing.T) {
+	reg := DefaultArchConfigRegistry()
+
+	raw := map[string]interface{}{
+		"model_type":          "llama",
+		"vocab_size":          float64(128256),
+		"num_hidden_layers":   float64(32),
+		"num_attention_heads": float64(32),
+		"num_key_value_heads": float64(8),
+		"rope_theta":          float64(500000),
+	}
+	meta, err := reg.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if meta.Architecture != "llama" {
+		t.Errorf("Architecture = %q, want %q", meta.Architecture, "llama")
+	}
+	if meta.RopeTheta != 500000 {
+		t.Errorf("RopeTheta = %f, want 500000", meta.RopeTheta)
 	}
 }
 
