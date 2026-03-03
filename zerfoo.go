@@ -72,8 +72,9 @@ func BuildFromZMF[T tensor.Numeric](
 	engine compute.Engine[T],
 	ops numeric.Arithmetic[T],
 	m *zmf.Model,
+	opts ...model.BuildOption,
 ) (*graph.Graph[T], error) {
-	return model.BuildFromZMF[T](engine, ops, m)
+	return model.BuildFromZMF[T](engine, ops, m, opts...)
 }
 
 // RegisterLayer registers a new layer builder.
