@@ -278,3 +278,168 @@ func TestRotaryPositionalEmbedding_DefaultBase(t *testing.T) {
 	testutils.AssertNoError(t, err, "Forward should not return an error")
 	testutils.AssertNotNil(t, output, "Output tensor should not be nil")
 }
+
+func TestRotaryPositionalEmbedding_YaRN_DefaultUnchanged(t *testing.T) {
+	// Without YaRN, behavior should be identical to default RoPE.
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	headDim := 8
+	seqLen := 16
+	base := 10000.0
+
+	rpeDefault, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, seqLen, WithRotaryBase(base))
+	if err != nil {
+		t.Fatalf("default RoPE failed: %v", err)
+	}
+
+	input, _ := tensor.New[float32]([]int{1, seqLen, headDim}, nil)
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%7+1) * 0.1
+	}
+
+	outDefault, err := rpeDefault.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("default Forward failed: %v", err)
+	}
+
+	// Sanity: output is non-nil and has same shape
+	if !reflect.DeepEqual(outDefault.Shape(), input.Shape()) {
+		t.Errorf("default output shape = %v, want %v", outDefault.Shape(), input.Shape())
+	}
+}
+
+func TestRotaryPositionalEmbedding_YaRN_FrequenciesDiffer(t *testing.T) {
+	// With YaRN scaling, cos/sin tables should differ from default RoPE.
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	headDim := 8
+	seqLen := 32
+	base := 10000.0
+	factor := 4.0
+	origMaxLen := 64 // Small enough that some wavelengths exceed origMaxLen
+
+	rpeDefault, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, seqLen, WithRotaryBase(base))
+	if err != nil {
+		t.Fatalf("default RoPE failed: %v", err)
+	}
+
+	rpeYaRN, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, seqLen,
+		WithRotaryBase(base),
+		WithYaRNScaling(factor, origMaxLen),
+	)
+	if err != nil {
+		t.Fatalf("YaRN RoPE failed: %v", err)
+	}
+
+	input, _ := tensor.New[float32]([]int{1, seqLen, headDim}, nil)
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%5+1) * 0.1
+	}
+
+	outDefault, err := rpeDefault.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("default Forward failed: %v", err)
+	}
+
+	outYaRN, err := rpeYaRN.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("YaRN Forward failed: %v", err)
+	}
+
+	// Outputs should differ
+	defaultData := outDefault.Data()
+	yarnData := outYaRN.Data()
+	allSame := true
+	for i := range defaultData {
+		if defaultData[i] != yarnData[i] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		t.Error("YaRN output should differ from default RoPE output")
+	}
+}
+
+func TestRotaryPositionalEmbedding_YaRN_AttentionScaleFactor(t *testing.T) {
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	factor := 4.0
+	origMaxLen := 8192
+
+	rpe, err := NewRotaryPositionalEmbedding[float32](ctx, engine, 8, 16,
+		WithRotaryBase(10000.0),
+		WithYaRNScaling(factor, origMaxLen),
+	)
+	if err != nil {
+		t.Fatalf("YaRN RoPE failed: %v", err)
+	}
+
+	// Expected: sqrt(1 + ln(factor) / ln(origMaxLen))
+	expected := math.Sqrt(1 + math.Log(factor)/math.Log(float64(origMaxLen)))
+	got := rpe.AttentionScaleFactor()
+
+	if math.Abs(got-expected) > 1e-6 {
+		t.Errorf("AttentionScaleFactor() = %f, want %f", got, expected)
+	}
+}
+
+func TestRotaryPositionalEmbedding_NoYaRN_AttentionScaleFactor(t *testing.T) {
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	rpe, err := NewRotaryPositionalEmbedding[float32](ctx, engine, 8, 16,
+		WithRotaryBase(10000.0),
+	)
+	if err != nil {
+		t.Fatalf("default RoPE failed: %v", err)
+	}
+
+	// Without YaRN, attention scale factor should be 1.0
+	if got := rpe.AttentionScaleFactor(); got != 1.0 {
+		t.Errorf("AttentionScaleFactor() = %f, want 1.0", got)
+	}
+}
+
+func TestRotaryPositionalEmbedding_YaRN_ForwardBackward(t *testing.T) {
+	// YaRN RoPE should still produce valid backward gradients.
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	rpe, err := NewRotaryPositionalEmbedding[float32](ctx, engine, 8, 16,
+		WithRotaryBase(10000.0),
+		WithYaRNScaling(4.0, 8192),
+	)
+	if err != nil {
+		t.Fatalf("YaRN RoPE failed: %v", err)
+	}
+
+	input, _ := tensor.New[float32]([]int{2, 8, 8}, nil)
+	for i := range input.Data() {
+		input.Data()[i] = float32(i%5+1) * 0.01
+	}
+
+	out, err := rpe.Forward(ctx, input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	dOut, _ := tensor.New[float32](out.Shape(), nil)
+	for i := range dOut.Data() {
+		dOut.Data()[i] = 1.0
+	}
+
+	grads, err := rpe.Backward(ctx, types.FullBackprop, dOut)
+	if err != nil {
+		t.Fatalf("Backward failed: %v", err)
+	}
+	if len(grads) != 1 {
+		t.Errorf("expected 1 gradient, got %d", len(grads))
+	}
+	if !reflect.DeepEqual(grads[0].Shape(), input.Shape()) {
+		t.Errorf("gradient shape = %v, want %v", grads[0].Shape(), input.Shape())
+	}
+}
