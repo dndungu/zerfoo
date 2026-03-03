@@ -926,3 +926,124 @@ func TestModel_Embed_ForwardError(t *testing.T) {
 		t.Errorf("error = %q, want 'forward' prefix", err.Error())
 	}
 }
+
+// --- parseDevice tests ---
+
+func TestParseDevice(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantType string
+		wantID   int
+		wantErr  bool
+	}{
+		{input: "", wantType: "cpu", wantID: 0},
+		{input: "cpu", wantType: "cpu", wantID: 0},
+		{input: "CPU", wantType: "cpu", wantID: 0},
+		{input: " cpu ", wantType: "cpu", wantID: 0},
+		{input: "cuda", wantType: "cuda", wantID: 0},
+		{input: "CUDA", wantType: "cuda", wantID: 0},
+		{input: "cuda:0", wantType: "cuda", wantID: 0},
+		{input: "cuda:1", wantType: "cuda", wantID: 1},
+		{input: "cuda:7", wantType: "cuda", wantID: 7},
+		{input: "cuda:-1", wantErr: true},
+		{input: "cuda:abc", wantErr: true},
+		{input: "tpu", wantErr: true},
+		{input: "metal:0", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			gotType, gotID, err := parseDevice(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parseDevice(%q) expected error", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDevice(%q) error: %v", tc.input, err)
+			}
+			if gotType != tc.wantType {
+				t.Errorf("parseDevice(%q) type = %q, want %q", tc.input, gotType, tc.wantType)
+			}
+			if gotID != tc.wantID {
+				t.Errorf("parseDevice(%q) id = %d, want %d", tc.input, gotID, tc.wantID)
+			}
+		})
+	}
+}
+
+// --- createEngine tests (non-CUDA build) ---
+
+func TestCreateEngine_CPU(t *testing.T) {
+	eng, err := createEngine("cpu")
+	if err != nil {
+		t.Fatalf("createEngine(cpu) error: %v", err)
+	}
+	if eng == nil {
+		t.Fatal("expected non-nil engine")
+	}
+}
+
+func TestCreateEngine_InvalidDevice(t *testing.T) {
+	_, err := createEngine("tpu")
+	if err == nil {
+		t.Error("expected error for unsupported device")
+	}
+}
+
+func TestCreateEngine_Default(t *testing.T) {
+	// Empty string should default to CPU.
+	eng, err := createEngine("")
+	if err != nil {
+		t.Fatalf("createEngine('') error: %v", err)
+	}
+	if eng == nil {
+		t.Fatal("expected non-nil engine")
+	}
+}
+
+// --- Model.Close tests ---
+
+func TestModel_Close_CPUEngine(t *testing.T) {
+	m := buildTestModel(t, 8, []int{6, 2})
+	// CPU engine doesn't implement io.Closer, so Close should be a no-op.
+	if err := m.Close(); err != nil {
+		t.Errorf("Close() error: %v", err)
+	}
+}
+
+func TestModel_Close_NilEngine(t *testing.T) {
+	m := &Model{}
+	if err := m.Close(); err != nil {
+		t.Errorf("Close() error with nil engine: %v", err)
+	}
+}
+
+// --- Load with invalid device ---
+
+func TestLoad_InvalidDevice(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ModelMetadata{VocabSize: 100, NumLayers: 1, MaxPositionEmbeddings: 128}
+	cfgData, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfgData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokJSON := `{"model":{"type":"BPE","vocab":{"hello":0},"merges":[]},"added_tokens":[]}`
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(tokJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"test": {ID: "test", Path: dir},
+		},
+	}
+	_, err := Load("test", WithRegistry(reg), WithDevice("tpu"))
+	if err == nil {
+		t.Error("expected error for unsupported device")
+	}
+	if !strings.Contains(err.Error(), "create engine") {
+		t.Errorf("error = %q, want 'create engine' prefix", err.Error())
+	}
+}

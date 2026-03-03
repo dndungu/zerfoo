@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -146,7 +148,10 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 
 	// Load ZMF model and build graph.
 	zmfPath := filepath.Join(info.Path, "model.zmf")
-	eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+	eng, err := createEngine(o.device)
+	if err != nil {
+		return nil, fmt.Errorf("create engine (%s): %w", o.device, err)
+	}
 
 	globalAttrs := map[string]interface{}{}
 	if meta.RopeScaling != nil && meta.RopeScaling.Type == "yarn" {
@@ -388,6 +393,15 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 	return nil, fmt.Errorf("embeddings not yet supported: model does not expose hidden states")
 }
 
+// Close releases resources held by the model. If the model was loaded on a
+// GPU, this frees the CUDA engine's handles, pool, and stream.
+func (m *Model) Close() error {
+	if c, ok := m.engine.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 // Config returns the model metadata.
 func (m *Model) Config() ModelMetadata {
 	return m.config
@@ -396,6 +410,30 @@ func (m *Model) Config() ModelMetadata {
 // Info returns the registry info for this model.
 func (m *Model) Info() *registry.ModelInfo {
 	return m.info
+}
+
+// parseDevice parses a device string like "cpu", "cuda", "cuda:0", or "cuda:1"
+// into its type and device ID. For "cuda" without a suffix, deviceID defaults to 0.
+func parseDevice(device string) (devType string, deviceID int, err error) {
+	device = strings.TrimSpace(strings.ToLower(device))
+	if device == "" || device == "cpu" {
+		return "cpu", 0, nil
+	}
+	if device == "cuda" {
+		return "cuda", 0, nil
+	}
+	if strings.HasPrefix(device, "cuda:") {
+		idStr := device[len("cuda:"):]
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid device ID in %q: %w", device, err)
+		}
+		if id < 0 {
+			return "", 0, fmt.Errorf("negative device ID in %q", device)
+		}
+		return "cuda", id, nil
+	}
+	return "", 0, fmt.Errorf("unsupported device %q: expected \"cpu\", \"cuda\", or \"cuda:N\"", device)
 }
 
 // NewTestModel constructs a Model from pre-built components.
