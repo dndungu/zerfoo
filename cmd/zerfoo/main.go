@@ -39,6 +39,15 @@ func run() error {
 	workerCmd := cli.NewWorkerCommand(coord)
 	cliApp.RegisterCommand(workerCmd)
 
+	pullCmd := cli.NewPullCommand(nil, os.Stdout)
+	cliApp.RegisterCommand(pullCmd)
+
+	runCmd := cli.NewRunCommand(os.Stdin, os.Stdout)
+	cliApp.RegisterCommand(runCmd)
+
+	serveCmd := cli.NewServeCommand(coord, os.Stdout)
+	cliApp.RegisterCommand(serveCmd)
+
 	// Run CLI
 	return cliApp.Run(ctx, os.Args[1:])
 }
