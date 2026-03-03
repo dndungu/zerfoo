@@ -2238,12 +2238,12 @@ different HuggingFace model families without manual config translation.
   - [x] S57.5.2 Write integration test: load Llama config, verify metadata  Est: 10m
   - [x] S57.5.3 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T57.6 Run linters and verify coverage for E57  Owner: TBD  Est: 15m
+- [x] T57.6 Run linters and verify coverage for E57  Owner: TBD  Est: 15m
   - Dependencies: T57.5
   - Acceptance: golangci-lint 0 issues. go test -cover -race shows >= 95% coverage
     on inference/arch_config.go. go vet clean.
-  - [ ] S57.6.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
-  - [ ] S57.6.2 Fix any remaining issues  Est: 5m
+  - [x] S57.6.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [x] S57.6.2 Fix any remaining issues (none needed)  Est: 5m
 
 #### E58: Architecture-Aware Parameter Name Mapping
 
