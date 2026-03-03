@@ -22,11 +22,16 @@ type RotaryPositionalEmbedding[T tensor.Numeric] struct {
 	xRot0Slice  *tensor.TensorNumeric[T]
 	xRot1Slice  *tensor.TensorNumeric[T]
 	outputShape []int
+	// attnScaleFactor is the YaRN attention scaling factor (1.0 when no YaRN).
+	attnScaleFactor float64
 }
 
 // RotaryPositionalEmbeddingOptions holds configuration options for RotaryPositionalEmbedding layers.
 type RotaryPositionalEmbeddingOptions struct {
-	Base float64 // Base for the inverse frequency calculation (theta parameter)
+	Base       float64 // Base for the inverse frequency calculation (theta parameter)
+	YaRN       bool    // Whether to apply YaRN scaling
+	YaRNFactor float64 // YaRN scaling factor (e.g. 4.0 for 4x context extension)
+	YaRNOrigML int     // Original max sequence length before scaling
 }
 
 // RotaryPositionalEmbeddingOption is a functional option for configuring RotaryPositionalEmbedding layers.
@@ -36,6 +41,17 @@ type RotaryPositionalEmbeddingOption func(*RotaryPositionalEmbeddingOptions)
 func WithRotaryBase(base float64) RotaryPositionalEmbeddingOption {
 	return func(opts *RotaryPositionalEmbeddingOptions) {
 		opts.Base = base
+	}
+}
+
+// WithYaRNScaling enables YaRN (Yet another RoPE extensioN) scaling.
+// factor is the context extension factor (e.g. 4.0 for 4x).
+// origMaxLen is the original maximum sequence length before scaling.
+func WithYaRNScaling(factor float64, origMaxLen int) RotaryPositionalEmbeddingOption {
+	return func(opts *RotaryPositionalEmbeddingOptions) {
+		opts.YaRN = true
+		opts.YaRNFactor = factor
+		opts.YaRNOrigML = origMaxLen
 	}
 }
 
@@ -70,39 +86,60 @@ func NewRotaryPositionalEmbedding[T tensor.Numeric](
 
 	// Create inverse frequencies: 1 / (base^(2i/head_dim))
 	ops := engine.Ops()
-	invFreqs64 := make([]float64, headDim/2)
-	for i := 0; i < headDim/2; i++ {
+	halfDim := headDim / 2
+	invFreqs64 := make([]float64, halfDim)
+	for i := 0; i < halfDim; i++ {
 		invFreqs64[i] = 1.0 / math.Pow(opts.Base, float64(2*i)/float64(headDim))
 	}
 
+	// Apply YaRN scaling to inverse frequencies if enabled.
+	attnScaleFactor := 1.0
+	if opts.YaRN {
+		attnScaleFactor = math.Sqrt(1 + math.Log(opts.YaRNFactor)/math.Log(float64(opts.YaRNOrigML)))
+		origML := float64(opts.YaRNOrigML)
+		for i := 0; i < halfDim; i++ {
+			wavelength := 2 * math.Pi / invFreqs64[i]
+			if wavelength > opts.YaRNFactor*origML {
+				// Low frequency: scale by 1/factor
+				invFreqs64[i] /= opts.YaRNFactor
+			} else if wavelength >= origML {
+				// Intermediate frequency: linearly interpolate
+				ratio := (wavelength - origML) / (opts.YaRNFactor*origML - origML)
+				invFreqs64[i] = invFreqs64[i] * (1 - ratio) + invFreqs64[i]/opts.YaRNFactor*ratio
+			}
+			// High frequency (wavelength < origMaxLen): keep unchanged
+		}
+	}
+
 	// Precompute cos and sin of angles using float64 and convert to T
-	size := seqLen * (headDim / 2)
+	size := seqLen * halfDim
 	cosData := make([]T, size)
 	sinData := make([]T, size)
 	for i := 0; i < seqLen; i++ {
-		for j := 0; j < headDim/2; j++ {
+		for j := 0; j < halfDim; j++ {
 			angle := float64(positions[i]) * invFreqs64[j]
-			idx := i*(headDim/2) + j
+			idx := i*halfDim + j
 			cosData[idx] = ops.FromFloat64(math.Cos(angle))
 			sinData[idx] = ops.FromFloat64(math.Sin(angle))
 		}
 	}
 
-	cosAngles, err := tensor.New[T]([]int{seqLen, headDim / 2}, cosData)
+	cosAngles, err := tensor.New[T]([]int{seqLen, halfDim}, cosData)
 	if err != nil {
 		return nil, err
 	}
 
-	sinAngles, err := tensor.New[T]([]int{seqLen, headDim / 2}, sinData)
+	sinAngles, err := tensor.New[T]([]int{seqLen, halfDim}, sinData)
 	if err != nil {
 		return nil, err
 	}
 
 	return &RotaryPositionalEmbedding[T]{
-		engine:    engine,
-		headDim:   headDim,
-		cosAngles: cosAngles,
-		sinAngles: sinAngles,
+		engine:          engine,
+		headDim:         headDim,
+		cosAngles:       cosAngles,
+		sinAngles:       sinAngles,
+		attnScaleFactor: attnScaleFactor,
 	}, nil
 }
 
@@ -280,6 +317,15 @@ func (rpe *RotaryPositionalEmbedding[T]) OpType() string {
 // Attributes returns the attributes of the RotaryPositionalEmbedding layer.
 func (rpe *RotaryPositionalEmbedding[T]) Attributes() map[string]interface{} {
 	return nil
+}
+
+// AttentionScaleFactor returns the YaRN attention scaling factor.
+// Returns 1.0 when YaRN is not enabled.
+func (rpe *RotaryPositionalEmbedding[T]) AttentionScaleFactor() float64 {
+	if rpe.attnScaleFactor == 0 {
+		return 1.0
+	}
+	return rpe.attnScaleFactor
 }
 
 // Scale scales the positional embeddings by a given factor.
