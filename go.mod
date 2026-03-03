@@ -15,7 +15,7 @@ require (
 require (
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.21.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/text v0.23.0
 )
 
 exclude google.golang.org/genproto v0.0.0-20220401170504-314d38edb7de
