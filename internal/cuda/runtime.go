@@ -124,6 +124,17 @@ func (s *Stream) Ptr() unsafe.Pointer {
 	return unsafe.Pointer(s.s)
 }
 
+// MemcpyPeer copies count bytes between devices using peer-to-peer transfer.
+// This enables direct GPU-to-GPU copy without staging through host memory.
+func MemcpyPeer(dst unsafe.Pointer, dstDevice int, src unsafe.Pointer, srcDevice int, count int) error {
+	err := C.cudaMemcpyPeer(dst, C.int(dstDevice), src, C.int(srcDevice), C.size_t(count))
+	if err != C.cudaSuccess {
+		return fmt.Errorf("cudaMemcpyPeer failed: %s", C.GoString(C.cudaGetErrorString(err)))
+	}
+
+	return nil
+}
+
 // MemcpyAsync copies count bytes asynchronously on the given stream.
 func MemcpyAsync(dst, src unsafe.Pointer, count int, kind MemcpyKind, stream *Stream) error {
 	var cs C.cudaStream_t
