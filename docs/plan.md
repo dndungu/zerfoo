@@ -2385,10 +2385,10 @@ the original training length.
   - [x] S61.2.3 Write tests  Est: 10m
   - [x] S61.2.4 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T61.3 Run linters and verify for E61  Owner: TBD  Est: 15m
+- [x] T61.3 Run linters and verify for E61  Owner: TBD  Est: 15m
   - Dependencies: T61.2
-  - [ ] S61.3.1 Run golangci-lint, go test -cover -race  Est: 10m
-  - [ ] S61.3.2 Fix any remaining issues  Est: 5m
+  - [x] S61.3.1 Run golangci-lint, go test -cover -race  Est: 10m
+  - [x] S61.3.2 Fix any remaining issues  Est: 5m
 
 #### E62: Qwen Validation (Tier 2)
 
