@@ -76,7 +76,17 @@ func buildGroupedQueryAttention[T tensor.Numeric](
 
 	headDim := modelDim / numQueryHeads
 
-	rope, err := embeddings.NewRotaryPositionalEmbedding[T](context.Background(), engine, headDim, maxSeqLen, embeddings.WithRotaryBase(base))
+	// Build RoPE options
+	ropeOpts := []embeddings.RotaryPositionalEmbeddingOption{embeddings.WithRotaryBase(base)}
+	if scalingType, _ := attributes["rope_scaling_type"].(string); scalingType == "yarn" {
+		factor, _ := attributes["rope_scaling_factor"].(float64)
+		origMaxLen, _ := attributes["rope_scaling_orig_max_len"].(int)
+		if factor > 0 && origMaxLen > 0 {
+			ropeOpts = append(ropeOpts, embeddings.WithYaRNScaling(factor, origMaxLen))
+		}
+	}
+
+	rope, err := embeddings.NewRotaryPositionalEmbedding[T](context.Background(), engine, headDim, maxSeqLen, ropeOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create RotaryPositionalEmbedding: %w", err)
 	}
