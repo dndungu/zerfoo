@@ -2355,7 +2355,7 @@ Implement YaRN (Yet another RoPE extensioN) scaling for long-context models.
 YaRN modifies the inverse frequencies in RoPE to support context lengths beyond
 the original training length.
 
-- [ ] T61.1 Add YaRN scaling to RotaryPositionalEmbedding  Owner: TBD  Est: 2h
+- [x] T61.1 Add YaRN scaling to RotaryPositionalEmbedding  Owner: TBD  Est: 2h
   - Dependencies: None
   - Files: layers/embeddings/rotary_positional_embedding.go (modify)
   - Acceptance: A new WithYaRNScaling(factor float64, origMaxLen int) option
@@ -2367,12 +2367,12 @@ the original training length.
     method. Backwards compatible: without the option, behavior is unchanged.
     Test: verify that with factor=4, origMaxLen=8192, the resulting frequencies
     differ from default and match the YaRN paper formulas.
-  - [ ] S61.1.1 Define RoPEScaling config struct (type, factor, origMaxLen)  Est: 10m
-  - [ ] S61.1.2 Implement WithYaRNScaling option  Est: 15m
-  - [ ] S61.1.3 Modify inverse frequency computation for YaRN  Est: 30m
-  - [ ] S61.1.4 Add AttentionScaleFactor() method  Est: 10m
-  - [ ] S61.1.5 Write unit tests: default unchanged, YaRN frequencies match reference  Est: 25m
-  - [ ] S61.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S61.1.1 Define RoPEScaling config struct (type, factor, origMaxLen)  Est: 10m
+  - [x] S61.1.2 Implement WithYaRNScaling option  Est: 15m
+  - [x] S61.1.3 Modify inverse frequency computation for YaRN  Est: 30m
+  - [x] S61.1.4 Add AttentionScaleFactor() method  Est: 10m
+  - [x] S61.1.5 Write unit tests: default unchanged, YaRN frequencies match reference  Est: 25m
+  - [x] S61.1.6 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T61.2 Integrate YaRN config into model loading  Owner: TBD  Est: 45m
   - Dependencies: T61.1, E57
