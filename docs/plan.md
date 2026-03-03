@@ -2199,7 +2199,7 @@ different HuggingFace model families without manual config translation.
   - [x] S57.2.3 Write unit tests with fixture  Est: 15m
   - [x] S57.2.4 Run golangci-lint and go test -cover  Est: 5m
 
-- [ ] T57.3 Add Mistral and Qwen config parsers  Owner: TBD  Est: 45m
+- [x] T57.3 Add Mistral and Qwen config parsers  Owner: Claude  Est: 45m  Completed: 2026 03 03
   - Dependencies: T57.1
   - Files: inference/arch_config.go (extend)
   - Acceptance: Parser for model_type "mistral" (nearly identical to Llama; adds
@@ -2207,10 +2207,10 @@ different HuggingFace model families without manual config translation.
     use_sliding_window, attention_bias=true -> AttentionBias, rope_scaling (YaRN
     config with type, factor, original_max_position_embeddings).
     Test: parse Mistral 7B and Qwen 2.5 7B config.json fixtures.
-  - [ ] S57.3.1 Implement Mistral config parser  Est: 10m
-  - [ ] S57.3.2 Implement Qwen config parser with rope_scaling  Est: 15m
-  - [ ] S57.3.3 Add testdata fixtures and tests  Est: 15m
-  - [ ] S57.3.4 Run golangci-lint and go test -cover  Est: 5m
+  - [x] S57.3.1 Implement Mistral config parser  Est: 10m
+  - [x] S57.3.2 Implement Qwen config parser with rope_scaling  Est: 15m
+  - [x] S57.3.3 Add testdata fixtures and tests  Est: 15m
+  - [x] S57.3.4 Run golangci-lint and go test -cover  Est: 5m
 
 - [ ] T57.4 Add Phi and DeepSeek config parsers  Owner: TBD  Est: 45m
   - Dependencies: T57.1
