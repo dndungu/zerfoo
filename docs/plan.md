@@ -2315,10 +2315,10 @@ existing pipeline with the new config parsing and parameter mapping.
   - [x] S59.2.2 Add greedy decode test  Est: 20m
   - [x] S59.2.3 Run golangci-lint and go test  Est: 10m
 
-- [ ] T59.3 Run linters and verify for E59  Owner: TBD  Est: 15m
+- [x] T59.3 Run linters and verify for E59  Owner: TBD  Est: 15m
   - Dependencies: T59.1, T59.2
-  - [ ] S59.3.1 Run golangci-lint, go test -race  Est: 10m
-  - [ ] S59.3.2 Fix any issues  Est: 5m
+  - [x] S59.3.1 Run golangci-lint, go test -race  Est: 10m
+  - [x] S59.3.2 Fix any issues  Est: 5m  (no issues found)
 
 #### E60: QKV Bias for Qwen (Tier 2)
 
