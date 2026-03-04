@@ -28,18 +28,60 @@ func (w *Where[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 	}
 	cond, x, y := inputs[0].Data(), inputs[1].Data(), inputs[2].Data()
 	n := len(cond)
-	if len(x) != n || len(y) != n {
+
+	// Scalar broadcasting: if x or y is a single element, broadcast it.
+	xScalar := len(x) == 1
+	yScalar := len(y) == 1
+	condScalar := n == 1
+
+	if !xScalar && !condScalar && len(x) != n {
 		return nil, fmt.Errorf("Where: input sizes differ (cond=%d, x=%d, y=%d)", n, len(x), len(y))
 	}
-	out := make([]T, n)
-	for i := range cond {
-		if cond[i] != 0 {
-			out[i] = x[i]
+	if !yScalar && !condScalar && len(y) != n {
+		return nil, fmt.Errorf("Where: input sizes differ (cond=%d, x=%d, y=%d)", n, len(x), len(y))
+	}
+
+	// Determine output size as the largest non-scalar input.
+	outN := n
+	if len(x) > outN {
+		outN = len(x)
+	}
+	if len(y) > outN {
+		outN = len(y)
+	}
+
+	out := make([]T, outN)
+	for i := range out {
+		var cv T
+		if condScalar {
+			cv = cond[0]
 		} else {
-			out[i] = y[i]
+			cv = cond[i]
+		}
+		if cv != 0 {
+			if xScalar {
+				out[i] = x[0]
+			} else {
+				out[i] = x[i]
+			}
+		} else {
+			if yScalar {
+				out[i] = y[0]
+			} else {
+				out[i] = y[i]
+			}
 		}
 	}
-	return tensor.New(inputs[1].Shape(), out)
+
+	// Use the largest input's shape for the output.
+	outShape := inputs[0].Shape()
+	if len(x) > n {
+		outShape = inputs[1].Shape()
+	}
+	if len(y) > len(x) && len(y) > n {
+		outShape = inputs[2].Shape()
+	}
+	return tensor.New(outShape, out)
 }
 
 func (w *Where[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
