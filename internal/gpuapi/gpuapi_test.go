@@ -39,7 +39,7 @@ var _ gpuapi.Runtime = stubRuntime{}
 // stubBLAS implements gpuapi.BLAS for compile-time interface verification.
 type stubBLAS struct{}
 
-func (stubBLAS) Sgemm(_, _, _ int, _ float32, _ unsafe.Pointer, _ int, _ unsafe.Pointer, _ int, _ float32, _ unsafe.Pointer, _ int) error {
+func (stubBLAS) Sgemm(_, _, _ int, _ float32, _, _ unsafe.Pointer, _ float32, _ unsafe.Pointer) error {
 	return nil
 }
 func (stubBLAS) SetStream(gpuapi.Stream) error { return nil }
