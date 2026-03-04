@@ -162,6 +162,37 @@ requires direct 200 Gb cable connectivity and proper RoCE/RDMA setup.
 
 **Effort estimate:** 1 week (requires second DGX Spark unit and network config).
 
+### Multi-GPU Test Coverage Gap (E115)
+
+The DGX Spark GB10 has a single GPU. Six tests require >= 2 CUDA devices and
+skip on this hardware:
+
+| Test | File | Skip Condition | Tests |
+|------|------|---------------|-------|
+| TestMemPoolNoCrossDeviceReuse | internal/cuda/mempool_test.go:129 | `GetDeviceCount() < 2` | No cross-device pointer reuse in memory pool |
+| TestMemPoolMultiDeviceStats | internal/cuda/mempool_test.go:161 | `GetDeviceCount() < 2` | Pool stats tracked correctly across devices |
+| TestTwoGPUAllReduce | internal/nccl/nccl_test.go:136 | `cuda.GetDeviceCount() < 2` | NCCL AllReduce sum across 2 GPUs |
+| TestTwoGPUBroadcast | internal/nccl/nccl_test.go:233 | `cuda.GetDeviceCount() < 2` | NCCL Broadcast from root rank to all |
+| TestNcclStrategy_TwoGPUAllReduce | distributed/nccl_strategy_test.go:173 | `cuda.GetDeviceCount() < 2` | NcclStrategy gradient reduction across 2 GPUs |
+| TestMultiGPU_DualDeviceInference | tests/parity/multigpu_test.go:18 | `cuda.GetDeviceCount() < 2` | Same model on cuda:0 and cuda:1 produces identical output |
+
+**Hardware prerequisites for validation:**
+- Two DGX Spark GB10 units connected via ConnectX-7 200 Gb/s QSFP cable
+- NCCL >= 2.28.3 with Blackwell support (already installed: v2.29.7)
+- `NCCL_SOCKET_IFNAME` set to the QSFP/RoCE network interface
+- MPI for inter-process coordination (for cross-node tests)
+- Both units must have identical Go, CUDA, cuDNN, and CUTLASS versions
+
+**Software prerequisites:**
+- `go test -tags cuda ./internal/cuda/ -run "NoCrossDevice|MultiDevice"`
+- `go test -tags cuda ./internal/nccl/ -run "TwoGPU"`
+- `go test -tags cuda ./distributed/ -run "TwoGPU"`
+- `go test -tags cuda,cutlass ./tests/parity/ -run "MultiGPU"`
+
+**Acceptance criteria:** When a second DGX Spark unit is connected and
+configured, all 6 tests should pass. The test automation script
+`scripts/dgx-spark-multigpu.sh` provides the exact commands.
+
 ## Consequences
 
 - All GPU code is validated on real Blackwell hardware with zero test failures.
