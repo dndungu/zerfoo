@@ -41,7 +41,7 @@ validation, feature gap assessment.
 - O32: Run all model parity tests on GPU by downloading, converting, and
   deploying ZMF model files for all 7 model families on DGX Spark. **(IN PROGRESS)**
 - O33: Document multi-GPU test coverage gap and define the conditions under
-  which multi-GPU tests can be validated. **(IN PROGRESS)**
+  which multi-GPU tests can be validated. **(COMPLETE)**
 
 ### Non-Goals
 
@@ -95,7 +95,7 @@ Phase 21 metrics:
 | Metric | Target | Status |
 |--------|--------|--------|
 | Model parity on GPU | 7 model families tested | 8 PASS, 13 SKIP (see ADR-018) |
-| Multi-GPU gap documented | Prerequisites listed | IN PROGRESS |
+| Multi-GPU gap documented | Prerequisites listed | ACHIEVED (ADR-017 updated, script created) |
 
 ---
 
@@ -289,23 +289,18 @@ variants are preferred to fit within DGX Spark memory.
 
 #### E115: Multi-GPU Test Coverage Assessment
 
-- [ ] T115.1 Document multi-GPU test coverage gap  Owner: TBD  Est: 30m
-  - Dependencies: None
-  - File: docs/adr/017-dgx-spark-hardware-validation.md (update)
-  - Steps:
-    1. List all multi-GPU tests that skip on single-GPU DGX Spark
-    2. Document exact hardware requirements (2x DGX Spark, ConnectX-7 cable,
-       NCCL_SOCKET_IFNAME config, MPI)
-    3. Add acceptance criteria: when a second unit is available, these tests
-       should run and pass
-  - Acceptance: ADR-017 updated with multi-GPU test inventory and prerequisites.
+- [x] T115.1 Document multi-GPU test coverage gap  2026-03-04
+  - File: docs/adr/017-dgx-spark-hardware-validation.md (updated)
+  - Added Multi-GPU Test Coverage Gap section listing all 6 tests that require
+    >= 2 CUDA devices, their file locations, skip conditions, and
+    hardware/software prerequisites for validation.
+  - Commit: fb74ccd
 
-- [ ] T115.2 Add multi-GPU test runner script  Owner: TBD  Est: 30m
-  - Dependencies: T115.1
+- [x] T115.2 Add multi-GPU test runner script  2026-03-04
   - File: scripts/dgx-spark-multigpu.sh (new)
-  - Purpose: Shell script for running multi-GPU tests when second unit is
-    available. Sets NCCL env vars, runs only multi-GPU tagged tests.
-  - Acceptance: Script exists with correct NCCL configuration and test filters.
+  - Shell script runs all 6 multi-GPU tests across 4 packages. Sets CUDA/CGo
+    env vars, NCCL ConnectX-7 configuration, filters tests by name.
+  - Commit: b3b0861
 
 #### E116: Phase 21 Final Verification
 
@@ -409,7 +404,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
-| 2026-03-04 | 21 | E114 T114.5+T114.6 complete. 8 parity tests PASS (Llama3, Qwen25, FlashAttentionGQA). 10 ONNX fixes. 13 SKIP (HF auth, model size, single GPU). ADR-018 written. |
+| 2026-03-04 | 21 | E115 COMPLETE. Multi-GPU test gap documented in ADR-017 (6 tests, hardware prereqs). Test runner script created (scripts/dgx-spark-multigpu.sh). Plan trimmed 1411->522 lines. ADR-018 written. |
 | 2026-03-03 | 20 | Phase 20 COMPLETE. ARM64 build (10 fixes), GPU tests (66 pkgs), benchmarks, feature gaps. ADR-017 written. |
 | 2026-03-03 | 14-19 | Phases 14-19 all COMPLETE. GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8 GEMM, TRT dynamic shapes. ADRs 011-016 written. |
 | 2026-03-03 | 10-13 | Phases 10-13 COMPLETE. Multi-GPU, cuDNN, TensorRT, CUTLASS. ADRs 007-010 written. |
