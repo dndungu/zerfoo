@@ -449,14 +449,28 @@ See [ADR-010](adr/010-cutlass-flash-attention.md) for architecture decisions.
 
 ```
 compute/
-  gpu_engine.go            GPUEngine (pool, stream, cuBLAS, cuDNN) (//go:build cuda)
-  gpu_cudnn.go             cuDNN-accelerated operations (//go:build cuda)
-  gpu_kernels.go           getDevicePtr, makeGPUResult, kernel dispatch (//go:build cuda)
+  gpu_engine.go            GPUEngine (GRAL interfaces, pool, stream) (//go:build cuda)
+  gpu_cudnn.go             DNN-accelerated operations via GRAL (//go:build cuda)
+  gpu_kernels.go           getDevicePtr, makeGPUResult, kernel dispatch via GRAL (//go:build cuda)
 
 tensor/
   storage.go               Storage[T] interface, CPUStorage[T], NewWithStorage
-  gpu_storage.go           GPUStorage[T], TrySlice/TrySet (//go:build cuda)
-  transfer.go              ToGPU/ToCPU helpers (//go:build cuda)
+  gpu_storage.go           GPUStorage[T] with gpuapi.Runtime (//go:build cuda)
+  transfer.go              ToGPU/ToCPU helpers via GRAL Runtime (//go:build cuda)
+
+internal/gpuapi/
+  doc.go                   Package identity
+  runtime.go               Runtime, Stream, MemcpyKind interfaces
+  blas.go                  BLAS interface (Sgemm)
+  dnn.go                   DNN interface (conv, batchnorm, activation, pooling, softmax)
+  kernels.go               KernelRunner interface (17 element-wise/reduction ops)
+  mempool.go               MemPool interface
+  gpuapi_test.go           Compile-time interface assertions
+  cuda_runtime.go          CUDARuntime adapter (//go:build cuda)
+  cuda_blas.go             CUDABlas adapter (//go:build cuda)
+  cuda_dnn.go              CUDADNN adapter (//go:build cuda)
+  cuda_kernels.go          CUDAKernels adapter (//go:build cuda)
+  cuda_mempool.go          CUDAMemPool adapter (//go:build cuda)
 
 device/
   cuda_device.go           CUDA device abstraction (//go:build cuda)
@@ -508,14 +522,30 @@ internal/tensorrt/tensorrt.go:  -L${SRCDIR} -ltrt_capi -lnvinfer -lstdc++
 internal/cuda/kernels/*.go:     -L${SRCDIR} -lkernels -lcudart -lstdc++
 ```
 
-### 4.13 Parity Tolerances
+### 4.13 GPU Runtime Abstraction Layer (GRAL)
+
+`internal/gpuapi/` defines vendor-neutral interfaces that decouple `compute/`
+and `tensor/` from any specific GPU SDK. GPUEngine stores five GRAL interfaces
+(`Runtime`, `BLAS`, `DNN`, `KernelRunner`, `MemPool`) instead of vendor-specific
+handles. GPUStorage stores a `Runtime` for memory operations.
+
+CUDA adapters in the same package implement these interfaces by delegating to
+`internal/cuda`, `internal/cublas`, and `internal/cudnn`. Adding a new backend
+(ROCm, OpenCL) requires implementing the five interfaces -- no changes to
+compute/ or tensor/ are needed.
+
+The DNN interface abstracts at the operation level: callers pass shapes as
+`[4]int` arrays and the adapter manages vendor-specific descriptors internally.
+See [ADR-011](adr/011-gpu-runtime-abstraction-layer.md) for details.
+
+### 4.14 Parity Tolerances
 
 - MatMul: 1e-5 relative error
 - Element-wise ops: 1e-6 relative error
 - Reductions (Sum, Mean): 1e-5 relative error
 - Flash attention: 1e-3 absolute error (online softmax reordering)
 
-### 4.14 Compatible Hardware
+### 4.15 Compatible Hardware
 
 | GPU | Arch | CUDA_ARCH | Memory | Platform |
 |-----|------|-----------|--------|----------|
@@ -999,3 +1029,4 @@ ADR files in `docs/adr/`.
 | [008](adr/008-cudnn-integration.md) | cuDNN Integration | 11 | cuDNN bindings, Conv2d/BatchNorm/activation/pooling GPU acceleration, descriptor management |
 | [009](adr/009-tensorrt-integration.md) | TensorRT Integration | 12 | C shim for C++ API, subgraph conversion, engine caching, FP16 precision, inference pipeline |
 | [010](adr/010-cutlass-flash-attention.md) | CUTLASS Flash Attention | 13 | Tiled flash attention kernel, CUTLASS templates, causal mask, build-tag-gated dispatch |
+| [011](adr/011-gpu-runtime-abstraction-layer.md) | GPU Runtime Abstraction Layer | 14 | GRAL interfaces decouple compute/tensor from vendor SDKs, CUDA adapters, operation-level DNN |
