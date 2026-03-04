@@ -8,15 +8,17 @@
  * (log-sum-exp trick) so the full S = Q*K^T matrix is never materialized.
  *
  * Tile size BLOCK_SIZE controls shared memory usage. For head_dim up to 128
- * and BLOCK_SIZE=64, shared memory per block is ~64KB which fits most GPUs.
+ * and BLOCK_SIZE=32, shared memory per block is 32KB which fits all GPUs
+ * including Blackwell sm_121 (48KB static shared memory limit).
  */
 
 #include "flash_attention.h"
 #include <float.h>
 #include <math.h>
 
-/* Tile size for sequence dimension. Each block processes BLOCK_SIZE query rows. */
-#define BLOCK_SIZE 64
+/* Tile size for sequence dimension. Each block processes BLOCK_SIZE query rows.
+ * Set to 32 for universal compatibility (32 * 128 * 4 * 2 = 32KB shared mem). */
+#define BLOCK_SIZE 32
 
 /* Maximum head dimension supported. Adjust if models exceed this. */
 #define MAX_HEAD_DIM 128
