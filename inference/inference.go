@@ -453,7 +453,21 @@ func parseDevice(device string) (devType string, deviceID int, err error) {
 		}
 		return "cuda", id, nil
 	}
-	return "", 0, fmt.Errorf("unsupported device %q: expected \"cpu\", \"cuda\", or \"cuda:N\"", device)
+	if device == "rocm" {
+		return "rocm", 0, nil
+	}
+	if strings.HasPrefix(device, "rocm:") {
+		idStr := device[len("rocm:"):]
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid device ID in %q: %w", device, err)
+		}
+		if id < 0 {
+			return "", 0, fmt.Errorf("negative device ID in %q", device)
+		}
+		return "rocm", id, nil
+	}
+	return "", 0, fmt.Errorf("unsupported device %q: expected \"cpu\", \"cuda\", \"cuda:N\", \"rocm\", or \"rocm:N\"", device)
 }
 
 // NewTestModel constructs a Model from pre-built components.
