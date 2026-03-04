@@ -213,7 +213,15 @@ func (m *MatMulNBits[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNu
 	}
 
 	input := inputs[0]
-	// Dequantize weights if needed
+
+	// Try fused GPU quantized GEMM (avoids CPU dequantization).
+	if result, err := tryQuantizedGemm(input, m.quantizedWeights, m.scale, m.zeroPoint, m.nbits); err != nil {
+		return nil, fmt.Errorf("GPU quantized GEMM failed: %w", err)
+	} else if result != nil {
+		return result, nil
+	}
+
+	// CPU fallback: dequantize weights then matmul.
 	weights, err := m.dequantizeWeights()
 	if err != nil {
 		return nil, fmt.Errorf("failed to dequantize weights: %w", err)
@@ -231,11 +239,6 @@ func (m *MatMulNBits[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNu
 	if lastDim != weightsShape[0] {
 		return nil, fmt.Errorf("input last dimension %d must match weights first dimension %d", lastDim, weightsShape[0])
 	}
-
-	// Compute output shape
-	outputShape := make([]int, len(inputShape))
-	copy(outputShape, inputShape)
-	outputShape[len(outputShape)-1] = weightsShape[1] // Replace last dim with weights output dim
 
 	// Perform matrix multiplication using the engine
 	result, err := m.engine.MatMul(ctx, input, weights)
