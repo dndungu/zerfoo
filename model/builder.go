@@ -168,6 +168,23 @@ func BuildFromZMF[T tensor.Numeric](
 		}
 
 		attributes := convertAttributes(nodeProto.Attributes)
+		// Promote dedicated proto fields into the attributes map so layer
+		// builders can find them via the standard attributes interface.
+		if len(nodeProto.Perm) > 0 {
+			if _, exists := attributes["perm"]; !exists {
+				attributes["perm"] = nodeProto.Perm
+			}
+		}
+		if nodeProto.Epsilon != nil {
+			if _, exists := attributes["epsilon"]; !exists {
+				attributes["epsilon"] = *nodeProto.Epsilon
+			}
+		}
+		if nodeProto.Axis != nil {
+			if _, exists := attributes["axis"]; !exists {
+				attributes["axis"] = int(*nodeProto.Axis)
+			}
+		}
 		// Merge global attributes (e.g. rope_scaling) into per-node attributes.
 		for k, v := range cfg.globalAttributes {
 			if _, exists := attributes[k]; !exists {
