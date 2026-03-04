@@ -1092,3 +1092,69 @@ ADR files in `docs/adr/`.
 | [014](adr/014-cudnn-backward-pass.md) | cuDNN Backward Pass | 17 | Backward CGo bindings, CUDA DNN adapter, GPUEngine backward methods for training |
 | [015](adr/015-cutlass-quantized-gemm.md) | CUTLASS Quantized GEMM | 18 | INT8/INT4 CUDA kernels, right-multiply variant, MatMulNBits GPU dispatch |
 | [016](adr/016-tensorrt-dynamic-shapes.md) | TensorRT Dynamic Shapes | 19 | Optimization profiles, min/opt/max dims, SetInputShape, dynamic cache keys |
+| [017](adr/017-dgx-spark-hardware-validation.md) | DGX Spark Hardware Validation | 20 | ARM64 build fixes, sm_121 BLOCK_SIZE=32, TRT 10 API, benchmark results |
+
+---
+
+## 15. DGX Spark Hardware Validation (Phase 20)
+
+The NVIDIA DGX Spark GB10 (Blackwell, sm_121, CUDA 13.0.2, ARM64 aarch64,
+128GB unified LPDDR5X) validated the full GPU stack. All 66 packages pass with
+`cuda,cutlass` build tags. See [ADR-017](adr/017-dgx-spark-hardware-validation.md).
+
+### 15.1 ARM64 Build Fixes
+
+Nine code fixes were required for aarch64 compatibility:
+
+- Flash attention BLOCK_SIZE reduced 64 -> 32 (48KB shared memory limit on sm_121)
+- TensorRT Makefile: auto-detect multiarch include path via `dpkg-architecture`
+- TensorRT C shim: `kEXPLICIT_BATCH` -> 0, `setOptimizationProfileShared` -> `setOptimizationProfileAsync`
+- Missing includes: `<cstdio>`, `<stdlib.h>` for C.free
+- API renames: `tensor.NewTensorNumeric` -> `tensor.New`, `metrics.Collector` -> `runtime.Collector`
+- Logger type safety: convert int/error args to string for `log.Logger`
+- Test fixes: ARM64 float32 precision (TanhGrad), MemPool reuse, NCCL format strings
+- Import cycle: remove `graph` import from `compute/gpu_integration_test.go`
+
+### 15.2 Benchmark Results (NVIDIA DGX Spark GB10)
+
+Hardware: 20-core ARM Cortex-A78AE, Blackwell GPU (sm_121), 128GB LPDDR5X.
+
+#### MatMul (cuBLAS SGEMM) GPU vs CPU
+
+| Size     | GPU (us) | CPU (us) | Speedup |
+|----------|----------|----------|---------|
+| 128x128  |       32 |      429 |   13.4x |
+| 512x512  |      158 |    4,109 |   26.0x |
+| 1024x1024|      509 |   23,393 |   45.9x |
+
+#### Softmax GPU vs CPU (shape: 64x128x512)
+
+| Engine | Latency (us) | Speedup |
+|--------|-------------|---------|
+| GPU    |       1,054 |   47.6x |
+| CPU    |      51,516 |   1.0x  |
+
+#### Flash Attention (CUTLASS, head_dim=64, num_heads=8)
+
+| Seq Len | Latency (us) |
+|---------|-------------|
+| 128     |         147 |
+| 512     |       1,035 |
+| 1024    |       2,335 |
+| 2048    |       8,924 |
+
+#### Quantized GEMM (CUTLASS INT4/INT8)
+
+| Kernel  | Size     | Latency (us) | GOPS     |
+|---------|----------|-------------|----------|
+| INT4    | 1024     |       3,958 |      545 |
+| INT4    | 2048     |      31,998 |      537 |
+| INT4    | 4096     |     426,040 |      322 |
+| INT8    | 1024     |         941 |    2,289 |
+| INT8    | 2048     |       7,933 |    2,166 |
+| INT8    | 4096     |      75,380 |    1,822 |
+
+#### TensorRT Inference
+
+TensorRT 10.15.1 engine build, serialization, deserialization, and inference all
+work on Blackwell. 15 tests pass in 5.6 seconds (including engine build time).
