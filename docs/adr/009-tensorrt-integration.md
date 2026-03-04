@@ -1,7 +1,7 @@
 # ADR-009: TensorRT Integration
 
 **Phase:** 12
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-03
 
 ## Context
