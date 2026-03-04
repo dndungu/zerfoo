@@ -512,6 +512,24 @@ func TestMatMul(t *testing.T) {
 		t.Errorf("MatMul Forward transposed shape = %v, want [2 2]", s)
 	}
 
+	// Batched matmul: [1,2,3,4] x [1,2,4,3] -> [1,2,3,3]
+	batchA := makeTensor(t, []int{1, 2, 3, 4}, make([]float32, 24))
+	batchB := makeTensor(t, []int{1, 2, 4, 3}, make([]float32, 24))
+	batchOut, err := m.Forward(ctx, batchA, batchB)
+	if err != nil {
+		t.Fatalf("MatMul batched Forward: %v", err)
+	}
+	if s := batchOut.Shape(); len(s) != 4 || s[0] != 1 || s[1] != 2 || s[2] != 3 || s[3] != 3 {
+		t.Errorf("MatMul batched shape = %v, want [1 2 3 3]", s)
+	}
+
+	// 1D tensor should error
+	e1d := makeTensor(t, []int{4}, make([]float32, 4))
+	_, err = m.Forward(ctx, e1d, b)
+	if err == nil {
+		t.Error("MatMul Forward with 1D input should error")
+	}
+
 	// Forward: incompatible dimensions
 	d := makeTensor(t, []int{4, 5}, make([]float32, 20))
 	_, err = m.Forward(ctx, a, d)
