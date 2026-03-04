@@ -7,6 +7,7 @@ package tensorrt
 
 /*
 #cgo LDFLAGS: -L${SRCDIR} -ltrt_capi -lnvinfer -lstdc++
+#include <stdlib.h>
 #include "cshim/trt_capi.h"
 */
 import "C"
