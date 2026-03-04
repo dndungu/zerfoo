@@ -83,6 +83,10 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
   sm_121, CUDA 13.0) and capture performance benchmarks. **(NEW)**
 - O31: Assess and document feature gaps for Blackwell architecture: FP4 tensor
   cores, BF16 support, unified memory, ConnectX-7 multi-node. **(NEW)**
+- O32: Run all model parity tests on GPU by downloading, converting, and
+  deploying ZMF model files for all 7 model families on DGX Spark. **(NEW)**
+- O33: Document multi-GPU test coverage gap and define the conditions under
+  which multi-GPU tests can be validated. **(NEW)**
 
 ### Non-Goals
 
@@ -157,6 +161,8 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 | ARM64 build | All CUDA code builds on aarch64 | `go build -tags cuda ./...` on DGX Spark succeeds |
 | Blackwell GPU tests | All GPU tests pass on sm_121 | `go test -tags cuda ./...` on DGX Spark, 0 failures |
 | GPU benchmarks | Performance documented | MatMul, attention, INT4 GEMM benchmarks in design.md |
+| Model parity on GPU | 7 model families tested | Parity tests pass (or skip with documented reason) on DGX Spark |
+| Multi-GPU gap documented | Prerequisites listed | ADR-017 lists all skipped multi-GPU tests with hardware requirements |
 
 ---
 
@@ -209,6 +215,8 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 | D51 | Performance benchmarks | MatMul, attention, INT4 GEMM benchmark results documented |
 | D52 | Feature gap assessment | FP4, BF16, unified memory, ConnectX-7 gaps documented in ADR |
 | D53 | Hardware validation ADR | ADR-017 documenting DGX Spark validation results and gaps |
+| D54 | Model parity on GPU | All 7 model families' parity tests pass on DGX Spark with ZMF models |
+| D55 | Multi-GPU gap doc | Multi-GPU test coverage gap documented with prerequisites for validation |
 
 ### Out of Scope
 
@@ -879,6 +887,192 @@ Passwordless SSH key authentication configured from development machine.
 
 ---
 
+### Phase 21: Skipped Test Coverage (Model Parity on GPU + Multi-GPU Gap)
+
+#### Phase 21 Context
+
+Phase 20 validated all GPU code on DGX Spark with 66 packages passing. However,
+25+ tests were skipped due to two gaps:
+
+1. **Model parity tests (20 tests):** The parity test framework in
+   `tests/parity/helpers_test.go` uses `envOrSkip(t, key)` to check environment
+   variables like `GEMMA3_ZMF_PATH`, `LLAMA3_ZMF_PATH`, etc. Without ZMF model
+   files on the DGX Spark, all model parity tests skip. This covers 7 model
+   families: Gemma 3, Llama 3, Mistral, Phi-4, Qwen 2.5, DeepSeek V3, and
+   SigLIP (+ Kimi-VL connector). Each family has ~3 tests (forward pass, greedy
+   decode, generation).
+
+2. **Multi-GPU tests (5 tests):** The DGX Spark GB10 has a single GPU.
+   Tests that check `GetDeviceCount() >= 2` skip: TestMemPoolNoCrossDeviceReuse,
+   TestMemPoolMultiDeviceStats, TestTwoGPUAllReduce, TestTwoGPUBroadcast,
+   TestMultiGPU_DualDeviceInference, TestNcclStrategy_TwoGPUAllReduce.
+   These require a second DGX Spark unit connected via ConnectX-7.
+
+The model parity gap is addressable now. The `zonnx` CLI tool (in
+`../zonnx/`) downloads ONNX models from HuggingFace and converts them to ZMF
+format. The DGX Spark has 390 GB free disk and 115 GB free RAM -- sufficient
+for all 7 model families.
+
+**ZMF conversion workflow:**
+1. Install `zonnx` on DGX Spark (`go install` or copy binary)
+2. `zonnx download <hf-repo>` -- downloads ONNX model from HuggingFace
+3. `zonnx convert <onnx-dir> <output.zmf>` -- converts ONNX to ZMF format
+4. Set environment variables (e.g., `GEMMA3_ZMF_PATH=/path/to/gemma3.zmf`)
+5. Run parity tests with GPU tags
+
+**Model families and HuggingFace repos:**
+| Family | HuggingFace Repo | Env Vars |
+|--------|-----------------|----------|
+| Gemma 3 | google/gemma-3-1b-it (ONNX variant) | GEMMA3_ZMF_PATH, GEMMA3_MODEL_DIR |
+| Llama 3 | meta-llama/Llama-3.2-1B (ONNX variant) | LLAMA3_ZMF_PATH, LLAMA3_MODEL_DIR |
+| Mistral | mistralai/Mistral-7B-v0.1 (ONNX variant) | MISTRAL_ZMF_PATH, MISTRAL_MODEL_DIR |
+| Phi-4 | microsoft/phi-4 (ONNX variant) | PHI4_ZMF_PATH, PHI4_MODEL_DIR |
+| Qwen 2.5 | Qwen/Qwen2.5-0.5B (ONNX variant) | QWEN_ZMF_PATH, QWEN_MODEL_DIR |
+| DeepSeek V3 | deepseek-ai/DeepSeek-V3 (ONNX variant) | DEEPSEEK_ZMF_PATH, DEEPSEEK_MODEL_DIR |
+| SigLIP | google/siglip-so400m-patch14-384 (ONNX variant) | SIGLIP_ZMF_PATH, SIGLIP_MODEL_DIR |
+
+Note: Exact HuggingFace repo names and ONNX availability must be verified at
+runtime. Some models may require gated access (HF_TOKEN). Smaller model
+variants are preferred to fit within DGX Spark memory.
+
+#### E114: Model Parity Test Coverage on GPU
+
+- [ ] T114.1 Install zonnx CLI on DGX Spark  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Steps on DGX Spark (ndungu@192.168.86.250):
+    1. Clone zonnx repo: `git clone` to ~/zonnx
+    2. Build: `cd ~/zonnx && go build -o ~/bin/zonnx .`
+    3. Verify: `~/bin/zonnx --help`
+  - Acceptance: `zonnx download --help` and `zonnx convert --help` succeed.
+  - [ ] S114.1.1 Clone zonnx repo on DGX Spark  Est: 5m
+  - [ ] S114.1.2 Build zonnx binary  Est: 15m
+  - [ ] S114.1.3 Verify CLI works  Est: 5m
+
+- [ ] T114.2 Download and convert Gemma 3 model  Owner: TBD  Est: 1h
+  - Dependencies: T114.1
+  - Steps:
+    1. Identify smallest Gemma 3 ONNX variant on HuggingFace
+    2. `zonnx download <repo>` to ~/models/gemma3/
+    3. `zonnx convert ~/models/gemma3/ ~/models/gemma3.zmf`
+    4. Verify ZMF file exists and is non-empty
+  - Acceptance: ~/models/gemma3.zmf exists; ~/models/gemma3/ has config.json and
+    tokenizer.json.
+  - [ ] S114.2.1 Find smallest Gemma 3 ONNX variant  Est: 10m
+  - [ ] S114.2.2 Download model  Est: 20m
+  - [ ] S114.2.3 Convert to ZMF  Est: 15m
+  - [ ] S114.2.4 Verify files  Est: 5m
+
+- [x] T114.3 Download and convert Llama 3 model  Owner: TBD  Est: 1h  2026-03-04
+  - Dependencies: T114.1
+  - Used onnx-community/Llama-3.2-1B from HuggingFace (previously downloaded).
+  - Re-converted with updated zonnx (external data support).
+  - Fixed: zonnx importer now loads ONNX external data files (model.onnx_data).
+  - Fixed: Cos and Sin ONNX ops added for Llama RoPE position encoding.
+  - Acceptance: ~/models/llama3/model.zmf exists (4.7 GB). TestLlama3ForwardPass PASS.
+  - [x] S114.3.1 Find smallest Llama 3 ONNX variant  Est: 10m  2026-03-04
+  - [x] S114.3.2 Download model (with HF_TOKEN if gated)  Est: 20m  2026-03-04
+  - [x] S114.3.3 Convert to ZMF  Est: 15m  2026-03-04
+  - [x] S114.3.4 Verify files  Est: 5m  2026-03-04
+
+- [ ] T114.4 Download and convert remaining models  Owner: TBD  Est: 3h
+  - Dependencies: T114.1
+  - Steps: Repeat download+convert for Mistral, Phi-4, Qwen 2.5, DeepSeek V3,
+    SigLIP. Use smallest available ONNX variants. If a model is too large for
+    DGX Spark memory (128 GB), document the limitation and skip.
+  - Acceptance: ZMF files exist for each model that fits within hardware limits.
+  - [ ] S114.4.1 Download and convert Mistral  Est: 30m
+    - Blocked: onnx-community repos now require HF auth. Need HF_TOKEN or
+      use optimum-cli export (7B model, ~14GB download + ONNX export).
+  - [ ] S114.4.2 Download and convert Phi-4  Est: 30m
+    - Blocked: Same HF auth issue. Need HF_TOKEN or optimum-cli export.
+  - [x] S114.4.3 Download and convert Qwen 2.5  Est: 30m  2026-03-04
+    - Previously downloaded. Re-converted with latest zonnx (proto field promotion).
+    - Fixed: Reshape rebuild in builder Pass 2, batched MatMul, Where broadcasting.
+    - TestQwen25ForwardPass PASS on DGX Spark. Output: [1 8 151936].
+  - [ ] S114.4.4 Download and convert DeepSeek V3  Est: 30m
+  - [ ] S114.4.5 Download and convert SigLIP  Est: 30m
+
+- [ ] T114.5 Run model parity tests on GPU  Owner: TBD  Est: 2h
+  - Dependencies: T114.2, T114.3, T114.4
+  - Steps:
+    1. Export env vars for all converted models:
+       ```
+       export GEMMA3_ZMF_PATH=~/models/gemma3.zmf
+       export GEMMA3_MODEL_DIR=~/models/gemma3/
+       export LLAMA3_ZMF_PATH=~/models/llama3.zmf
+       ...
+       ```
+    2. Run: `go test -tags cuda,cutlass ./tests/parity/ -v -count=1`
+    3. Record which tests pass, fail, or skip
+    4. If any tests fail, investigate and fix
+  - Acceptance: All model parity tests pass for converted models. Tests for
+    models that could not be converted document the reason for skipping.
+  - [ ] S114.5.1 Set environment variables for all models  Est: 10m
+  - [ ] S114.5.2 Run parity tests with GPU tags  Est: 30m
+  - [x] S114.5.3 Investigate and fix any failures  Est: 1h  2026-03-04
+    - Fixed 8 issues across zerfoo and zonnx repos:
+      1. Reshape: support ONNX dynamic 2-input mode [2a520c4]
+      2. Builder: keep dynamic shape input for Reshape [f757b29]
+      3. Builder: promote ZMF proto fields (Perm, Epsilon, Axis) [b12847a]
+      4. Where: add scalar broadcasting [7f8d73f]
+      5. Builder: rebuild Reshape node after shape extraction in Pass 2 [4644fe3]
+      6. MatMul: support batched (4D+) matmul [5b94cbb]
+      7. tensor_decoder: return error for empty data [da82e78]
+      8. Cos/Sin elementwise layers for RoPE [e119caa]
+      9. zonnx: load ONNX external data files [8830eb5 in zonnx]
+  - [ ] S114.5.4 Document results  Est: 15m
+
+- [ ] T114.6 Create test automation script  Owner: TBD  Est: 30m
+  - Dependencies: T114.5
+  - File: scripts/dgx-spark-parity.sh (new)
+  - Purpose: Shell script that sets all ZMF env vars and runs the full parity
+    test suite. Makes it easy to re-run after code changes.
+  - Acceptance: `./scripts/dgx-spark-parity.sh` runs all model parity tests.
+  - [ ] S114.6.1 Write script with env vars and test command  Est: 15m
+  - [ ] S114.6.2 Test script on DGX Spark  Est: 10m
+  - [ ] S114.6.3 Run golangci-lint  Est: 5m
+
+#### E115: Multi-GPU Test Coverage Assessment
+
+- [ ] T115.1 Document multi-GPU test coverage gap  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - File: docs/adr/017-dgx-spark-hardware-validation.md (update)
+  - Steps:
+    1. List all multi-GPU tests that skip on single-GPU DGX Spark
+    2. Document exact hardware requirements (2x DGX Spark, ConnectX-7 cable,
+       NCCL_SOCKET_IFNAME config, MPI)
+    3. Add acceptance criteria: when a second unit is available, these tests
+       should run and pass
+  - Acceptance: ADR-017 updated with multi-GPU test inventory and prerequisites.
+  - [ ] S115.1.1 List all multi-GPU tests  Est: 10m
+  - [ ] S115.1.2 Document hardware/software prerequisites  Est: 10m
+  - [ ] S115.1.3 Update ADR-017  Est: 10m
+
+- [ ] T115.2 Add multi-GPU test runner script  Owner: TBD  Est: 30m
+  - Dependencies: T115.1
+  - File: scripts/dgx-spark-multigpu.sh (new)
+  - Purpose: Shell script for running multi-GPU tests when second unit is
+    available. Sets NCCL env vars, runs only multi-GPU tagged tests.
+  - Acceptance: Script exists with correct NCCL configuration and test filters.
+  - [ ] S115.2.1 Write script with NCCL env vars and test filters  Est: 15m
+  - [ ] S115.2.2 Run golangci-lint  Est: 5m
+
+#### E116: Phase 21 Final Verification
+
+- [ ] T116.1 Update documentation  Owner: TBD  Est: 30m
+  - Dependencies: E114, E115
+  - Files: docs/plan.md, docs/design.md, docs/adr/017-dgx-spark-hardware-validation.md
+  - Steps:
+    1. Mark all Phase 21 tasks complete with results
+    2. Update design.md Section 15 with model parity results
+    3. Update ADR-017 with model parity results and multi-GPU gap inventory
+  - Acceptance: All docs reflect actual test results.
+  - [ ] S116.1.1 Update plan.md  Est: 10m
+  - [ ] S116.1.2 Update design.md  Est: 10m
+  - [ ] S116.1.3 Update ADR-017  Est: 10m
+
+---
+
 ## 4. Timeline and Milestones
 
 ### Phase 14-19 Milestones
@@ -907,6 +1101,9 @@ Passwordless SSH key authentication configured from development machine.
 | M91 | Benchmarks captured | E111 | MatMul, attention, INT4, TRT benchmarks documented |
 | M92 | Feature gaps documented | E112 | FP4, BF16, unified memory, ConnectX-7 gaps in ADR-017 |
 | M93 | Phase 20 complete | E113 | Hardware validation done; ADR-017 written; E29 resolved |
+| M94 | Model parity on GPU | E114 | All 7 model families' parity tests pass (or skip with documented reason) on DGX Spark |
+| M95 | Multi-GPU gap documented | E115 | Multi-GPU test inventory and prerequisites documented in ADR-017 |
+| M96 | Phase 21 complete | E116 | Skipped test coverage addressed; docs updated |
 
 ### Prior Phase Milestones (Complete)
 
@@ -927,6 +1124,10 @@ Phases 1-13: 71 milestones (M1-M71) all complete. See prior plan versions.
 7. **Phase 20 (DGX Spark Validation):** E109 -> E110 -> E111 -> E112 -> E113.
    Depends on all prior phases being code-complete (Phases 14-19 done).
    Must run ON the DGX Spark hardware.
+8. **Phase 21 (Skipped Test Coverage):** E114 -> E115 -> E116.
+   Depends on Phase 20 being complete. Must run ON the DGX Spark hardware.
+   E114 (model parity) requires downloading ~50-100 GB of model files.
+   E115 (multi-GPU gap) is documentation only.
 
 **Parallelism opportunities:**
 - Phases 17, 18, 19 are independent of each other and of 14-16. All three can
@@ -972,6 +1173,10 @@ Phases 1-13: 71 milestones (M1-M71) all complete. See prior plan versions.
 | R29 | TensorRT include path varies by Linux distribution | Build failure on DGX Spark (Ubuntu 24.04 aarch64) | Medium | Use pkg-config or dpkg-architecture for path detection. |
 | R30 | Gonum BLAS slower on ARM64 (no SIMD assembly) | CPU fallback operations significantly slower | Medium | Document perf gap. Long-term: link ARM-optimized BLAS (OpenBLAS with NEON). |
 | R31 | Single-GPU DGX Spark cannot validate multi-GPU code | NCCL and multi-GPU tests remain unvalidated | High | Tests skip gracefully. Second DGX Spark unit needed for full multi-GPU validation. |
+| R32 | HuggingFace model download requires gated access | Model download blocked without HF_TOKEN | Medium | Set HF_TOKEN env var on DGX Spark. Accept HF terms of use for gated models. |
+| R33 | Large models exceed DGX Spark memory (128 GB) | Cannot run parity tests for large models | Medium | Use smallest available model variants. Skip models that exceed memory limits and document. |
+| R34 | ONNX models not available for all families | zonnx conversion not possible | Medium | Check HuggingFace for ONNX variants. If unavailable, export using optimum or skip with doc. |
+| R35 | Model parity tests reveal GPU-vs-CPU numerical differences | Parity failures on GPU | Medium | Adjust tolerances for GPU execution. FP32 GPU math may differ from CPU in last bits. |
 
 ---
 
@@ -1023,6 +1228,8 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-04 | 21 | E114 in progress: TestQwen25ForwardPass and TestLlama3ForwardPass PASS on DGX Spark. Fixed 9 ONNX compatibility issues: dynamic Reshape 2-input, builder Reshape rebuild, ZMF proto field promotion, Where broadcasting, batched MatMul, empty tensor guard, Cos/Sin ops, zonnx external data loading. Remaining models (Mistral, Phi4, Gemma3, DeepSeek, SigLIP) blocked on HF auth or large download times. |
+| 2026-03-03 | 21 | Planned Phase 21 (Skipped Test Coverage). Added E114 (model parity on GPU: install zonnx, download/convert 7 model families, run parity tests), E115 (multi-GPU gap documentation), E116 (final verification). 3 epics, 9 tasks, ~25 subtasks. Added objectives O32-O33, deliverables D54-D55, milestones M94-M96, risks R32-R35. Addresses 25+ skipped tests from Phase 20 validation. |
 | 2026-03-03 | 20 | Phase 20 COMPLETE. E109: ARM64 build compatibility -- 10 code fixes, all builds pass. E110: GPU test validation -- 66 packages pass, 0 failures. E111: Benchmarks -- MatMul up to 45.9x GPU speedup, flash attention 147us-8924us, INT4/INT8 GEMM profiled. E112: Feature gaps assessed (FP4 blocked upstream, BF16 3-5 days, unified memory 1-2 days, ConnectX-7 1 week). E113: ADR-017 written, design.md Section 15 added. |
 | 2026-03-03 | 20 | SSH validated: ndungu@192.168.86.250 (aitopatom-bfc8). Environment probed: CUDA 13.0.2/driver 580.126.09 installed; Go, cuDNN, TensorRT, NCCL, CUTLASS all missing. Added T109.0 (software installation, 6 subtasks). Updated E109 dependencies. Updated Phase 20 context with verified hardware specs, network access, and software inventory. |
 | 2026-03-03 | 20 | Planned Phase 20 (DGX Spark Hardware Validation). GIGABYTE AI TOP Atom (DGX Spark GB10, Blackwell sm_121, ARM64 aarch64, CUDA 13.0, 128GB) acquired. Unblocks E29. Added E109-E113 (5 epics, ~25 tasks). Identified 2 blocking ARM64 build issues (TensorRT x86_64 include path, CUDA kernels sm_75 default). Identified 6 Blackwell feature gaps (FP4, BF16, unified memory, ConnectX-7, TMA instructions, tile size tuning). Added objectives O29-O31, deliverables D48-D53, milestones M89-M93, risks R26-R31. |
@@ -1072,11 +1279,12 @@ A task is done when:
   internal/cuda/kernels/. MatMulNBits GPU dispatch via build tags.
 - **Phase 19 (TRT dynamic shapes):** Complete. Optimization profiles in
   tensorrt bindings. DynamicShapeConfig in converter/pipeline.
-- **Phase 20 (DGX Spark validation):** Planned. SSH: `ndungu@192.168.86.250`.
-  First install missing software (T109.0: Go, cuDNN, TensorRT, NCCL, CUTLASS),
-  fix ARM64 build issues, run GPU tests on Blackwell sm_121, capture benchmarks,
-  assess feature gaps.
-- **GPU hardware validation (E29):** UNBLOCKED -- DGX Spark GB10 acquired.
+- **Phase 20 (DGX Spark validation):** COMPLETE. All 66 packages pass on DGX
+  Spark. Benchmarks captured. Feature gaps documented. See ADR-017.
+- **Phase 21 (Skipped test coverage):** IN PROGRESS. Install zonnx on DGX
+  Spark, download 7 model families from HuggingFace, convert to ZMF, run model
+  parity tests with GPU. Document multi-GPU gap. SSH: `ndungu@192.168.86.250`.
+- **GPU hardware validation (E29):** RESOLVED -- DGX Spark GB10 acquired.
   Superseded by Phase 20 epics (E109-E113).
 - **How to build:**
   - CPU: `go build ./...`
