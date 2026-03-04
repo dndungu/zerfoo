@@ -15,7 +15,8 @@ import (
 type Gather[T tensor.Numeric] struct {
 	engine      compute.Engine[T]
 	outputShape []int
-	weights     *tensor.TensorNumeric[T] // Optional embedded weights
+	weights     *tensor.TensorNumeric[T]  // Optional embedded weights (data)
+	indices     *tensor.TensorNumeric[int] // Optional embedded indices
 }
 
 // New creates a new Gather layer.
@@ -30,6 +31,15 @@ func NewWithWeights[T tensor.Numeric](engine compute.Engine[T], weights *tensor.
 	return &Gather[T]{
 		engine:  engine,
 		weights: weights,
+	}
+}
+
+// NewWithIndices creates a new Gather layer with embedded constant indices.
+// At forward time, input[0] is the data tensor; indices come from the layer.
+func NewWithIndices[T tensor.Numeric](engine compute.Engine[T], indices *tensor.TensorNumeric[int]) *Gather[T] {
+	return &Gather[T]{
+		engine:  engine,
+		indices: indices,
 	}
 }
 
@@ -55,9 +65,15 @@ func (g *Gather[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 		indices *tensor.TensorNumeric[int]
 	)
 
-	// If we have embedded weights, use them as params and expect only indices as input
-
-	if g.weights != nil {
+	switch {
+	case g.indices != nil:
+		// Embedded indices mode: single data input, indices from layer.
+		if len(inputs) != 1 {
+			return nil, fmt.Errorf("Gather layer with embedded indices expects 1 input (data), got %d", len(inputs))
+		}
+		params = inputs[0]
+		indices = g.indices
+	case g.weights != nil:
 		if len(inputs) != 1 {
 			return nil, fmt.Errorf("Gather layer with embedded weights expects 1 input (indices), got %d", len(inputs))
 		}
@@ -99,7 +115,7 @@ func (g *Gather[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 		} else {
 			indices = intTensor
 		}
-	} else {
+	default:
 		// General ONNX Gather: data and indices as inputs, axis=0.
 		if len(inputs) < 2 {
 			return nil, fmt.Errorf("Gather layer expects 2 inputs (data, indices), got %d", len(inputs))
