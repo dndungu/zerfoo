@@ -44,7 +44,8 @@ func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 	ends := s.ends
 	axes := s.axes
 
-	if len(inputs) >= 3 {
+	switch {
+	case len(inputs) >= 3:
 		// ONNX opset 10+: starts and ends come as input tensors.
 		starts = tensorToInt64(inputs[1])
 		ends = tensorToInt64(inputs[2])
@@ -52,6 +53,9 @@ func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 			axes = tensorToInt64(inputs[3])
 		}
 		// steps (inputs[4]) are ignored (only step=1 is supported).
+	case len(inputs) == 2:
+		// Hybrid: starts from input tensor, ends/axes/steps from attributes.
+		starts = tensorToInt64(inputs[1])
 	}
 
 	if axes == nil && starts != nil {
