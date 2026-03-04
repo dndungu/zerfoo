@@ -26,6 +26,8 @@ const (
 	CUDA
 	// ROCm represents the AMD GPU device type via HIP/ROCm.
 	ROCm
+	// OpenCL represents a GPU device accessed via OpenCL.
+	OpenCL
 )
 
 // --- Device Registry ---
