@@ -10,6 +10,7 @@ import (
 
 	"github.com/zerfoo/zerfoo/internal/cublas"
 	"github.com/zerfoo/zerfoo/internal/cuda"
+	"github.com/zerfoo/zerfoo/internal/cudnn"
 	"github.com/zerfoo/zerfoo/log"
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
@@ -25,12 +26,13 @@ import (
 // per-operation cudaMalloc/cudaFree, and a dedicated CUDA stream enables
 // async kernel execution.
 type GPUEngine[T tensor.Numeric] struct {
-	cpu      *CPUEngine[T]
-	handle   *cublas.Handle
-	pool     *cuda.MemPool
-	stream   *cuda.Stream
-	logger   log.Logger
-	deviceID int
+	cpu         *CPUEngine[T]
+	handle      *cublas.Handle
+	cudnnHandle *cudnn.Handle
+	pool        *cuda.MemPool
+	stream      *cuda.Stream
+	logger      log.Logger
+	deviceID    int
 
 	// oomFallbackCount tracks how many times an OOM triggered CPU fallback.
 	oomFallbackCount atomic.Int64
@@ -68,16 +70,33 @@ func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T], deviceID ...int) 
 		return nil, fmt.Errorf("failed to set cuBLAS stream: %w", err)
 	}
 
+	dh, err := cudnn.CreateHandle()
+	if err != nil {
+		_ = stream.Destroy()
+		_ = h.Destroy()
+
+		return nil, fmt.Errorf("failed to create cuDNN handle: %w", err)
+	}
+
+	if err := dh.SetStream(stream.Ptr()); err != nil {
+		_ = dh.Destroy()
+		_ = stream.Destroy()
+		_ = h.Destroy()
+
+		return nil, fmt.Errorf("failed to set cuDNN stream: %w", err)
+	}
+
 	l := log.Nop()
 	l.Info("gpu engine initialized", "device", dev, "pool", "enabled", "stream", "enabled")
 
 	return &GPUEngine[T]{
-		cpu:      NewCPUEngine(ops),
-		handle:   h,
-		pool:     cuda.NewMemPool(),
-		stream:   stream,
-		logger:   l,
-		deviceID: dev,
+		cpu:         NewCPUEngine(ops),
+		handle:      h,
+		cudnnHandle: dh,
+		pool:        cuda.NewMemPool(),
+		stream:      stream,
+		logger:      l,
+		deviceID:    dev,
 	}, nil
 }
 
@@ -113,6 +132,12 @@ func (e *GPUEngine[T]) Close() error {
 
 	if e.stream != nil {
 		if err := e.stream.Destroy(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	if e.cudnnHandle != nil {
+		if err := e.cudnnHandle.Destroy(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
