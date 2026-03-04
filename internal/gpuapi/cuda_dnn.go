@@ -133,8 +133,62 @@ func (d *CUDADNN) ConvBackwardData(
 	groups int,
 	stream Stream,
 ) error {
-	// Stub: cuDNN backward-data will be implemented in Phase 17.
-	return fmt.Errorf("ConvBackwardData: not yet implemented")
+	wDesc, err := cudnn.CreateFilterDescriptor()
+	if err != nil {
+		return fmt.Errorf("ConvBackwardData: wDesc: %w", err)
+	}
+	defer wDesc.Destroy()
+	if err := wDesc.Set4d(cudnn.Float32, cudnn.NCHW, wShape[0], wShape[1], wShape[2], wShape[3]); err != nil {
+		return fmt.Errorf("ConvBackwardData: set wDesc: %w", err)
+	}
+
+	dyDesc, err := makeTensor4d(dyShape)
+	if err != nil {
+		return fmt.Errorf("ConvBackwardData: dyDesc: %w", err)
+	}
+	defer dyDesc.Destroy()
+
+	dxDesc, err := makeTensor4d(dxShape)
+	if err != nil {
+		return fmt.Errorf("ConvBackwardData: dxDesc: %w", err)
+	}
+	defer dxDesc.Destroy()
+
+	convDesc, err := cudnn.CreateConvolutionDescriptor()
+	if err != nil {
+		return fmt.Errorf("ConvBackwardData: convDesc: %w", err)
+	}
+	defer convDesc.Destroy()
+	if err := convDesc.Set2d(pads[0], pads[1], strides[0], strides[1], dilations[0], dilations[1], cudnn.CrossCorrelation, cudnn.Float32); err != nil {
+		return fmt.Errorf("ConvBackwardData: set convDesc: %w", err)
+	}
+	if groups > 1 {
+		if err := convDesc.SetGroupCount(groups); err != nil {
+			return fmt.Errorf("ConvBackwardData: set groups: %w", err)
+		}
+	}
+
+	algo := cudnn.ConvBwdDataAlgo1
+
+	wsSize, err := d.handle.GetConvolutionBackwardDataWorkspaceSize(wDesc, dyDesc, convDesc, dxDesc, algo)
+	if err != nil {
+		return fmt.Errorf("ConvBackwardData: workspace size: %w", err)
+	}
+
+	var wsPtr unsafe.Pointer
+	if wsSize > 0 {
+		var allocErr error
+		wsPtr, allocErr = cudaMallocTemp(wsSize)
+		if allocErr != nil {
+			return fmt.Errorf("ConvBackwardData: workspace alloc: %w", allocErr)
+		}
+		defer cudaFreeTemp(wsPtr)
+	}
+
+	if err := d.handle.ConvolutionBackwardData(1.0, wDesc, w, dyDesc, dy, convDesc, algo, wsPtr, wsSize, 0.0, dxDesc, dx); err != nil {
+		return fmt.Errorf("ConvBackwardData: %w", err)
+	}
+	return nil
 }
 
 func (d *CUDADNN) ConvBackwardFilter(
@@ -145,8 +199,62 @@ func (d *CUDADNN) ConvBackwardFilter(
 	groups int,
 	stream Stream,
 ) error {
-	// Stub: cuDNN backward-filter will be implemented in Phase 17.
-	return fmt.Errorf("ConvBackwardFilter: not yet implemented")
+	xDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("ConvBackwardFilter: xDesc: %w", err)
+	}
+	defer xDesc.Destroy()
+
+	dyDesc, err := makeTensor4d(dyShape)
+	if err != nil {
+		return fmt.Errorf("ConvBackwardFilter: dyDesc: %w", err)
+	}
+	defer dyDesc.Destroy()
+
+	dwDesc, err := cudnn.CreateFilterDescriptor()
+	if err != nil {
+		return fmt.Errorf("ConvBackwardFilter: dwDesc: %w", err)
+	}
+	defer dwDesc.Destroy()
+	if err := dwDesc.Set4d(cudnn.Float32, cudnn.NCHW, dwShape[0], dwShape[1], dwShape[2], dwShape[3]); err != nil {
+		return fmt.Errorf("ConvBackwardFilter: set dwDesc: %w", err)
+	}
+
+	convDesc, err := cudnn.CreateConvolutionDescriptor()
+	if err != nil {
+		return fmt.Errorf("ConvBackwardFilter: convDesc: %w", err)
+	}
+	defer convDesc.Destroy()
+	if err := convDesc.Set2d(pads[0], pads[1], strides[0], strides[1], dilations[0], dilations[1], cudnn.CrossCorrelation, cudnn.Float32); err != nil {
+		return fmt.Errorf("ConvBackwardFilter: set convDesc: %w", err)
+	}
+	if groups > 1 {
+		if err := convDesc.SetGroupCount(groups); err != nil {
+			return fmt.Errorf("ConvBackwardFilter: set groups: %w", err)
+		}
+	}
+
+	algo := cudnn.ConvBwdFilterAlgo1
+
+	wsSize, err := d.handle.GetConvolutionBackwardFilterWorkspaceSize(xDesc, dyDesc, convDesc, dwDesc, algo)
+	if err != nil {
+		return fmt.Errorf("ConvBackwardFilter: workspace size: %w", err)
+	}
+
+	var wsPtr unsafe.Pointer
+	if wsSize > 0 {
+		var allocErr error
+		wsPtr, allocErr = cudaMallocTemp(wsSize)
+		if allocErr != nil {
+			return fmt.Errorf("ConvBackwardFilter: workspace alloc: %w", allocErr)
+		}
+		defer cudaFreeTemp(wsPtr)
+	}
+
+	if err := d.handle.ConvolutionBackwardFilter(1.0, xDesc, x, dyDesc, dy, convDesc, algo, wsPtr, wsSize, 0.0, dwDesc, dw); err != nil {
+		return fmt.Errorf("ConvBackwardFilter: %w", err)
+	}
+	return nil
 }
 
 func (d *CUDADNN) BatchNormForwardInference(
@@ -197,8 +305,36 @@ func (d *CUDADNN) BatchNormForwardTraining(
 	y unsafe.Pointer,
 	stream Stream,
 ) error {
-	// Stub: cuDNN batch norm training will be implemented in Phase 17.
-	return fmt.Errorf("BatchNormForwardTraining: not yet implemented")
+	xDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("BatchNormForwardTraining: xDesc: %w", err)
+	}
+	defer xDesc.Destroy()
+
+	yDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("BatchNormForwardTraining: yDesc: %w", err)
+	}
+	defer yDesc.Destroy()
+
+	bnDesc, err := makeTensor4d([4]int{1, channels, 1, 1})
+	if err != nil {
+		return fmt.Errorf("BatchNormForwardTraining: bnDesc: %w", err)
+	}
+	defer bnDesc.Destroy()
+
+	return d.handle.BatchNormalizationForwardTraining(
+		cudnn.BatchNormSpatial,
+		1.0, 0.0,
+		xDesc, x,
+		yDesc, y,
+		bnDesc,
+		scale, bias,
+		expAvgFactor,
+		runningMean, runningVariance,
+		epsilon,
+		saveMean, saveInvVariance,
+	)
 }
 
 func (d *CUDADNN) BatchNormBackward(
@@ -210,8 +346,43 @@ func (d *CUDADNN) BatchNormBackward(
 	dx, dScale, dBias unsafe.Pointer,
 	stream Stream,
 ) error {
-	// Stub: cuDNN batch norm backward will be implemented in Phase 17.
-	return fmt.Errorf("BatchNormBackward: not yet implemented")
+	xDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("BatchNormBackward: xDesc: %w", err)
+	}
+	defer xDesc.Destroy()
+
+	dyDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("BatchNormBackward: dyDesc: %w", err)
+	}
+	defer dyDesc.Destroy()
+
+	dxDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("BatchNormBackward: dxDesc: %w", err)
+	}
+	defer dxDesc.Destroy()
+
+	bnDesc, err := makeTensor4d([4]int{1, channels, 1, 1})
+	if err != nil {
+		return fmt.Errorf("BatchNormBackward: bnDesc: %w", err)
+	}
+	defer bnDesc.Destroy()
+
+	return d.handle.BatchNormalizationBackward(
+		cudnn.BatchNormSpatial,
+		1.0, 0.0,
+		1.0, 0.0,
+		xDesc, x,
+		dyDesc, dy,
+		dxDesc, dx,
+		bnDesc,
+		scale,
+		dScale, dBias,
+		1e-5,
+		saveMean, saveInvVariance,
+	)
 }
 
 func (d *CUDADNN) ActivationForward(
@@ -251,8 +422,40 @@ func (d *CUDADNN) ActivationBackward(
 	shape [4]int,
 	stream Stream,
 ) error {
-	// Stub: cuDNN activation backward will be implemented in Phase 17.
-	return fmt.Errorf("ActivationBackward: not yet implemented")
+	yDesc, err := makeTensor4d(shape)
+	if err != nil {
+		return fmt.Errorf("ActivationBackward: yDesc: %w", err)
+	}
+	defer yDesc.Destroy()
+
+	dyDesc, err := makeTensor4d(shape)
+	if err != nil {
+		return fmt.Errorf("ActivationBackward: dyDesc: %w", err)
+	}
+	defer dyDesc.Destroy()
+
+	xDesc, err := makeTensor4d(shape)
+	if err != nil {
+		return fmt.Errorf("ActivationBackward: xDesc: %w", err)
+	}
+	defer xDesc.Destroy()
+
+	dxDesc, err := makeTensor4d(shape)
+	if err != nil {
+		return fmt.Errorf("ActivationBackward: dxDesc: %w", err)
+	}
+	defer dxDesc.Destroy()
+
+	actDesc, err := cudnn.CreateActivationDescriptor()
+	if err != nil {
+		return fmt.Errorf("ActivationBackward: actDesc: %w", err)
+	}
+	defer actDesc.Destroy()
+	if err := actDesc.Set(cudnnActivationMode(mode), cudnn.NotPropagateNan, 0.0); err != nil {
+		return fmt.Errorf("ActivationBackward: set actDesc: %w", err)
+	}
+
+	return d.handle.ActivationBackward(actDesc, 1.0, yDesc, y, dyDesc, dy, xDesc, x, 0.0, dxDesc, dx)
 }
 
 func (d *CUDADNN) PoolingForward(
@@ -293,8 +496,40 @@ func (d *CUDADNN) PoolingBackward(
 	windowH, windowW, padH, padW, strideH, strideW int,
 	stream Stream,
 ) error {
-	// Stub: cuDNN pooling backward will be implemented in Phase 17.
-	return fmt.Errorf("PoolingBackward: not yet implemented")
+	yDesc, err := makeTensor4d(yShape)
+	if err != nil {
+		return fmt.Errorf("PoolingBackward: yDesc: %w", err)
+	}
+	defer yDesc.Destroy()
+
+	dyDesc, err := makeTensor4d(yShape)
+	if err != nil {
+		return fmt.Errorf("PoolingBackward: dyDesc: %w", err)
+	}
+	defer dyDesc.Destroy()
+
+	xDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("PoolingBackward: xDesc: %w", err)
+	}
+	defer xDesc.Destroy()
+
+	dxDesc, err := makeTensor4d(xShape)
+	if err != nil {
+		return fmt.Errorf("PoolingBackward: dxDesc: %w", err)
+	}
+	defer dxDesc.Destroy()
+
+	poolDesc, err := cudnn.CreatePoolingDescriptor()
+	if err != nil {
+		return fmt.Errorf("PoolingBackward: poolDesc: %w", err)
+	}
+	defer poolDesc.Destroy()
+	if err := poolDesc.Set2d(cudnnPoolingMode(mode), cudnn.NotPropagateNan, windowH, windowW, padH, padW, strideH, strideW); err != nil {
+		return fmt.Errorf("PoolingBackward: set poolDesc: %w", err)
+	}
+
+	return d.handle.PoolingBackward(poolDesc, 1.0, yDesc, y, dyDesc, dy, xDesc, x, 0.0, dxDesc, dx)
 }
 
 func (d *CUDADNN) SoftmaxForward(
