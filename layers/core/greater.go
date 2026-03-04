@@ -27,11 +27,34 @@ func (g *Greater[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[
 		return nil, fmt.Errorf("Greater requires 2 inputs, got %d", len(inputs))
 	}
 	a, b := inputs[0].Data(), inputs[1].Data()
+	one := g.ops.One()
+
+	// Scalar broadcasting.
+	if len(b) == 1 {
+		out := make([]T, len(a))
+		bv := float64(b[0])
+		for i := range a {
+			if float64(a[i]) > bv {
+				out[i] = one
+			}
+		}
+		return tensor.New(inputs[0].Shape(), out)
+	}
+	if len(a) == 1 {
+		out := make([]T, len(b))
+		av := float64(a[0])
+		for i := range b {
+			if av > float64(b[i]) {
+				out[i] = one
+			}
+		}
+		return tensor.New(inputs[1].Shape(), out)
+	}
+
 	if len(a) != len(b) {
 		return nil, fmt.Errorf("Greater: input sizes differ (%d vs %d)", len(a), len(b))
 	}
 	out := make([]T, len(a))
-	one := g.ops.One()
 	for i := range a {
 		if float64(a[i]) > float64(b[i]) {
 			out[i] = one

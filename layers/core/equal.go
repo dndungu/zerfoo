@@ -27,11 +27,34 @@ func (e *Equal[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 		return nil, fmt.Errorf("Equal requires 2 inputs, got %d", len(inputs))
 	}
 	a, b := inputs[0].Data(), inputs[1].Data()
+	one := e.ops.One()
+
+	// Scalar broadcasting: if one input is a single element, broadcast it.
+	if len(b) == 1 {
+		out := make([]T, len(a))
+		bv := b[0]
+		for i := range a {
+			if a[i] == bv {
+				out[i] = one
+			}
+		}
+		return tensor.New(inputs[0].Shape(), out)
+	}
+	if len(a) == 1 {
+		out := make([]T, len(b))
+		av := a[0]
+		for i := range b {
+			if av == b[i] {
+				out[i] = one
+			}
+		}
+		return tensor.New(inputs[1].Shape(), out)
+	}
+
 	if len(a) != len(b) {
 		return nil, fmt.Errorf("Equal: input sizes differ (%d vs %d)", len(a), len(b))
 	}
 	out := make([]T, len(a))
-	one := e.ops.One()
 	for i := range a {
 		if a[i] == b[i] {
 			out[i] = one
