@@ -468,8 +468,8 @@ func TestIdsToTensor(t *testing.T) {
 		t.Fatal(err)
 	}
 	shape := got.Shape()
-	if shape[0] != 1 || shape[1] != 3 || shape[2] != 1 {
-		t.Errorf("shape = %v, want [1, 3, 1]", shape)
+	if len(shape) != 2 || shape[0] != 1 || shape[1] != 3 {
+		t.Errorf("shape = %v, want [1, 3]", shape)
 	}
 	data := got.Data()
 	if data[0] != 1.0 || data[1] != 2.0 || data[2] != 3.0 {
