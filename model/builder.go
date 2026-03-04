@@ -768,25 +768,17 @@ func materializeConstantAttrs[T tensor.Numeric](
 			for i, iv := range v.Ints.Val {
 				vals[i] = T(iv)
 			}
-			shape := []int{len(vals)}
-			if len(vals) == 1 {
-				shape = nil // scalar
-			}
-			t, _ = tensor.New[T](shape, vals)
+			t, _ = tensor.New[T]([]int{len(vals)}, vals)
 		case *zmf.Attribute_Floats:
 			vals := make([]T, len(v.Floats.Val))
 			for i, fv := range v.Floats.Val {
 				vals[i] = T(fv)
 			}
-			shape := []int{len(vals)}
-			if len(vals) == 1 {
-				shape = nil
-			}
-			t, _ = tensor.New[T](shape, vals)
+			t, _ = tensor.New[T]([]int{len(vals)}, vals)
 		case *zmf.Attribute_I:
-			t, _ = tensor.New[T](nil, []T{T(v.I)})
+			t, _ = tensor.New[T]([]int{1}, []T{T(v.I)})
 		case *zmf.Attribute_F:
-			t, _ = tensor.New[T](nil, []T{T(v.F)})
+			t, _ = tensor.New[T]([]int{1}, []T{T(v.F)})
 		}
 
 		if t != nil {
