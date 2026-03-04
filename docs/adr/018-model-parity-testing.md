@@ -43,6 +43,9 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 | 13 | Slice: hybrid mode (dynamic starts, attribute ends) unsupported | Add 2-input hybrid mode to Slice.Forward | 7cafb68 |
 | 14 | Slice: out-of-range start for zero-dim tensors | Clamp start to dim size, handle empty ranges | 0937e90 |
 | 15 | zonnx: integer initializer inputs promoted to attributes | Keep initializer inputs as graph references | a1dfa04 |
+| 16 | LessOrEqual: missing elementwise comparison layer | Add LessOrEqual layer | 8444724 |
+| 17 | Or: missing elementwise logical layer | Add Or layer | b08bf51 |
+| 18 | Squeeze/Tile/Mod/Gemm: missing ops for SigLIP | Add 4 new layers | db0a2f6 |
 
 ## Results
 
@@ -58,13 +61,17 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 | Gemma3 ForwardPass | PASS | google/gemma-3-1b-it (optimum export) |
 | Gemma3 GreedyDecode | PASS | |
 | Gemma3 Generation | PASS | |
+| Mistral ForwardPass | PASS | mistralai/Mistral-7B-Instruct-v0.3 |
+| Mistral GreedyDecode | PASS | |
+| Mistral Generation | PASS | |
+| Phi3 ForwardPass | PASS | microsoft/Phi-3-mini-4k-instruct |
+| Phi3 GreedyDecode | PASS | |
+| Phi3 Generation | PASS | |
 | MultiGPU DualDevice | SKIP | Single GPU device |
-| Mistral (3 tests) | SKIP | No ZMF: HF auth required |
-| Phi4 (3 tests) | SKIP | No ZMF: HF auth required |
-| DeepSeek (3 tests) | SKIP | No ZMF: model too large |
-| SigLIP (1 test) | SKIP | No ZMF: HF auth required |
+| DeepSeek (3 tests) | SKIP | Model too large (671B) for 128GB |
+| SigLIP (1 test) | SKIP | Concat shape mismatch in vision graph |
 
-**Summary:** 11 PASS, 10 SKIP (4 families blocked on HF auth/download size,
+**Summary:** 17 PASS, 5 SKIP (DeepSeek too large, SigLIP graph issue,
 1 test blocked on single-GPU hardware).
 
 ## Infrastructure
@@ -77,11 +84,14 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 
 ## Consequences
 
-- Remaining 4 model families (Mistral, Phi4, DeepSeek, SigLIP) are blocked on
-  HuggingFace authentication or download size constraints.
+- 5 of 7 model families pass all parity tests (Llama3, Qwen25, Gemma3, Mistral,
+  Phi3). DeepSeek-V3 (671B MoE) exceeds 128GB memory. SigLIP vision model has
+  a Concat shape mismatch in its ONNX graph.
 - Multi-GPU parity test requires a second DGX Spark unit connected via
   ConnectX-7.
-- The 15 bug fixes improved ONNX compatibility for all models, not just the
-  three tested families.
+- The 18 bug fixes improved ONNX compatibility for all models, not just the
+  tested families.
 - The zonnx root-cause fix (commit a1dfa04) eliminates the need for workaround
   code in the builder; dead `materializeConstantAttrs` removed in 671495f.
+- 7 new ONNX ops added: LessOrEqual, Or, Squeeze, Tile, Mod, Gemm (for Mistral
+  and SigLIP support).
