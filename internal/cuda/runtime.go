@@ -146,6 +146,7 @@ func DeviceComputeCapability(deviceID int) (major, minor int, err error) {
 	return int(prop.major), int(prop.minor), nil
 }
 
+
 // MemcpyAsync copies count bytes asynchronously on the given stream.
 func MemcpyAsync(dst, src unsafe.Pointer, count int, kind MemcpyKind, stream *Stream) error {
 	var cs C.cudaStream_t

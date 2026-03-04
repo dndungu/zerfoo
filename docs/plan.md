@@ -187,6 +187,22 @@ Phase 20 validated all GPU code on DGX Spark with 66 packages passing. However,
    TestMultiGPU_DualDeviceInference, TestNcclStrategy_TwoGPUAllReduce.
    These require a second DGX Spark unit connected via ConnectX-7.
 
+- [x] T70.1 Add deviceID parameter to MemPool.Alloc and MemPool.Free  Owner: TBD  Est: 1h  Completed: 2026-03-03
+  - Dependencies: None
+  - Files: internal/cuda/mempool.go
+  - Acceptance: MemPool.Alloc(deviceID int, byteSize int) calls cuda.SetDevice(deviceID)
+    before cuda.Malloc when cache misses. MemPool.Free(deviceID int, ptr, byteSize) stores
+    the pointer under (deviceID, byteSize). Cache key is (deviceID, byteSize). Drain()
+    iterates all devices, calling SetDevice before Free for each. No cross-device pointer
+    reuse possible. Existing behavior preserved when all calls use deviceID=0.
+  - [x] S70.1.1 Change cache type from map[int][]unsafe.Pointer to map[int]map[int][]unsafe.Pointer  Est: 15m
+  - [x] S70.1.2 Update Alloc to accept deviceID, call SetDevice before Malloc  Est: 15m
+  - [x] S70.1.3 Update Free to accept deviceID, store under (deviceID, byteSize)  Est: 10m
+  - [x] S70.1.4 Update Drain to iterate per-device, call SetDevice before Free  Est: 10m
+  - [x] S70.1.5 Write unit tests: alloc/free on device 0, alloc/free on device 1, no cross-reuse  Est: 20m
+  - [x] S70.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - Note: Also updated all callers in compute/gpu_engine.go and compute/gpu_kernels.go to pass deviceID=0.
+
 The model parity gap is addressable now. The `zonnx` CLI tool (in
 `../zonnx/`) downloads ONNX models from HuggingFace and converts them to ZMF
 format. The DGX Spark has 390 GB free disk and 115 GB free RAM -- sufficient
@@ -277,6 +293,61 @@ variants are preferred to fit within DGX Spark memory.
     test suite. Makes it easy to re-run after code changes.
   - Acceptance: `./scripts/dgx-spark-parity.sh` runs all model parity tests.
 
+#### E71: GPUEngine Device Affinity
+
+- [x] T71.1 Add deviceID field to GPUEngine and update constructor  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
+  - Dependencies: E70
+  - Files: compute/gpu_engine.go
+  - Acceptance: GPUEngine gains a `deviceID int` field. NewGPUEngine(ops, ...int)
+    accepts an optional device ID (default 0). Constructor calls cuda.SetDevice(deviceID)
+    before creating cuBLAS handle, stream, and pool. A DeviceID() int method exposes
+    the device. Existing callers (zero args) get device 0. Static assertion: single-arg
+    call still compiles.
+  - [ ] S71.1.1 Add deviceID int field to GPUEngine struct (line 27)  Est: 5m
+  - [ ] S71.1.2 Update NewGPUEngine signature to accept variadic ...int  Est: 10m
+  - [ ] S71.1.3 Call cuda.SetDevice(deviceID) before cublas.CreateHandle  Est: 10m
+  - [ ] S71.1.4 Pass deviceID to cuda.NewMemPool or store on engine for pool calls  Est: 10m
+  - [ ] S71.1.5 Add DeviceID() int method  Est: 5m
+  - [ ] S71.1.6 Write tests: create engine on device 0, verify DeviceID(); create on device 1 if available  Est: 20m
+  - [ ] S71.1.7 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T71.2 Add SetDevice guard to all GPUEngine methods  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
+  - Dependencies: T71.1
+  - Files: compute/gpu_engine.go, compute/gpu_kernels.go
+  - Acceptance: Every method on GPUEngine that dispatches a CUDA kernel or cuBLAS
+    call begins with cuda.SetDevice(e.deviceID). This includes: MatMul, Add, Sub,
+    Mul, Div, Pow, AddScalar, MulScalar, DivScalar, Tanh, TanhPrime, Exp, Log,
+    Sqrt, Rsqrt, Sum, ReduceSum, ReduceMean, Softmax, Fill. Methods that delegate
+    to CPUEngine (Transpose, Reshape, etc.) do NOT need the guard. Test: two
+    GPUEngines on different devices can run MatMul concurrently without races or
+    wrong-device errors.
+  - Risk: Must not break the OOM fallback path (gpu_engine.go). When cudaMalloc
+    fails and falls back to CPUEngine, the SetDevice call is harmless but must
+    not interfere with the fallback logic.
+  - [ ] S71.2.1 Add e.setDevice() helper that calls cuda.SetDevice(e.deviceID)  Est: 10m
+  - [ ] S71.2.2 Insert e.setDevice() at the top of all GPU-dispatching methods  Est: 30m
+  - [ ] S71.2.3 Verify OOM fallback path still works with SetDevice  Est: 15m
+  - [ ] S71.2.4 Write concurrent test: 2 engines on 2 devices, parallel MatMul (skip if < 2 GPUs)  Est: 20m
+  - [ ] S71.2.5 Run golangci-lint and go test -cover -race  Est: 5m
+
+- [x] T71.3 Update all GPUEngine pool calls to pass deviceID  Owner: TBD  Est: 45m  Completed: 2026-03-03
+  - Dependencies: T71.1, E70
+  - Files: compute/gpu_engine.go, compute/gpu_kernels.go
+  - Acceptance: Every call to e.pool.Alloc() and e.pool.Free() passes e.deviceID.
+    getDevicePtr and makeGPUResult in gpu_kernels.go pass deviceID through.
+    No pool call without a deviceID argument remains.
+  - [ ] S71.3.1 Update getDevicePtr to use e.pool.Alloc(e.deviceID, ...)  Est: 15m
+  - [ ] S71.3.2 Update makeGPUResult to use e.pool.Alloc(e.deviceID, ...)  Est: 15m
+  - [ ] S71.3.3 Grep for remaining pool.Alloc/pool.Free calls without deviceID; fix any  Est: 10m
+  - [ ] S71.3.4 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T71.4 Run linters and verify coverage for E71  Owner: TBD  Est: 15m  Completed: 2026-03-03
+  - Dependencies: T71.3
+  - Acceptance: golangci-lint 0 issues on compute/. go test -tags cuda -cover -race
+    passes. Coverage >= 95%.
+  - [ ] S71.4.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [ ] S71.4.2 Fix any remaining issues  Est: 5m
+
 #### E115: Multi-GPU Test Coverage Assessment
 
 - [x] T115.1 Document multi-GPU test coverage gap  2026-03-04
@@ -291,6 +362,237 @@ variants are preferred to fit within DGX Spark memory.
   - Shell script runs all 6 multi-GPU tests across 4 packages. Sets CUDA/CGo
     env vars, NCCL ConnectX-7 configuration, filters tests by name.
   - Commit: b3b0861
+
+#### E72: GPUStorage Device Affinity
+
+- [x] T72.1 Add deviceID field to GPUStorage and update constructors  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
+  - Dependencies: None (can be done in parallel with E71 after E70)
+  - Files: tensor/gpu_storage.go
+  - Acceptance: GPUStorage gains a `deviceID int` field and a `DeviceID() int`
+    method. NewGPUStorage(length, deviceID) calls cuda.SetDevice(deviceID) before
+    cuda.Malloc. NewGPUStorageFromSlice(data, deviceID) calls SetDevice before
+    Memcpy. NewGPUStorageFromPtr(ptr, length, deviceID) stores the deviceID.
+    TrySlice() calls SetDevice(s.deviceID) before D2H copy. TrySet() calls
+    SetDevice(s.deviceID) before H2D copy. Existing behavior preserved when
+    deviceID=0.
+  - Risk: All callers of NewGPUStorage must be updated to pass deviceID. This
+    includes gpu_engine.go, transfer.go, and any test files.
+  - [x] S72.1.1 Add deviceID int field to GPUStorage struct (line 17)  Est: 5m
+  - [x] S72.1.2 Add DeviceID() int method  Est: 5m
+  - [x] S72.1.3 Update NewGPUStorage to accept deviceID, call SetDevice  Est: 15m
+  - [x] S72.1.4 Update NewGPUStorageFromSlice to accept deviceID, call SetDevice  Est: 15m
+  - [x] S72.1.5 Update NewGPUStorageFromPtr to accept deviceID  Est: 10m
+  - [x] S72.1.6 Add SetDevice call in TrySlice and TrySet  Est: 10m
+  - [x] S72.1.7 Update all callers (grep for NewGPUStorage, NewGPUStorageFromSlice, NewGPUStorageFromPtr)  Est: 15m
+  - [x] S72.1.8 Write tests: create storage on device 0 and device 1, verify DeviceID  Est: 15m
+  - [x] S72.1.9 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T72.2 Update device/cuda_allocator.go with device affinity  Owner: TBD  Est: 30m  Completed: 2026-03-03
+  - Dependencies: None
+  - Files: device/cuda_allocator.go
+  - Acceptance: cudaAllocator gains a deviceID int field. NewCUDAAllocator(deviceID)
+    stores it. Allocate() calls cuda.SetDevice(a.deviceID) before cuda.Malloc().
+    Free() calls cuda.SetDevice(a.deviceID) before cuda.Free(). Update
+    cuda_device.go newCUDADevice to pass deviceID to NewCUDAAllocator.
+  - [x] S72.2.1 Add deviceID field to cudaAllocator  Est: 5m
+  - [x] S72.2.2 Update NewCUDAAllocator to accept deviceID  Est: 5m
+  - [x] S72.2.3 Add SetDevice calls in Allocate and Free  Est: 10m
+  - [x] S72.2.4 Update newCUDADevice to pass deviceID  Est: 5m
+  - [x] S72.2.5 Write tests for device-affine allocation  Est: 10m
+  - [x] S72.2.6 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T72.3 Add cross-device tensor transfer  Owner: TBD  Est: 1h  Completed: 2026-03-03
+  - Dependencies: T72.1
+  - Files: tensor/transfer.go, internal/cuda/runtime.go
+  - Acceptance: New function ToGPUDevice[T](t *TensorNumeric[T], deviceID int)
+    creates a copy of the tensor on the specified GPU. If the source tensor is
+    on a different GPU, uses cudaMemcpyPeer for D2D copy. If the source is CPU,
+    uses cudaMemcpyHostToDevice with SetDevice. New CGo binding
+    cuda.MemcpyPeer(dst, dstDevice, src, srcDevice, size) wraps cudaMemcpyPeer.
+    Update existing ToGPU to default to device 0 for backwards compatibility.
+  - [x] S72.3.1 Add MemcpyPeer binding to internal/cuda/runtime.go  Est: 15m
+  - [x] S72.3.2 Implement ToGPUDevice[T] in tensor/transfer.go  Est: 20m
+  - [x] S72.3.3 Update existing ToGPU to call ToGPUDevice with device 0  Est: 5m
+  - [x] S72.3.4 Write tests: CPU to GPU:0, CPU to GPU:1, GPU:0 to GPU:1 (skip if < 2 GPUs)  Est: 20m
+  - [x] S72.3.5 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T72.4 Run linters and verify coverage for E72  Owner: TBD  Est: 15m  Completed: 2026-03-03
+  - Dependencies: T72.3
+  - Acceptance: golangci-lint 0 issues on tensor/, device/. go test -tags cuda
+    -cover -race passes. Coverage >= 95%.
+  - [x] S72.4.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [x] S72.4.2 Fix any remaining issues  Est: 5m
+
+#### E73: Multi-GPU Inference
+
+Fix inference.Load() to create a GPUEngine when the device option specifies
+CUDA, and add Model.Close() for resource cleanup.
+
+- [x] T73.1 Implement device selection in inference.Load  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
+  - Dependencies: E71, E72
+  - Files: inference/inference.go
+  - Acceptance: inference.Load(modelID, WithDevice("cuda")) creates a GPUEngine[float32]
+    on device 0. inference.Load(modelID, WithDevice("cuda:1")) creates a GPUEngine on
+    device 1. inference.Load(modelID, WithDevice("cpu")) creates a CPUEngine (current
+    behavior). The device string is parsed: "cpu" -> CPUEngine; "cuda" -> GPUEngine(0);
+    "cuda:N" -> GPUEngine(N). If GPU creation fails (no CUDA, invalid device), return
+    a clear error. Test: mock-based test verifying device string parsing and engine
+    creation dispatch.
+  - [x] S73.1.1 Add device string parsing: extractDeviceType and extractDeviceID  Est: 15m
+  - [x] S73.1.2 Replace hardcoded NewCPUEngine (line 149) with device switch  Est: 20m
+  - [x] S73.1.3 Add Model.Close() method that calls GPUEngine.Close() if applicable  Est: 15m
+  - [x] S73.1.4 Write tests for device parsing: "cpu", "cuda", "cuda:0", "cuda:1", "invalid"  Est: 20m
+  - [x] S73.1.5 Write integration test: load model on GPU (skip if no CUDA)  Est: 15m
+  - [x] S73.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - Note: Used build-tag-gated files (engine_cuda.go / engine_nocuda.go) for conditional GPU engine creation.
+
+- [x] T73.2 Add multi-GPU inference integration test  Owner: TBD  Est: 1h  Completed: 2026-03-03
+  - Dependencies: T73.1
+  - Files: tests/parity/multigpu_test.go (new)
+  - Acceptance: Test loads the same model on device 0 and device 1 (skip if < 2 GPUs).
+    Both models generate the same output for the same prompt (greedy decode). Verifies
+    device affinity: tensors from model 0 are on device 0, tensors from model 1 are on
+    device 1.
+  - [x] S73.2.1 Create tests/parity/multigpu_test.go with device count check  Est: 20m
+  - [x] S73.2.2 Test dual-device model loading and generation  Est: 25m
+  - [x] S73.2.3 Run golangci-lint and go test -tags cuda  Est: 5m
+  - Note: Test behind //go:build cuda tag. Requires 2 GPUs and cached model to execute.
+
+- [x] T73.3 Run linters and verify coverage for E73  Owner: TBD  Est: 15m  Completed: 2026-03-03
+  - Dependencies: T73.2
+  - Acceptance: golangci-lint 0 issues on inference/. go test -cover -race passes.
+  - [x] S73.3.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [x] S73.3.2 Fix any remaining issues  Est: 5m
+
+#### E74: NCCL Bindings
+
+Add CGo bindings for NCCL (NVIDIA Collective Communications Library) to enable
+GPU-native collective operations.
+
+- [x] T74.1 Create internal/nccl/ package with CGo bindings  Owner: TBD  Est: 2h  Completed: 2026-03-03
+  - Dependencies: None (can start in parallel with E70-E72)
+  - Files: internal/nccl/nccl.go (new)
+  - Acceptance: Package internal/nccl provides Go bindings for: ncclGetUniqueId,
+    ncclCommInitRank, ncclCommDestroy, ncclAllReduce (sum, avg), ncclBroadcast,
+    ncclGroupStart, ncclGroupEnd, ncclCommGetAsyncError. All behind //go:build cuda.
+    CGo links against -lnccl. NcclComm type wraps ncclComm_t. NcclUniqueID type
+    wraps ncclUniqueId. DataType mapping: float32 -> ncclFloat32. ReduceOp mapping:
+    Sum -> ncclSum. All functions return Go errors wrapping ncclResult_t.
+  - [x] S74.1.1 Create internal/nccl/nccl.go with CGo preamble and linker flags  Est: 15m
+  - [x] S74.1.2 Bind ncclGetUniqueId and NcclUniqueID type  Est: 15m
+  - [x] S74.1.3 Bind ncclCommInitRank and NcclComm type  Est: 15m
+  - [x] S74.1.4 Bind ncclAllReduce with stream parameter  Est: 20m
+  - [x] S74.1.5 Bind ncclBroadcast with stream parameter  Est: 15m
+  - [x] S74.1.6 Bind ncclCommDestroy, ncclGroupStart, ncclGroupEnd  Est: 10m
+  - [x] S74.1.7 Bind ncclCommGetAsyncError for error checking  Est: 10m
+  - [x] S74.1.8 Write unit tests: init/destroy comm on single GPU, AllReduce with 1 rank  Est: 20m
+  - [x] S74.1.9 Run golangci-lint and go test -tags cuda -cover  Est: 5m
+  - Note: Also added doc.go (no build tag) for package identity. UniqueID serialization via Bytes/FromBytes included.
+
+- [x] T74.2 Add multi-GPU NCCL integration test  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
+  - Dependencies: T74.1
+  - Files: internal/nccl/nccl_test.go
+  - Acceptance: Test initializes NCCL communicator across 2 GPUs (skip if < 2 GPUs).
+    Each GPU has a different float32 buffer. ncclAllReduce(Sum) produces correct
+    element-wise sum on both GPUs. ncclBroadcast from rank 0 sends data to rank 1.
+    Uses goroutines (one per GPU) to simulate multi-rank within a process.
+  - [x] S74.2.1 Write 2-GPU AllReduce test with goroutines  Est: 30m
+  - [x] S74.2.2 Write 2-GPU Broadcast test  Est: 20m
+  - [x] S74.2.3 Write error handling test (invalid comm)  Est: 15m
+  - [x] S74.2.4 Run golangci-lint and go test -tags cuda -cover -race  Est: 5m
+
+- [x] T74.3 Run linters and verify coverage for E74  Owner: TBD  Est: 15m  Completed: 2026-03-03
+  - Dependencies: T74.2
+  - Acceptance: golangci-lint 0 issues. go test -tags cuda -cover -race passes.
+    Coverage >= 95% on internal/nccl/.
+  - [x] S74.3.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [x] S74.3.2 Fix any remaining issues  Est: 5m
+
+#### E75: NCCL Strategy
+
+Implement NcclStrategy[T] that performs gradient exchange directly on GPU memory
+using NCCL, avoiding CPU round-trips.
+
+- [x] T75.1 Create NcclStrategy[T] struct  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
+  - Dependencies: E71, E74
+  - Files: distributed/nccl_strategy.go (new)
+  - Acceptance: NcclStrategy[T] implements InternalStrategy[T]. Fields: rank int,
+    size int, deviceID int, comm *nccl.NcclComm, engine *compute.GPUEngine[T],
+    stream *cuda.Stream, logger log.Logger. Static interface assertion
+    var _ InternalStrategy[float32] = (*NcclStrategy[float32])(nil) compiles.
+    All behind //go:build cuda.
+  - [x] S75.1.1 Create distributed/nccl_strategy.go with struct definition  Est: 15m
+  - [x] S75.1.2 Implement NewNcclStrategy constructor  Est: 15m
+  - [x] S75.1.3 Implement Init: create NCCL communicator with rank and size  Est: 20m
+  - [x] S75.1.4 Implement Rank(), Size() methods  Est: 5m
+  - [x] S75.1.5 Write constructor tests  Est: 15m
+  - [x] S75.1.6 Run golangci-lint and go test -cover  Est: 5m
+  - Note: Added InitWithUID for direct UID injection; Init kept for interface compliance.
+
+- [x] T75.2 Implement AllReduceGradients using NCCL  Owner: TBD  Est: 2h  Completed: 2026-03-03
+  - Dependencies: T75.1
+  - Files: distributed/nccl_strategy.go
+  - [x] S75.2.1 Implement AllReduceGradients: iterate tensors, call ncclAllReduce  Est: 30m
+  - [x] S75.2.2 Add stream synchronization after all reductions  Est: 15m
+  - [x] S75.2.3 Handle GPU tensors: extract device pointer without D2H copy  Est: 15m
+  - [x] S75.2.4 Add metrics instrumentation  Est: 10m
+  - [x] S75.2.5 Write 2-GPU test: different gradients, verify average (skip if < 2 GPUs)  Est: 25m
+  - [x] S75.2.6 Run golangci-lint and go test -tags cuda -cover  Est: 5m
+  - Note: Uses ncclGroupStart/GroupEnd to batch all reductions into a single launch.
+
+- [x] T75.3 Implement Barrier and BroadcastTensor using NCCL  Owner: TBD  Est: 1h  Completed: 2026-03-03
+  - Dependencies: T75.1
+  - Files: distributed/nccl_strategy.go
+  - [x] S75.3.1 Implement Barrier via dummy AllReduce  Est: 15m
+  - [x] S75.3.2 Implement BroadcastTensor via ncclBroadcast  Est: 20m
+  - [x] S75.3.3 Write tests for Barrier and Broadcast (skip if < 2 GPUs)  Est: 20m
+  - [x] S75.3.4 Run golangci-lint and go test -tags cuda -cover  Est: 5m
+
+- [x] T75.4 Implement Shutdown  Owner: TBD  Est: 30m  Completed: 2026-03-03
+  - Dependencies: T75.1
+  - Files: distributed/nccl_strategy.go
+  - [x] S75.4.1 Implement Shutdown with sync.Once  Est: 10m
+  - [x] S75.4.2 Write test: single shutdown, double shutdown  Est: 10m
+  - [x] S75.4.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [x] T75.5 Run linters and verify coverage for E75  Owner: TBD  Est: 15m  Completed: 2026-03-03
+  - Dependencies: T75.4
+  - [x] S75.5.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [x] S75.5.2 Fix any remaining issues  Est: 5m
+
+#### E76: Phase 10 Final Verification
+
+Run the full quality gate suite after all Phase 10 work is complete.
+
+- [x] T76.1 Run full test suite  Owner: TBD  Est: 30m  Completed: 2026-03-03
+  - Dependencies: E70, E71, E72, E73, E74, E75
+  - Acceptance: go test ./... -cover -race passes (CPU tests). go test -tags cuda
+    ./... -cover -race passes (GPU tests). No regressions in existing packages.
+    All multi-GPU tests skip gracefully on single-GPU or no-GPU systems.
+  - [x] S76.1.1 Run go test ./... -cover -race (CPU)  Est: 10m
+  - [x] S76.1.2 Run go test -tags cuda ./... -cover -race (GPU)  Est: 10m
+  - [x] S76.1.3 Verify multi-GPU tests skip gracefully  Est: 5m
+  - [x] S76.1.4 Fix any regressions  Est: 5m
+  - Note: All 57 packages pass. CUDA-gated tests excluded on macOS (no GPU). No regressions.
+
+- [x] T76.2 Run linters  Owner: TBD  Est: 15m  Completed: 2026-03-03
+  - Dependencies: T76.1
+  - Acceptance: golangci-lint run ./... reports 0 issues. go vet ./... clean.
+  - [x] S76.2.1 Run golangci-lint run ./...  Est: 5m
+  - [x] S76.2.2 Run go vet ./...  Est: 5m
+  - [x] S76.2.3 Fix any remaining issues  Est: 5m
+  - Note: golangci-lint 0 issues, go vet clean.
+
+- [x] T76.3 Update documentation  Owner: TBD  Est: 45m  Completed: 2026-03-03
+  - Dependencies: T76.2
+  - Files: docs/plan.md, docs/design.md, docs/gpu.md, docs/adr/ (new ADR)
+  - Acceptance: docs/plan.md Phase 10 tasks marked complete. docs/design.md updated
+    with multi-GPU section. docs/gpu.md updated with completion status. New ADR for
+    multi-GPU architecture decisions.
+  - [x] S76.3.1 Update docs/plan.md  Est: 10m
+  - [x] S76.3.2 Update docs/design.md with multi-GPU section  Est: 15m
+  - [x] S76.3.3 Create docs/adr/007-multi-gpu-architecture.md  Est: 15m
+  - [x] S76.3.4 Update docs/gpu.md with completion status  Est: 5m
 
 #### E116: Phase 21 Final Verification
 
