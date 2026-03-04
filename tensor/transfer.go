@@ -5,7 +5,7 @@ package tensor
 import (
 	"fmt"
 
-	"github.com/zerfoo/zerfoo/internal/cuda"
+	"github.com/zerfoo/zerfoo/internal/gpuapi"
 )
 
 // ToGPU creates a new tensor with GPUStorage on device 0 containing the same
@@ -30,8 +30,9 @@ func ToGPUDevice[T Numeric](t *TensorNumeric[T], deviceID int) (*TensorNumeric[T
 	// Source is already on a GPU.
 	if gs, ok := t.GetStorage().(*GPUStorage[T]); ok {
 		srcDev := gs.DeviceID()
+		rt := gs.runtime
 
-		if err := cuda.SetDevice(deviceID); err != nil {
+		if err := rt.SetDevice(deviceID); err != nil {
 			return nil, fmt.Errorf("ToGPUDevice: SetDevice(%d): %w", deviceID, err)
 		}
 
@@ -42,13 +43,13 @@ func ToGPUDevice[T Numeric](t *TensorNumeric[T], deviceID int) (*TensorNumeric[T
 
 		if srcDev == deviceID {
 			// Same device: use D2D copy.
-			if err := cuda.Memcpy(dst.Ptr(), gs.Ptr(), gs.byteSize, cuda.MemcpyDeviceToDevice); err != nil {
+			if err := rt.Memcpy(dst.Ptr(), gs.Ptr(), gs.byteSize, gpuapi.MemcpyDeviceToDevice); err != nil {
 				_ = dst.Free()
 				return nil, fmt.Errorf("ToGPUDevice: D2D copy: %w", err)
 			}
 		} else {
 			// Cross-device: peer-to-peer copy.
-			if err := cuda.MemcpyPeer(dst.Ptr(), deviceID, gs.Ptr(), srcDev, gs.byteSize); err != nil {
+			if err := rt.MemcpyPeer(dst.Ptr(), deviceID, gs.Ptr(), srcDev, gs.byteSize); err != nil {
 				_ = dst.Free()
 				return nil, fmt.Errorf("ToGPUDevice: peer copy %d->%d: %w", srcDev, deviceID, err)
 			}
