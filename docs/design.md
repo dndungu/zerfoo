@@ -786,6 +786,9 @@ Documented exceptions (unreachable `tensor.New` error paths):
 - Integration tests for cross-package workflows.
 - Numerical gradient checking via finite differences.
 - MockEngine for unit testing layers in isolation.
+- Model parity on DGX Spark: 8 PASS (Llama3, Qwen25, FlashAttentionGQA),
+  13 SKIP (no ZMF: Mistral, Phi4, Gemma3, DeepSeek, SigLIP; 1 device: MultiGPU).
+  10 ONNX compatibility fixes applied during Phase 21. See [ADR-018](adr/018-model-parity-testing.md).
 
 ### 7.3 Excluded from Coverage Target
 
@@ -1093,6 +1096,7 @@ ADR files in `docs/adr/`.
 | [015](adr/015-cutlass-quantized-gemm.md) | CUTLASS Quantized GEMM | 18 | INT8/INT4 CUDA kernels, right-multiply variant, MatMulNBits GPU dispatch |
 | [016](adr/016-tensorrt-dynamic-shapes.md) | TensorRT Dynamic Shapes | 19 | Optimization profiles, min/opt/max dims, SetInputShape, dynamic cache keys |
 | [017](adr/017-dgx-spark-hardware-validation.md) | DGX Spark Hardware Validation | 20 | ARM64 build fixes, sm_121 BLOCK_SIZE=32, TRT 10 API, benchmark results |
+| [018](adr/018-model-parity-testing.md) | Model Parity Testing | 21 | 10 ONNX fixes, 8 PASS (Llama3+Qwen25), 13 SKIP, parity automation script |
 
 ---
 
