@@ -1,30 +1,15 @@
-//go:build cuda
+//go:build cuda || rocm
 
 package tensor
 
 import (
 	"fmt"
 	"log"
-	"sync"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/device"
 	"github.com/zerfoo/zerfoo/internal/gpuapi"
 )
-
-// defaultRuntime is lazily initialized on first use. It provides backward
-// compatibility for callers that do not supply a runtime explicitly.
-var (
-	defaultRuntime     gpuapi.Runtime
-	defaultRuntimeOnce sync.Once
-)
-
-func getDefaultRuntime() gpuapi.Runtime {
-	defaultRuntimeOnce.Do(func() {
-		defaultRuntime = gpuapi.NewCUDARuntime()
-	})
-	return defaultRuntime
-}
 
 // GPUStorage is a GPU device-backed Storage implementation.
 // Slice() copies data from the GPU to a new CPU slice (not zero-copy).
