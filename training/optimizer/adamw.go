@@ -167,8 +167,13 @@ func (a *AdamW[T]) Step(ctx context.Context, params []*graph.Parameter[T]) error
 			return err
 		}
 
-		// Clear gradient for next step
-		param.ClearGradient()
+		// Clear gradient for next step.
+		// Use engine.Fill instead of param.ClearGradient() because the latter
+		// modifies a D2H copy that is never written back to GPU storage.
+		var zero T
+		if err := a.engine.Fill(ctx, param.Gradient, zero); err != nil {
+			param.ClearGradient() // Fallback to CPU path.
+		}
 	}
 
 	return nil
