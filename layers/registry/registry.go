@@ -50,6 +50,19 @@ func RegisterAll() {
 	model.RegisterLayer("MoEGate", core.BuildMoEGate[float32])
 	model.RegisterLayer("MixtureOfExperts", core.BuildMixtureOfExperts[float32])
 	model.RegisterLayer("FFN", core.BuildFFN[float32])
+	model.RegisterLayer("Pow", core.BuildPow[float32])
+	model.RegisterLayer("Div", core.BuildDiv[float32])
+	model.RegisterLayer("Sqrt", core.BuildSqrt[float32])
+	model.RegisterLayer("Neg", core.BuildNeg[float32])
+	model.RegisterLayer("ReduceMean", core.BuildReduceMean[float32])
+	model.RegisterLayer("Equal", core.BuildEqual[float32])
+	model.RegisterLayer("Greater", core.BuildGreater[float32])
+	model.RegisterLayer("Where", core.BuildWhere[float32])
+	model.RegisterLayer("Expand", core.BuildExpand[float32])
+	model.RegisterLayer("Range", core.BuildRange[float32])
+	model.RegisterLayer("ConstantOfShape", core.BuildConstantOfShape[float32])
+	model.RegisterLayer("ScatterND", core.BuildScatterND[float32])
+	model.RegisterLayer("Trilu", core.BuildTrilu[float32])
 
 	// Embeddings
 
