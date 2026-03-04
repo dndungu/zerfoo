@@ -558,14 +558,35 @@ Integration: `device/rocm_device.go` auto-registers AMD GPUs via init().
 `layers/attention/flash_rocm.go` dispatches fused attention on AMD GPUs.
 See [ADR-012](adr/012-amd-rocm-backend.md) for details.
 
-### 4.15 Parity Tolerances
+### 4.15 OpenCL Backend
+
+OpenCLEngine mirrors GPUEngine's architecture using OpenCL/CLBlast adapters.
+All 35 Engine[T] methods delegate to CPUEngine; the GRAL infrastructure is wired
+for GPU acceleration when OpenCL hardware is available.
+
+```
+internal/opencl/runtime.go:                    -lOpenCL
+internal/opencl/kernels/kernels.go:            -lOpenCL (embeds elementwise.cl)
+internal/clblast/clblast.go:                   -lclblast -lOpenCL
+internal/gpuapi/opencl_{runtime,blas,dnn,kernels,mempool}.go
+```
+
+No DNN library: OpenCLDNN returns ErrNotSupported for all operations; the
+compute engine falls back to CPU. Kernels are compiled from .cl source at
+runtime via `clCreateProgramWithSource`.
+
+Integration: `device/opencl_device.go` auto-registers OpenCL GPUs via init().
+`inference/engine_opencl.go` routes "opencl" / "opencl:N" to OpenCLEngine.
+See [ADR-013](adr/013-opencl-backend.md) for details.
+
+### 4.16 Parity Tolerances
 
 - MatMul: 1e-5 relative error
 - Element-wise ops: 1e-6 relative error
 - Reductions (Sum, Mean): 1e-5 relative error
 - Flash attention: 1e-3 absolute error (online softmax reordering)
 
-### 4.16 Compatible Hardware
+### 4.17 Compatible Hardware
 
 | GPU | Arch | CUDA_ARCH | Memory | Platform |
 |-----|------|-----------|--------|----------|
@@ -1051,3 +1072,4 @@ ADR files in `docs/adr/`.
 | [010](adr/010-cutlass-flash-attention.md) | CUTLASS Flash Attention | 13 | Tiled flash attention kernel, CUTLASS templates, causal mask, build-tag-gated dispatch |
 | [011](adr/011-gpu-runtime-abstraction-layer.md) | GPU Runtime Abstraction Layer | 14 | GRAL interfaces decouple compute/tensor from vendor SDKs, CUDA adapters, operation-level DNN |
 | [012](adr/012-amd-rocm-backend.md) | AMD ROCm Backend | 15 | HIP runtime, rocBLAS, MIOpen adapters, HIP kernels, device registration, inference routing |
+| [013](adr/013-opencl-backend.md) | OpenCL Backend | 16 | OpenCL runtime, CLBlast, runtime kernel compilation, DNN stub, cl_mem memory pool |
