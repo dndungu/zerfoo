@@ -68,6 +68,10 @@ func RegisterAll() {
 	model.RegisterLayer("Max", core.BuildMax[float32])
 	model.RegisterLayer("LessOrEqual", core.BuildLessOrEqual[float32])
 	model.RegisterLayer("Or", core.BuildOr[float32])
+	model.RegisterLayer("Squeeze", core.BuildSqueeze[float32])
+	model.RegisterLayer("Tile", core.BuildTile[float32])
+	model.RegisterLayer("Mod", core.BuildMod[float32])
+	model.RegisterLayer("Gemm", core.BuildGemm[float32])
 
 	// Embeddings
 
