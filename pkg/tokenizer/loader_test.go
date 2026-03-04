@@ -123,6 +123,43 @@ func TestLoadFromJSON_Normalizer(t *testing.T) {
 	}
 }
 
+func TestLoadFromJSON_ArrayMerges(t *testing.T) {
+	// Gemma 3 style: merges as [["a","b"], …] instead of ["a b", …].
+	fixture := `{
+  "model": {
+    "type": "BPE",
+    "vocab": {"<unk>": 0, "<s>": 1, "</s>": 2, "a": 3, "b": 4, "ab": 5},
+    "merges": [["a", "b"]]
+  },
+  "added_tokens": [
+    {"id": 0, "content": "<unk>", "special": true},
+    {"id": 1, "content": "<s>", "special": true},
+    {"id": 2, "content": "</s>", "special": true}
+  ]
+}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, err := LoadFromJSON(path)
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+	if got := tok.VocabSize(); got != 6 {
+		t.Errorf("VocabSize() = %d, want 6", got)
+	}
+
+	ids, err := tok.Encode("ab")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 5 {
+		t.Errorf("Encode(\"ab\") = %v, want [5]", ids)
+	}
+}
+
 func TestLoadFromJSON_InvalidModel(t *testing.T) {
 	fixture := `{
   "model": {"type": "WordPiece", "vocab": {}, "merges": []},
