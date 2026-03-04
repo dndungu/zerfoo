@@ -118,6 +118,27 @@ const (
 	ConvFwdAlgoWinograd            ConvFwdAlgo = C.CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD
 )
 
+// ConvBwdDataAlgo maps to cudnnConvolutionBwdDataAlgo_t.
+type ConvBwdDataAlgo int
+
+const (
+	ConvBwdDataAlgo0       ConvBwdDataAlgo = C.CUDNN_CONVOLUTION_BWD_DATA_ALGO_0
+	ConvBwdDataAlgo1       ConvBwdDataAlgo = C.CUDNN_CONVOLUTION_BWD_DATA_ALGO_1
+	ConvBwdDataAlgoFFT     ConvBwdDataAlgo = C.CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT
+	ConvBwdDataAlgoWinograd ConvBwdDataAlgo = C.CUDNN_CONVOLUTION_BWD_DATA_ALGO_WINOGRAD
+)
+
+// ConvBwdFilterAlgo maps to cudnnConvolutionBwdFilterAlgo_t.
+type ConvBwdFilterAlgo int
+
+const (
+	ConvBwdFilterAlgo0       ConvBwdFilterAlgo = C.CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0
+	ConvBwdFilterAlgo1       ConvBwdFilterAlgo = C.CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1
+	ConvBwdFilterAlgoFFT     ConvBwdFilterAlgo = C.CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT
+	ConvBwdFilterAlgo3       ConvBwdFilterAlgo = C.CUDNN_CONVOLUTION_BWD_FILTER_ALGO_3
+	ConvBwdFilterAlgoWinograd ConvBwdFilterAlgo = C.CUDNN_CONVOLUTION_BWD_FILTER_ALGO_WINOGRAD
+)
+
 // --- Handle ---
 
 // Handle wraps a cudnnHandle_t. Create one per GPUEngine.
@@ -519,6 +540,248 @@ func (h *Handle) AddTensor(
 			yDesc.d, y,
 		),
 		"cudnnAddTensor",
+	)
+}
+
+// --- Backward Operations ---
+
+// ConvolutionBackwardData computes the gradient of the input for 2D convolution.
+func (h *Handle) ConvolutionBackwardData(
+	alpha float32,
+	wDesc *FilterDescriptor, w unsafe.Pointer,
+	dyDesc *TensorDescriptor, dy unsafe.Pointer,
+	convDesc *ConvolutionDescriptor,
+	algo ConvBwdDataAlgo,
+	workspace unsafe.Pointer, workspaceSize int,
+	beta float32,
+	dxDesc *TensorDescriptor, dx unsafe.Pointer,
+) error {
+	a := C.float(alpha)
+	b := C.float(beta)
+	return statusError(
+		C.cudnnConvolutionBackwardData(
+			h.h,
+			unsafe.Pointer(&a),
+			wDesc.d, w,
+			dyDesc.d, dy,
+			convDesc.d,
+			C.cudnnConvolutionBwdDataAlgo_t(algo),
+			workspace, C.size_t(workspaceSize),
+			unsafe.Pointer(&b),
+			dxDesc.d, dx,
+		),
+		"cudnnConvolutionBackwardData",
+	)
+}
+
+// GetConvolutionBackwardDataWorkspaceSize returns the workspace size in bytes
+// required for the given backward-data algorithm.
+func (h *Handle) GetConvolutionBackwardDataWorkspaceSize(
+	wDesc *FilterDescriptor,
+	dyDesc *TensorDescriptor,
+	convDesc *ConvolutionDescriptor,
+	dxDesc *TensorDescriptor,
+	algo ConvBwdDataAlgo,
+) (int, error) {
+	var size C.size_t
+	if err := statusError(
+		C.cudnnGetConvolutionBackwardDataWorkspaceSize(
+			h.h,
+			wDesc.d,
+			dyDesc.d,
+			convDesc.d,
+			dxDesc.d,
+			C.cudnnConvolutionBwdDataAlgo_t(algo),
+			&size,
+		),
+		"cudnnGetConvolutionBackwardDataWorkspaceSize",
+	); err != nil {
+		return 0, err
+	}
+	return int(size), nil
+}
+
+// ConvolutionBackwardFilter computes the gradient of the filter for 2D convolution.
+func (h *Handle) ConvolutionBackwardFilter(
+	alpha float32,
+	xDesc *TensorDescriptor, x unsafe.Pointer,
+	dyDesc *TensorDescriptor, dy unsafe.Pointer,
+	convDesc *ConvolutionDescriptor,
+	algo ConvBwdFilterAlgo,
+	workspace unsafe.Pointer, workspaceSize int,
+	beta float32,
+	dwDesc *FilterDescriptor, dw unsafe.Pointer,
+) error {
+	a := C.float(alpha)
+	b := C.float(beta)
+	return statusError(
+		C.cudnnConvolutionBackwardFilter(
+			h.h,
+			unsafe.Pointer(&a),
+			xDesc.d, x,
+			dyDesc.d, dy,
+			convDesc.d,
+			C.cudnnConvolutionBwdFilterAlgo_t(algo),
+			workspace, C.size_t(workspaceSize),
+			unsafe.Pointer(&b),
+			dwDesc.d, dw,
+		),
+		"cudnnConvolutionBackwardFilter",
+	)
+}
+
+// GetConvolutionBackwardFilterWorkspaceSize returns the workspace size in bytes
+// required for the given backward-filter algorithm.
+func (h *Handle) GetConvolutionBackwardFilterWorkspaceSize(
+	xDesc *TensorDescriptor,
+	dyDesc *TensorDescriptor,
+	convDesc *ConvolutionDescriptor,
+	dwDesc *FilterDescriptor,
+	algo ConvBwdFilterAlgo,
+) (int, error) {
+	var size C.size_t
+	if err := statusError(
+		C.cudnnGetConvolutionBackwardFilterWorkspaceSize(
+			h.h,
+			xDesc.d,
+			dyDesc.d,
+			convDesc.d,
+			dwDesc.d,
+			C.cudnnConvolutionBwdFilterAlgo_t(algo),
+			&size,
+		),
+		"cudnnGetConvolutionBackwardFilterWorkspaceSize",
+	); err != nil {
+		return 0, err
+	}
+	return int(size), nil
+}
+
+// BatchNormalizationForwardTraining performs batch normalization in training mode,
+// computing batch statistics and updating running mean/variance.
+func (h *Handle) BatchNormalizationForwardTraining(
+	mode BatchNormMode,
+	alpha, beta float32,
+	xDesc *TensorDescriptor, x unsafe.Pointer,
+	yDesc *TensorDescriptor, y unsafe.Pointer,
+	bnScaleBiasMeanVarDesc *TensorDescriptor,
+	bnScale, bnBias unsafe.Pointer,
+	expAvgFactor float64,
+	runningMean, runningVariance unsafe.Pointer,
+	epsilon float64,
+	saveMean, saveInvVariance unsafe.Pointer,
+) error {
+	a := C.float(alpha)
+	b := C.float(beta)
+	return statusError(
+		C.cudnnBatchNormalizationForwardTraining(
+			h.h,
+			C.cudnnBatchNormMode_t(mode),
+			unsafe.Pointer(&a),
+			unsafe.Pointer(&b),
+			xDesc.d, x,
+			yDesc.d, y,
+			bnScaleBiasMeanVarDesc.d,
+			bnScale, bnBias,
+			C.double(expAvgFactor),
+			runningMean, runningVariance,
+			C.double(epsilon),
+			saveMean, saveInvVariance,
+		),
+		"cudnnBatchNormalizationForwardTraining",
+	)
+}
+
+// BatchNormalizationBackward computes gradients for batch normalization.
+func (h *Handle) BatchNormalizationBackward(
+	mode BatchNormMode,
+	alphaDataDiff, betaDataDiff float32,
+	alphaParamDiff, betaParamDiff float32,
+	xDesc *TensorDescriptor, x unsafe.Pointer,
+	dyDesc *TensorDescriptor, dy unsafe.Pointer,
+	dxDesc *TensorDescriptor, dx unsafe.Pointer,
+	bnScaleBiasDiffDesc *TensorDescriptor,
+	bnScale unsafe.Pointer,
+	dBnScale, dBnBias unsafe.Pointer,
+	epsilon float64,
+	saveMean, saveInvVariance unsafe.Pointer,
+) error {
+	add := C.float(alphaDataDiff)
+	bdd := C.float(betaDataDiff)
+	apd := C.float(alphaParamDiff)
+	bpd := C.float(betaParamDiff)
+	return statusError(
+		C.cudnnBatchNormalizationBackward(
+			h.h,
+			C.cudnnBatchNormMode_t(mode),
+			unsafe.Pointer(&add),
+			unsafe.Pointer(&bdd),
+			unsafe.Pointer(&apd),
+			unsafe.Pointer(&bpd),
+			xDesc.d, x,
+			dyDesc.d, dy,
+			dxDesc.d, dx,
+			bnScaleBiasDiffDesc.d,
+			bnScale,
+			dBnScale, dBnBias,
+			C.double(epsilon),
+			saveMean, saveInvVariance,
+		),
+		"cudnnBatchNormalizationBackward",
+	)
+}
+
+// ActivationBackward computes the gradient of an activation function.
+func (h *Handle) ActivationBackward(
+	actDesc *ActivationDescriptor,
+	alpha float32,
+	yDesc *TensorDescriptor, y unsafe.Pointer,
+	dyDesc *TensorDescriptor, dy unsafe.Pointer,
+	xDesc *TensorDescriptor, x unsafe.Pointer,
+	beta float32,
+	dxDesc *TensorDescriptor, dx unsafe.Pointer,
+) error {
+	a := C.float(alpha)
+	b := C.float(beta)
+	return statusError(
+		C.cudnnActivationBackward(
+			h.h,
+			actDesc.d,
+			unsafe.Pointer(&a),
+			yDesc.d, y,
+			dyDesc.d, dy,
+			xDesc.d, x,
+			unsafe.Pointer(&b),
+			dxDesc.d, dx,
+		),
+		"cudnnActivationBackward",
+	)
+}
+
+// PoolingBackward computes the gradient of a pooling operation.
+func (h *Handle) PoolingBackward(
+	poolDesc *PoolingDescriptor,
+	alpha float32,
+	yDesc *TensorDescriptor, y unsafe.Pointer,
+	dyDesc *TensorDescriptor, dy unsafe.Pointer,
+	xDesc *TensorDescriptor, x unsafe.Pointer,
+	beta float32,
+	dxDesc *TensorDescriptor, dx unsafe.Pointer,
+) error {
+	a := C.float(alpha)
+	b := C.float(beta)
+	return statusError(
+		C.cudnnPoolingBackward(
+			h.h,
+			poolDesc.d,
+			unsafe.Pointer(&a),
+			yDesc.d, y,
+			dyDesc.d, dy,
+			xDesc.d, x,
+			unsafe.Pointer(&b),
+			dxDesc.d, dx,
+		),
+		"cudnnPoolingBackward",
 	)
 }
 
