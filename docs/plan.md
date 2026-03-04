@@ -698,67 +698,79 @@ Passwordless SSH key authentication configured from development machine.
 
 #### E110: GPU Test Validation on DGX Spark
 
-- [ ] T110.1 Run CUDA runtime and memory tests  Owner: TBD  Est: 30m
+- [x] T110.1 Run CUDA runtime and memory tests  Owner: TBD  Est: 30m  Completed: 2026 03 03
   - Dependencies: E109
   - Files tested: internal/cuda/runtime_test.go, internal/cuda/mempool_test.go
   - Acceptance: All 15 tests pass on sm_121 hardware.
-  - [ ] S110.1.1 Run `go test -tags cuda ./internal/cuda/ -v`  Est: 10m
-  - [ ] S110.1.2 Fix any hardware-specific failures  Est: 15m
-  - [ ] S110.1.3 Document device properties (sm_121, memory, clock)  Est: 5m
+  - Result: 13 PASS, 2 SKIP (multi-GPU: NoCrossDeviceReuse, MultiDeviceStats).
+  - Fixed TestMemPoolStats pool reuse issue (commit 12ffacd).
+  - [x] S110.1.1 Run `go test -tags cuda ./internal/cuda/ -v`  Est: 10m
+  - [x] S110.1.2 Fix any hardware-specific failures  Est: 15m
+  - [x] S110.1.3 Document device properties (sm_121, memory, clock)  Est: 5m
 
-- [ ] T110.2 Run cuBLAS and cuDNN tests  Owner: TBD  Est: 30m
+- [x] T110.2 Run cuBLAS and cuDNN tests  Owner: TBD  Est: 30m  Completed: 2026 03 03
   - Dependencies: E109
   - Files tested: internal/cublas/cublas_test.go (3 tests),
     internal/cudnn/cudnn_test.go (10+ tests)
   - Acceptance: All cuBLAS SGEMM tests and cuDNN forward/backward tests pass.
-  - [ ] S110.2.1 Run `go test -tags cuda ./internal/cublas/ -v`  Est: 10m
-  - [ ] S110.2.2 Run `go test -tags cuda ./internal/cudnn/ -v`  Est: 10m
-  - [ ] S110.2.3 Fix any failures  Est: 10m
+  - Result: cuBLAS 3/3 PASS, cuDNN 11/11 PASS. No fixes needed.
+  - [x] S110.2.1 Run `go test -tags cuda ./internal/cublas/ -v`  Est: 10m
+  - [x] S110.2.2 Run `go test -tags cuda ./internal/cudnn/ -v`  Est: 10m
+  - [x] S110.2.3 Fix any failures  Est: 10m
 
-- [ ] T110.3 Run TensorRT tests  Owner: TBD  Est: 30m
+- [x] T110.3 Run TensorRT tests  Owner: TBD  Est: 30m  Completed: 2026 03 03
   - Dependencies: E109
   - Files tested: internal/tensorrt/tensorrt_test.go (11 tests),
     inference/tensorrt_cache_test.go (3 tests)
   - Acceptance: TRT engine build, serialization, deserialization, and inference
     all work on Blackwell. Dynamic shapes create valid optimization profiles.
-  - [ ] S110.3.1 Run `go test -tags cuda ./internal/tensorrt/ -v`  Est: 10m
-  - [ ] S110.3.2 Run `go test -tags cuda ./inference/ -v`  Est: 10m
-  - [ ] S110.3.3 Fix any failures  Est: 10m
+  - Result: 15/15 PASS. TRT 10.15.1 fully compatible with sm_121.
+  - [x] S110.3.1 Run `go test -tags cuda ./internal/tensorrt/ -v`  Est: 10m
+  - [x] S110.3.2 Run `go test -tags cuda ./inference/ -v`  Est: 10m
+  - [x] S110.3.3 Fix any failures  Est: 10m
 
-- [ ] T110.4 Run CUTLASS kernel tests  Owner: TBD  Est: 30m
+- [x] T110.4 Run CUTLASS kernel tests  Owner: TBD  Est: 30m  Completed: 2026 03 03
   - Dependencies: E109
   - Files tested: internal/cuda/kernels/elementwise_test.go (12 tests),
     internal/cuda/kernels/flash_attention_test.go (2 tests)
   - Acceptance: Elementwise kernels and flash attention pass on sm_121.
-  - Risk: CUTLASS >= 4.2 required for sm_121. If CUTLASS headers not available,
-    skip cutlass-tagged tests and document.
-  - [ ] S110.4.1 Install CUTLASS >= 4.2 headers on DGX Spark  Est: 10m
-  - [ ] S110.4.2 Build libkernels.a with CUDA_ARCH=sm_121  Est: 5m
-  - [ ] S110.4.3 Run `go test -tags cuda,cutlass ./internal/cuda/kernels/ -v`  Est: 10m
-  - [ ] S110.4.4 Fix any failures  Est: 10m
+  - Result: 12/12 PASS. CUTLASS 4.2 headers + BLOCK_SIZE=32 flash attention work
+    on sm_121. CUTLASS installed to ~/cutlass from github.com/NVIDIA/cutlass v4.2.
+  - [x] S110.4.1 Install CUTLASS >= 4.2 headers on DGX Spark  Est: 10m
+  - [x] S110.4.2 Build libkernels.a with CUDA_ARCH=sm_121  Est: 5m
+  - [x] S110.4.3 Run `go test -tags cuda,cutlass ./internal/cuda/kernels/ -v`  Est: 10m
+  - [x] S110.4.4 Fix any failures  Est: 10m
 
-- [ ] T110.5 Run GPU Engine and storage tests  Owner: TBD  Est: 45m
+- [x] T110.5 Run GPU Engine and storage tests  Owner: TBD  Est: 45m  Completed: 2026 03 03
   - Dependencies: T110.1, T110.2
   - Files tested: compute/gpu_engine_test.go (21 tests),
     compute/gpu_integration_test.go (15+ tests),
     tensor/gpu_storage_test.go (17 tests), tensor/transfer_test.go
   - Acceptance: All GPU Engine parity tests (MatMul, Softmax, elementwise,
     reduction, training step) pass within documented tolerances.
-  - [ ] S110.5.1 Run `go test -tags cuda ./compute/ -v -run GPU`  Est: 15m
-  - [ ] S110.5.2 Run `go test -tags cuda ./tensor/ -v -run GPU`  Est: 10m
-  - [ ] S110.5.3 Fix any parity failures (adjust tolerances if needed for Blackwell)  Est: 15m
-  - [ ] S110.5.4 Run `go test -tags cuda,cutlass ./tests/parity/ -v`  Est: 10m
+  - Result: All PASS. Fixed import cycle (graph->compute, commit 6341493),
+    renamed Float32Arithmetic to Float32Ops (commit 728799f).
+  - [x] S110.5.1 Run `go test -tags cuda ./compute/ -v -run GPU`  Est: 15m
+  - [x] S110.5.2 Run `go test -tags cuda ./tensor/ -v -run GPU`  Est: 10m
+  - [x] S110.5.3 Fix any parity failures (adjust tolerances if needed for Blackwell)  Est: 15m
+  - [x] S110.5.4 Run `go test -tags cuda,cutlass ./tests/parity/ -v`  Est: 10m
 
-- [ ] T110.6 Run full GPU test suite  Owner: TBD  Est: 30m
+- [x] T110.6 Run full GPU test suite  Owner: TBD  Est: 30m  Completed: 2026 03 03
   - Dependencies: T110.1-T110.5
-  - Steps: `go test -tags cuda,cutlass ./... -v -count=1`
+  - Steps: `go test -tags cuda,cutlass ./... -count=1`
   - Acceptance: All GPU tests pass. Document any skipped tests (e.g., multi-GPU
     tests that require >= 2 devices).
-  - Note: Multi-GPU tests (multigpu_test.go, nccl_strategy_test.go, nccl_test.go)
-    will skip because DGX Spark has a single GPU. This is expected.
-  - [ ] S110.6.1 Run full test suite with cuda,cutlass tags  Est: 15m
-  - [ ] S110.6.2 Capture and save test output  Est: 5m
-  - [ ] S110.6.3 Document skipped tests and reasons  Est: 10m
+  - Result: 66 packages pass, 0 failures. Fixed NCCL test format string
+    (commit da2ad94). Multi-GPU tests skip as expected (single GPU device).
+  - Skipped tests (expected -- single GPU):
+    - TestMemPoolNoCrossDeviceReuse, TestMemPoolMultiDeviceStats (internal/cuda)
+    - TestTwoGPUAllReduce, TestTwoGPUBroadcast (internal/nccl)
+    - TestMultiGPU_DualDeviceInference (tests/parity)
+    - NcclStrategy tests skip due to missing 2nd GPU
+  - Model parity tests skip due to no ZMF model files on device (expected).
+  - [x] S110.6.1 Run full test suite with cuda,cutlass tags  Est: 15m
+  - [x] S110.6.2 Capture and save test output  Est: 5m
+  - [x] S110.6.3 Document skipped tests and reasons  Est: 10m
 
 #### E111: Performance Benchmarks on DGX Spark
 
