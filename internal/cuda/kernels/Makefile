@@ -2,7 +2,7 @@ NVCC ?= nvcc
 CUDA_ARCH ?= sm_75
 NVCC_FLAGS ?= -O2 -arch=$(CUDA_ARCH)
 
-SRCS = elementwise.cu
+SRCS = elementwise.cu flash_attention.cu
 OBJS = $(SRCS:.cu=.o)
 LIB  = libkernels.a
 
