@@ -58,6 +58,21 @@ type TensorNumeric[T Numeric] struct { //nolint:revive // Name stutter is intent
 // isTensor is a private method to satisfy the Tensor interface.
 func (t *TensorNumeric[T]) isTensor() {}
 
+// freeable is implemented by storage backends that hold external resources
+// (e.g. GPU device memory) that must be released explicitly.
+type freeable interface {
+	Free() error
+}
+
+// Release frees any external resources held by this tensor's storage.
+// For CPU tensors this is a no-op. For GPU tensors it frees device memory.
+// After calling Release the tensor must not be used.
+func (t *TensorNumeric[T]) Release() {
+	if f, ok := t.storage.(freeable); ok {
+		_ = f.Free()
+	}
+}
+
 // DType returns the reflect.Type of the tensor's elements.
 func (t *TensorNumeric[T]) DType() reflect.Type {
 	var zero T
