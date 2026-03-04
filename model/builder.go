@@ -272,6 +272,22 @@ func BuildFromZMF[T tensor.Numeric](
 						attr := &zmf.Attribute{Value: &zmf.Attribute_Ints{Ints: intsAttr}}
 						nodeProto.Attributes["shape"] = attr
 
+						// Rebuild the node with the extracted shape attribute.
+						updatedAttrs := convertAttributes(nodeProto.Attributes)
+						rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+						if rebuildErr == nil {
+							node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+							if nodeErr == nil {
+								instantiatedNodes[nodeProto.Name] = node
+								for _, outName := range nodeProto.Outputs {
+									if outName != "" && outName != nodeProto.Name {
+										instantiatedNodes[outName] = node
+									}
+								}
+								currentNode = node
+							}
+						}
+
 						// Static shape extracted; only data input needed.
 						actualInputNames = actualInputNames[:1]
 					} else if resolved := resolveParam(shapeInputName, params, instantiatedNodes); resolved != nil {
@@ -288,6 +304,22 @@ func BuildFromZMF[T tensor.Numeric](
 						intsAttr := &zmf.Ints{Val: shapeValues}
 						attr := &zmf.Attribute{Value: &zmf.Attribute_Ints{Ints: intsAttr}}
 						nodeProto.Attributes["shape"] = attr
+
+						// Rebuild the node with the extracted shape attribute.
+						updatedAttrs := convertAttributes(nodeProto.Attributes)
+						rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+						if rebuildErr == nil {
+							node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+							if nodeErr == nil {
+								instantiatedNodes[nodeProto.Name] = node
+								for _, outName := range nodeProto.Outputs {
+									if outName != "" && outName != nodeProto.Name {
+										instantiatedNodes[outName] = node
+									}
+								}
+								currentNode = node
+							}
+						}
 
 						actualInputNames = actualInputNames[:1]
 					}
