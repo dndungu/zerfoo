@@ -7,11 +7,11 @@ import (
 )
 
 var phi4Config = modelParityConfig{
-	Name:           "Phi-4",
+	Name:           "Phi-3",
 	ZMFEnvVar:      "PHI4_ZMF_PATH",
 	ModelDirEnvVar: "PHI4_MODEL_DIR",
-	ModelID:        "phi-4",
-	MinVocabSize:   100000, // Phi-4 vocab: 100352
+	ModelID:        "phi-3",
+	MinVocabSize:   30000, // Phi-3-mini vocab: 32064
 }
 
 func TestPhi4ForwardPass(t *testing.T) {
