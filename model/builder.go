@@ -294,6 +294,47 @@ func BuildFromZMF[T tensor.Numeric](
 					}
 					actualInputNames = actualInputNames[:1]
 				}
+			case "Slice":
+				// ONNX opset 10+: starts/ends/axes/steps come as input tensors.
+				// inputs: [data, starts, ends, axes?, steps?]
+				if len(actualInputNames) > 1 {
+					sliceKeys := []string{"starts", "ends", "axes", "steps"}
+					if nodeProto.Attributes == nil {
+						nodeProto.Attributes = make(map[string]*zmf.Attribute)
+					}
+					for j := 1; j < len(actualInputNames) && j-1 < len(sliceKeys); j++ {
+						p := resolveParam(actualInputNames[j], params, instantiatedNodes)
+						if p == nil {
+							continue
+						}
+						vals := make([]int64, p.Size())
+						for k := 0; k < p.Size(); k++ { //nolint:intrange // generic tensor access
+							v, vErr := p.At(k)
+							if vErr != nil {
+								continue
+							}
+							vals[k] = int64(v)
+						}
+						nodeProto.Attributes[sliceKeys[j-1]] = &zmf.Attribute{
+							Value: &zmf.Attribute_Ints{Ints: &zmf.Ints{Val: vals}},
+						}
+					}
+					updatedAttrs := convertAttributes(nodeProto.Attributes)
+					rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+					if rebuildErr == nil {
+						node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+						if nodeErr == nil {
+							instantiatedNodes[nodeProto.Name] = node
+							for _, outName := range nodeProto.Outputs {
+								if outName != "" && outName != nodeProto.Name {
+									instantiatedNodes[outName] = node
+								}
+							}
+							currentNode = node
+						}
+					}
+					actualInputNames = actualInputNames[:1]
+				}
 			}
 		}
 
