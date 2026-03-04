@@ -135,10 +135,6 @@ func (g *Gather[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 			idx += paramShape[0]
 		}
 		subShape := paramShape[1:]
-		if len(subShape) == 0 {
-			// Scalar result from 1D data: return as 1D [1] for Concat compatibility.
-			subShape = []int{1}
-		}
 		stride := 1
 		for _, d := range subShape {
 			stride *= d

@@ -235,6 +235,53 @@ func TestForward_WithoutWeights_Float32Indices(t *testing.T) {
 	}
 }
 
+func TestForward_ScalarGatherFrom1DData(t *testing.T) {
+	engine := newEngine()
+	g := New[float32](engine)
+	ctx := context.Background()
+
+	// 1D data (e.g. output of Shape op) with scalar index → 0D scalar result.
+	params, _ := tensor.New[float32]([]int{3}, []float32{10, 20, 30})
+	indices, _ := tensor.New[float32]([]int{}, []float32{1}) // scalar index
+
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	// Output should be 0D (scalar).
+	if len(out.Shape()) != 0 {
+		t.Errorf("output shape = %v, want [] (0D scalar)", out.Shape())
+	}
+
+	// Value should be 20 (element at index 1).
+	if out.Data()[0] != 20 {
+		t.Errorf("output value = %v, want 20", out.Data()[0])
+	}
+}
+
+func TestForward_ScalarGatherNegativeIndex(t *testing.T) {
+	engine := newEngine()
+	g := New[float32](engine)
+	ctx := context.Background()
+
+	// Negative index: -1 means last element.
+	params, _ := tensor.New[float32]([]int{4}, []float32{100, 200, 300, 400})
+	indices, _ := tensor.New[float32]([]int{}, []float32{-1})
+
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	if len(out.Shape()) != 0 {
+		t.Errorf("output shape = %v, want [] (0D scalar)", out.Shape())
+	}
+	if out.Data()[0] != 400 {
+		t.Errorf("output value = %v, want 400", out.Data()[0])
+	}
+}
+
 func TestBackward_WrongIndicesType(t *testing.T) {
 	engine := newEngine()
 	g := New[float32](engine)
