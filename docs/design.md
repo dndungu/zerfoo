@@ -404,7 +404,30 @@ operations are non-interface methods on GPUEngine in `compute/gpu_cudnn.go`:
 
 See [ADR-008](adr/008-cudnn-integration.md) for architecture decisions.
 
-### 4.10 CUDA File Layout
+### 4.10 TensorRT Integration
+
+`internal/tensorrt/` provides CGo bindings wrapping TensorRT's C++ API via a thin
+C shim in `cshim/trt_capi.h/cpp`. Pre-compiled into `libtrt_capi.a` via Makefile.
+
+The inference pipeline supports TensorRT via `WithBackend("tensorrt")`:
+
+1. **Graph conversion** (`inference/tensorrt_convert.go`): Walks the graph in
+   topological order, mapping each node to a TRT layer. Supported ops: MatMul,
+   Add/Sub/Mul/Div, ReLU/Sigmoid/Tanh, Softmax, Reshape, Transpose, ReduceSum,
+   Conv, Dense, Linear, Constant. Unsupported ops return `UnsupportedOpError`.
+
+2. **Engine caching** (`inference/tensorrt_cache.go`): SHA-256 key from
+   (modelID, precision, gpuArch). Cached at `~/.cache/zerfoo/tensorrt/`.
+   Cache hit skips the expensive TRT build step.
+
+3. **TRT pipeline** (`inference/tensorrt_pipeline.go`): `TRTInferenceEngine`
+   wraps the TRT execution context with `Forward()` and `Close()` methods.
+
+FP16 precision via `WithPrecision("fp16")` sets the `FP16` builder flag.
+
+See [ADR-009](adr/009-tensorrt-integration.md) for architecture decisions.
+
+### 4.11 CUDA File Layout
 
 ```
 compute/
@@ -431,17 +454,36 @@ internal/cuda/
 
 internal/cublas/
   cublas.go                cuBLAS + SetStream bindings (//go:build cuda)
+
+internal/cudnn/
+  doc.go                   Package identity (no build tag)
+  cudnn.go                 cuDNN CGo bindings (//go:build cuda)
+
+internal/tensorrt/
+  doc.go                   Package identity (no build tag)
+  tensorrt.go              TensorRT Go bindings (//go:build cuda)
+  Makefile                 Compiles cshim/ into libtrt_capi.a
+  cshim/
+    trt_capi.h             C shim header for TensorRT C++ API
+    trt_capi.cpp           C shim implementation
+
+inference/
+  tensorrt_convert.go      Graph-to-TRT converter (//go:build cuda)
+  tensorrt_cache.go        TRT engine caching (//go:build cuda)
+  tensorrt_pipeline.go     TRT inference engine wrapper (//go:build cuda)
 ```
 
 CGO linker flags:
 
 ```
-internal/cuda/runtime.go:     -lcudart
-internal/cublas/cublas.go:    -lcublas
-internal/cuda/kernels/*.go:   -L${SRCDIR} -lkernels -lcudart -lstdc++
+internal/cuda/runtime.go:       -lcudart
+internal/cublas/cublas.go:      -lcublas
+internal/cudnn/cudnn.go:        -lcudnn
+internal/tensorrt/tensorrt.go:  -L${SRCDIR} -ltrt_capi -lnvinfer -lstdc++
+internal/cuda/kernels/*.go:     -L${SRCDIR} -lkernels -lcudart -lstdc++
 ```
 
-### 4.10 Parity Tolerances
+### 4.12 Parity Tolerances
 
 - MatMul: 1e-5 relative error
 - Element-wise ops: 1e-6 relative error

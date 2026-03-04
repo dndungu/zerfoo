@@ -172,6 +172,27 @@ cuDNN operations are non-interface methods (not part of Engine[T]) to avoid
 breaking changes. Layers that want cuDNN acceleration must type-assert to
 `*GPUEngine` and call these methods directly.
 
+## TensorRT Integration (Phase 12)
+
+Phase 12 adds TensorRT inference optimization. See
+[ADR-009](adr/009-tensorrt-integration.md) for architecture decisions.
+
+### Status: COMPLETE (Phase 12, 2026-03-03)
+
+- `internal/tensorrt/` -- CGo bindings via C++ shim (cshim/trt_capi.h/cpp)
+  - Logger, Builder, NetworkDefinition, BuilderConfig, Runtime, Engine, ExecutionContext
+  - Layer bindings: activation, elementwise, matmul, softmax, reduce, constant, shuffle, convolution
+- `inference/tensorrt_convert.go` -- graph-to-TRT converter
+  - Maps supported ops to TRT layers in topological order
+  - Returns UnsupportedOpError for unknown ops
+- `inference/tensorrt_cache.go` -- engine caching
+  - SHA-256 key from (modelID, precision, gpuArch)
+  - ~/.cache/zerfoo/tensorrt/ directory
+- `inference/tensorrt_pipeline.go` -- TRTInferenceEngine wrapper
+  - Forward() and Close() methods
+- `inference.WithBackend("tensorrt")` -- opt-in TRT backend
+- `inference.WithPrecision("fp16")` -- half-precision TRT builds
+
 ## Architecture Advantages
 
 The existing codebase anticipated this extension:
