@@ -1,4 +1,4 @@
-//go:build !(cuda && cutlass)
+//go:build !(cuda && cutlass) && !(rocm && cutlass)
 
 package attention
 
