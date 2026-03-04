@@ -35,10 +35,10 @@ func TestBuildTranspose(t *testing.T) {
 			expectedAxes: []int{0, 2, 1},
 		},
 		{
-			name:           "Without perm attribute",
+			name:           "Without perm attribute (ONNX default: reverse axes)",
 			attributes:     map[string]interface{}{},
 			expectedAxes:   nil,
-			expectBuildErr: true,
+			expectBuildErr: false,
 		},
 	}
 
@@ -82,6 +82,11 @@ func TestTransposeForward(t *testing.T) {
 			name:          "With axes",
 			axes:          []int{0, 2, 1},
 			expectedShape: []int{2, 4, 3},
+		},
+		{
+			name:          "Nil axes (ONNX default: reverse)",
+			axes:          nil,
+			expectedShape: []int{4, 3, 2},
 		},
 	}
 

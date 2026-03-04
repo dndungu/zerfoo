@@ -124,10 +124,14 @@ func TestBuildTranspose_Errors(t *testing.T) {
 	eng := makeEngine()
 	ops := numeric.Float32Ops{}
 
-	t.Run("missing_perm", func(t *testing.T) {
-		_, err := BuildTranspose(eng, ops, "", nil, map[string]interface{}{})
-		if err == nil {
-			t.Error("expected error for missing perm")
+	t.Run("missing_perm_defaults_to_nil", func(t *testing.T) {
+		node, err := BuildTranspose(eng, ops, "", nil, map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("expected nil error for missing perm (ONNX default), got %v", err)
+		}
+		tr := node.(*Transpose[float32])
+		if tr.perm != nil {
+			t.Errorf("expected nil perm, got %v", tr.perm)
 		}
 	})
 
