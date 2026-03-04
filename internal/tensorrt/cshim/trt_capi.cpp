@@ -2,6 +2,7 @@
 
 #include "trt_capi.h"
 #include <NvInfer.h>
+#include <cstdio>
 #include <cstring>
 
 using namespace nvinfer1;
@@ -132,9 +133,8 @@ void trt_destroy_builder(trt_builder_t builder) {
 
 trt_network_t trt_create_network(trt_builder_t builder) {
     auto* b = static_cast<IBuilder*>(builder);
-    uint32_t flags = 1U << static_cast<uint32_t>(
-        NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-    INetworkDefinition* n = b->createNetworkV2(flags);
+    /* TRT 10+: explicit batch is the only mode (kEXPLICIT_BATCH=0). */
+    INetworkDefinition* n = b->createNetworkV2(0);
     return static_cast<void*>(n);
 }
 
@@ -452,5 +452,5 @@ int trt_context_set_input_shape(trt_context_t context, const char* name,
 int trt_context_set_optimization_profile(trt_context_t context,
                                          int profile_index) {
     auto* ctx = static_cast<IExecutionContext*>(context);
-    return ctx->setOptimizationProfileShared(profile_index) ? 1 : 0;
+    return ctx->setOptimizationProfileAsync(profile_index, nullptr) ? 1 : 0;
 }
