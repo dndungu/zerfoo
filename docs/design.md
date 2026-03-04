@@ -431,7 +431,12 @@ The inference pipeline supports TensorRT via `WithBackend("tensorrt")`:
 
 FP16 precision via `WithPrecision("fp16")` sets the `FP16` builder flag.
 
-See [ADR-009](adr/009-tensorrt-integration.md) for architecture decisions.
+4. **Dynamic shapes** (`DynamicShapeConfig`): Optimization profiles with
+   min/opt/max dims per input allow a single engine to handle variable batch
+   sizes and sequence lengths. `SetInputShape` is called before each enqueue.
+   Cache keys incorporate shape ranges for correctness.
+
+See [ADR-009](adr/009-tensorrt-integration.md) and [ADR-016](adr/016-tensorrt-dynamic-shapes.md) for architecture decisions.
 
 ### 4.11 CUTLASS Flash Attention
 
@@ -1086,3 +1091,4 @@ ADR files in `docs/adr/`.
 | [013](adr/013-opencl-backend.md) | OpenCL Backend | 16 | OpenCL runtime, CLBlast, runtime kernel compilation, DNN stub, cl_mem memory pool |
 | [014](adr/014-cudnn-backward-pass.md) | cuDNN Backward Pass | 17 | Backward CGo bindings, CUDA DNN adapter, GPUEngine backward methods for training |
 | [015](adr/015-cutlass-quantized-gemm.md) | CUTLASS Quantized GEMM | 18 | INT8/INT4 CUDA kernels, right-multiply variant, MatMulNBits GPU dispatch |
+| [016](adr/016-tensorrt-dynamic-shapes.md) | TensorRT Dynamic Shapes | 19 | Optimization profiles, min/opt/max dims, SetInputShape, dynamic cache keys |
