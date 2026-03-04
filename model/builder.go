@@ -258,6 +258,42 @@ func BuildFromZMF[T tensor.Numeric](
 
 					actualInputNames = actualInputNames[:1]
 				}
+			case "Unsqueeze":
+				// ONNX opset 13+: axes come as a second input tensor.
+				if len(actualInputNames) > 1 {
+					axesParam := resolveParam(actualInputNames[1], params, instantiatedNodes)
+					if axesParam != nil {
+						axesValues := make([]int64, axesParam.Size())
+						for i := 0; i < axesParam.Size(); i++ { //nolint:intrange // generic tensor access
+							val, err := axesParam.At(i)
+							if err != nil {
+								return nil, fmt.Errorf("unsqueeze axes extraction failed at %d: %w", i, err)
+							}
+							axesValues[i] = int64(val)
+						}
+						if nodeProto.Attributes == nil {
+							nodeProto.Attributes = make(map[string]*zmf.Attribute)
+						}
+						nodeProto.Attributes["axes"] = &zmf.Attribute{
+							Value: &zmf.Attribute_Ints{Ints: &zmf.Ints{Val: axesValues}},
+						}
+						updatedAttrs := convertAttributes(nodeProto.Attributes)
+						rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+						if rebuildErr == nil {
+							node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+							if nodeErr == nil {
+								instantiatedNodes[nodeProto.Name] = node
+								for _, outName := range nodeProto.Outputs {
+									if outName != "" && outName != nodeProto.Name {
+										instantiatedNodes[outName] = node
+									}
+								}
+								currentNode = node
+							}
+						}
+					}
+					actualInputNames = actualInputNames[:1]
+				}
 			}
 		}
 
@@ -433,6 +469,22 @@ func (p *parameterNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *
 }
 
 func (p *parameterNode[T]) Parameters() []*graph.Parameter[T] {
+	return nil
+}
+
+// resolveParam looks up a tensor value for an input name that is expected to be a
+// constant or parameter (e.g. Unsqueeze axes, Reshape shape). It checks the params
+// map first, then tries constant nodes in the instantiated map.
+func resolveParam[T tensor.Numeric](name string, params map[string]*graph.Parameter[T], nodes map[string]graph.Node[T]) *tensor.TensorNumeric[T] {
+	if p, ok := params[name]; ok {
+		return p.Value
+	}
+	// Try as a constant node (parameterNode).
+	if n, ok := nodes[name]; ok {
+		if pn, isPn := n.(*parameterNode[T]); isPn {
+			return pn.value
+		}
+	}
 	return nil
 }
 
