@@ -302,6 +302,7 @@ registry to reconstruct graphs from serialized specs.
 
 - CUDA Toolkit 12.x (libcudart, development headers)
 - cuBLAS library (libcublas)
+- cuDNN library (libcudnn8 or later)
 - NVIDIA GPU with Compute Capability >= 7.0 (Volta/Turing or newer)
 - GCC/G++ (for CGO linking)
 
@@ -387,11 +388,28 @@ cuBLAS operates in column-major order. To compute C = A * B in row-major:
 - Call cublasSgemm with B as first argument, A as second, swapping m and n
 - This avoids explicit transposition and works for any matrix dimensions.
 
-### 4.9 CUDA File Layout
+### 4.9 cuDNN Integration
+
+`internal/cudnn/` provides CGo bindings wrapping libcudnn behind `//go:build cuda`.
+GPUEngine gains a `cudnnHandle` field alongside `cublasHandle`. cuDNN-accelerated
+operations are non-interface methods on GPUEngine in `compute/gpu_cudnn.go`:
+
+| Operation | cuDNN Function | Notes |
+|-----------|---------------|-------|
+| Conv2dForward | cudnnConvolutionForward | IMPLICIT_GEMM algo, grouped conv via SetGroupCount |
+| BatchNormForwardInference | cudnnBatchNormalizationForwardInference | Spatial mode |
+| CudnnActivationForward | cudnnActivationForward | ReLU, Sigmoid, Tanh |
+| CudnnPoolingForward | cudnnPoolingForward | Max, AvgIncPad, AvgExcPad |
+| CudnnSoftmaxForward | cudnnSoftmaxForward | Channel-mode softmax |
+
+See [ADR-008](adr/008-cudnn-integration.md) for architecture decisions.
+
+### 4.10 CUDA File Layout
 
 ```
 compute/
-  gpu_engine.go            GPUEngine (pool, stream, cuBLAS) (//go:build cuda)
+  gpu_engine.go            GPUEngine (pool, stream, cuBLAS, cuDNN) (//go:build cuda)
+  gpu_cudnn.go             cuDNN-accelerated operations (//go:build cuda)
   gpu_kernels.go           getDevicePtr, makeGPUResult, kernel dispatch (//go:build cuda)
 
 tensor/
@@ -746,7 +764,7 @@ curl http://localhost:8081/debug/pprof/goroutine?debug=2
 1. float32 only for GPU -- other types fall back to CPU transparently.
 2. No broadcasting in GPU kernels -- broadcast cases fall back to CPU.
 3. Single GPU -- no multi-GPU or distributed GPU support.
-4. No cuDNN -- all kernels are custom CUDA.
+4. cuDNN operations (Conv2d, BatchNorm, activations, pooling, softmax) are non-interface methods on GPUEngine -- layers must call them explicitly rather than through Engine[T].
 5. No mixed precision -- full float32 throughout.
 6. Default device -- always uses cuda:0, no device selection API.
 7. Hardware validation pending -- GCP GPU quota request pending.

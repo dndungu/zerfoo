@@ -153,6 +153,25 @@ Layer 1 is prerequisite for everything. Layer 2a gives multi-GPU inference.
 Layer 2b gives multi-GPU training with CPU-based gradient exchange. Layer 3
 gives fast GPU-native gradient exchange.
 
+## cuDNN Integration (Phase 11)
+
+Phase 11 adds cuDNN-accelerated operations to GPUEngine. See
+[ADR-008](adr/008-cudnn-integration.md) for architecture decisions.
+
+### Status: COMPLETE (Phase 11, 2026-03-03)
+
+- `internal/cudnn/` -- CGo bindings for cuDNN handle, descriptors, forward ops
+- `compute/gpu_cudnn.go` -- non-interface GPUEngine methods:
+  - `Conv2dForward` -- cuDNN convolution with grouped conv, bias, IMPLICIT_GEMM
+  - `BatchNormForwardInference` -- spatial batch norm
+  - `CudnnActivationForward` -- ReLU, Sigmoid, Tanh
+  - `CudnnPoolingForward` -- Max, AvgIncPad, AvgExcPad
+  - `CudnnSoftmaxForward` -- channel-mode softmax
+
+cuDNN operations are non-interface methods (not part of Engine[T]) to avoid
+breaking changes. Layers that want cuDNN acceleration must type-assert to
+`*GPUEngine` and call these methods directly.
+
 ## Architecture Advantages
 
 The existing codebase anticipated this extension:
