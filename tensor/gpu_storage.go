@@ -5,6 +5,7 @@ package tensor
 import (
 	"fmt"
 	"log"
+	"runtime"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/device"
@@ -16,11 +17,11 @@ import (
 // Set() copies data from a CPU slice to the GPU.
 // Each GPUStorage tracks which device it resides on via deviceID.
 type GPUStorage[T Numeric] struct {
-	devicePtr unsafe.Pointer    // GPU device pointer
-	length    int               // number of elements
-	byteSize  int               // total bytes = length * sizeof(T)
-	deviceID  int               // GPU device ordinal
-	runtime   gpuapi.Runtime    // GPU runtime for memory operations
+	devicePtr unsafe.Pointer // GPU device pointer
+	length    int            // number of elements
+	byteSize  int            // total bytes = length * sizeof(T)
+	deviceID  int            // GPU device ordinal
+	runtime   gpuapi.Runtime // GPU runtime for memory operations
 }
 
 // NewGPUStorage allocates GPU device memory for the given number of elements
@@ -45,13 +46,16 @@ func NewGPUStorage[T Numeric](length int, deviceID ...int) (*GPUStorage[T], erro
 		return nil, err
 	}
 
-	return &GPUStorage[T]{
+	gs := &GPUStorage[T]{
 		devicePtr: devPtr,
 		length:    length,
 		byteSize:  byteSize,
 		deviceID:  dev,
 		runtime:   rt,
-	}, nil
+	}
+	runtime.SetFinalizer(gs, func(s *GPUStorage[T]) { _ = s.Free() })
+
+	return gs, nil
 }
 
 // NewGPUStorageFromSlice allocates GPU device memory, copies data from a CPU
@@ -77,8 +81,7 @@ func NewGPUStorageFromSlice[T Numeric](data []T, deviceID ...int) (*GPUStorage[T
 }
 
 // NewGPUStorageFromPtr wraps an existing GPU device pointer as a GPUStorage.
-// The caller is responsible for the lifetime of the device pointer. The
-// GPUStorage does NOT free the pointer when Free() is called.
+// A GC finalizer ensures the device memory is freed if Release() is not called.
 // An optional deviceID records which device the pointer belongs to (default 0).
 func NewGPUStorageFromPtr[T Numeric](devPtr unsafe.Pointer, length int, deviceID ...int) (*GPUStorage[T], error) {
 	dev := 0
@@ -89,13 +92,16 @@ func NewGPUStorageFromPtr[T Numeric](devPtr unsafe.Pointer, length int, deviceID
 	var zero T
 	elemSize := int(unsafe.Sizeof(zero))
 
-	return &GPUStorage[T]{
+	gs := &GPUStorage[T]{
 		devicePtr: devPtr,
 		length:    length,
 		byteSize:  length * elemSize,
 		deviceID:  dev,
 		runtime:   getDefaultRuntime(),
-	}, nil
+	}
+	runtime.SetFinalizer(gs, func(s *GPUStorage[T]) { _ = s.Free() })
+
+	return gs, nil
 }
 
 // Len returns the number of elements.
