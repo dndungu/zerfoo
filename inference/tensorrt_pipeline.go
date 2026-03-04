@@ -205,7 +205,7 @@ func (e *TRTInferenceEngine) Forward(inputs []*tensor.TensorNumeric[float32], ou
 	cuda.Free(outputDev)
 
 	// Create result tensor.
-	return tensor.NewTensorNumeric[float32]([]int{outputSize}, result)
+	return tensor.New[float32]([]int{outputSize}, result)
 }
 
 // Close releases all TensorRT resources.
