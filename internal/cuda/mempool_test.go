@@ -106,7 +106,8 @@ func TestMemPoolStats(t *testing.T) {
 		t.Errorf("empty pool Stats() = (%d, %d), want (0, 0)", allocs, bytes)
 	}
 
-	for _, size := range []int{1024, 1024, 2048} {
+	// Alloc three different sizes to avoid cache reuse between calls.
+	for _, size := range []int{1024, 2048, 4096} {
 		ptr, err := pool.Alloc(0, size)
 		if err != nil {
 			t.Fatalf("Alloc(%d) failed: %v", size, err)
@@ -120,8 +121,8 @@ func TestMemPoolStats(t *testing.T) {
 		t.Errorf("Stats().allocations = %d, want 3", allocs)
 	}
 
-	if bytes != 1024+1024+2048 {
-		t.Errorf("Stats().totalBytes = %d, want %d", bytes, 1024+1024+2048)
+	if bytes != 1024+2048+4096 {
+		t.Errorf("Stats().totalBytes = %d, want %d", bytes, 1024+2048+4096)
 	}
 }
 
