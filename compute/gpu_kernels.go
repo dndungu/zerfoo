@@ -117,14 +117,6 @@ func gpuBinaryOp[T tensor.Numeric](
 		return nil, err
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devC, byteSize)
-
-			return nil, err
-		}
-	}
-
 	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
 }
 
@@ -160,14 +152,6 @@ func gpuUnaryOp[T tensor.Numeric](
 		e.pool.Free(e.deviceID, devC, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devC, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
@@ -206,14 +190,6 @@ func gpuScalarOp[T tensor.Numeric](
 		e.pool.Free(e.deviceID, devC, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devC, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
@@ -395,14 +371,6 @@ func (e *GPUEngine[T]) gpuFill(ctx context.Context, t *tensor.TensorNumeric[T], 
 		return err
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devPtr, byteSize)
-
-			return err
-		}
-	}
-
 	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, n, e.deviceID)
 	if err != nil {
 		e.pool.Free(e.deviceID, devPtr, byteSize)
@@ -495,14 +463,6 @@ func (e *GPUEngine[T]) gpuSum(ctx context.Context, a *tensor.TensorNumeric[T], a
 		e.pool.Free(e.deviceID, devOut, outByteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devOut, outByteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, newShape, devOut, numStripes, dst...)
@@ -604,14 +564,6 @@ func (e *GPUEngine[T]) gpuSoftmax(ctx context.Context, a *tensor.TensorNumeric[T
 		e.pool.Free(e.deviceID, devOut, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devOut, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, shape, devOut, n, dst...)

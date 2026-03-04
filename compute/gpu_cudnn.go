@@ -108,15 +108,6 @@ func (e *GPUEngine[T]) Conv2dForward(
 		return nil, fmt.Errorf("Conv2dForward: %w", err)
 	}
 
-	// --- Synchronize and wrap ---
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devY, outElems*f32Size)
-			return nil, fmt.Errorf("Conv2dForward: stream sync: %w", err)
-		}
-	}
-
 	return makeGPUResult[T](e, []int{n, cOut, outH, outW}, devY, outElems)
 }
 
@@ -188,13 +179,6 @@ func (e *GPUEngine[T]) BatchNormForwardInference(
 		return nil, fmt.Errorf("BatchNormForwardInference: %w", err)
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devY, outElems*f32Size)
-			return nil, fmt.Errorf("BatchNormForwardInference: stream sync: %w", err)
-		}
-	}
-
 	return makeGPUResult[T](e, xShape, devY, outElems)
 }
 
@@ -250,13 +234,6 @@ func (e *GPUEngine[T]) CudnnActivationForward(
 		return nil, fmt.Errorf("CudnnActivationForward: %w", err)
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devY, numElems*f32Size)
-			return nil, fmt.Errorf("CudnnActivationForward: stream sync: %w", err)
-		}
-	}
-
 	return makeGPUResult[T](e, shape, devY, numElems)
 }
 
@@ -303,13 +280,6 @@ func (e *GPUEngine[T]) CudnnPoolingForward(
 	); err != nil {
 		e.pool.Free(e.deviceID, devY, outElems*f32Size)
 		return nil, fmt.Errorf("CudnnPoolingForward: %w", err)
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devY, outElems*f32Size)
-			return nil, fmt.Errorf("CudnnPoolingForward: stream sync: %w", err)
-		}
 	}
 
 	return makeGPUResult[T](e, []int{n, c, outH, outW}, devY, outElems)
@@ -361,13 +331,6 @@ func (e *GPUEngine[T]) CudnnSoftmaxForward(
 	if err := e.dnn.SoftmaxForward(devX, [4]int{n4, c4, h4, w4}, devY, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devY, numElems*f32Size)
 		return nil, fmt.Errorf("CudnnSoftmaxForward: %w", err)
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devY, numElems*f32Size)
-			return nil, fmt.Errorf("CudnnSoftmaxForward: stream sync: %w", err)
-		}
 	}
 
 	return makeGPUResult[T](e, shape, devY, numElems)
@@ -436,13 +399,6 @@ func (e *GPUEngine[T]) Conv2dBackwardData(
 		return nil, fmt.Errorf("Conv2dBackwardData: %w", err)
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
-			return nil, fmt.Errorf("Conv2dBackwardData: stream sync: %w", err)
-		}
-	}
-
 	return makeGPUResult[T](e, dxShape[:], devDX, dxElems)
 }
 
@@ -507,13 +463,6 @@ func (e *GPUEngine[T]) Conv2dBackwardFilter(
 	); err != nil {
 		e.pool.Free(e.deviceID, devDW, dwElems*f32Size)
 		return nil, fmt.Errorf("Conv2dBackwardFilter: %w", err)
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devDW, dwElems*f32Size)
-			return nil, fmt.Errorf("Conv2dBackwardFilter: stream sync: %w", err)
-		}
 	}
 
 	return makeGPUResult[T](e, dwShape[:], devDW, dwElems)
@@ -604,15 +553,6 @@ func (e *GPUEngine[T]) BatchNormForwardTraining(
 		e.pool.Free(e.deviceID, devSaveMean, c*f32Size)
 		e.pool.Free(e.deviceID, devSaveInvVar, c*f32Size)
 		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: %w", err)
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devY, outElems*f32Size)
-			e.pool.Free(e.deviceID, devSaveMean, c*f32Size)
-			e.pool.Free(e.deviceID, devSaveInvVar, c*f32Size)
-			return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: stream sync: %w", err)
-		}
 	}
 
 	y, err := makeGPUResult[T](e, xShape, devY, outElems)
@@ -721,15 +661,6 @@ func (e *GPUEngine[T]) CudnnBatchNormBackward(
 		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: %w", err)
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
-			e.pool.Free(e.deviceID, devDScale, c*f32Size)
-			e.pool.Free(e.deviceID, devDBias, c*f32Size)
-			return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: stream sync: %w", err)
-		}
-	}
-
 	dx, err := makeGPUResult[T](e, xShape, devDX, dxElems)
 	if err != nil {
 		e.pool.Free(e.deviceID, devDScale, c*f32Size)
@@ -813,13 +744,6 @@ func (e *GPUEngine[T]) CudnnActivationBackward(
 		return nil, fmt.Errorf("CudnnActivationBackward: %w", err)
 	}
 
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devDX, numElems*f32Size)
-			return nil, fmt.Errorf("CudnnActivationBackward: stream sync: %w", err)
-		}
-	}
-
 	return makeGPUResult[T](e, shape, devDX, numElems)
 }
 
@@ -880,13 +804,6 @@ func (e *GPUEngine[T]) CudnnPoolingBackward(
 	); err != nil {
 		e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
 		return nil, fmt.Errorf("CudnnPoolingBackward: %w", err)
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
-			return nil, fmt.Errorf("CudnnPoolingBackward: stream sync: %w", err)
-		}
 	}
 
 	return makeGPUResult[T](e, xShape, devDX, dxElems)

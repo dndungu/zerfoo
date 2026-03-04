@@ -277,15 +277,6 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 		}
 	}
 
-	// Synchronize stream before creating the storage.
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devCTotal, batchSize*cMatSize*elemSize)
-
-			return nil, fmt.Errorf("MatMul: stream sync: %w", err)
-		}
-	}
-
 	return makeGPUResult[T](e, outShape, devCTotal, batchSize*cMatSize, dst...)
 }
 
@@ -417,6 +408,16 @@ func (e *GPUEngine[T]) ReduceMean(ctx context.Context, a *tensor.TensorNumeric[T
 
 func (e *GPUEngine[T]) Rsqrt(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	return e.gpuRsqrt(ctx, a, dst...)
+}
+
+// Sync synchronizes the GPU stream, blocking until all enqueued operations complete.
+// Use for benchmarking or when explicit synchronization is needed.
+func (e *GPUEngine[T]) Sync() error {
+	if e.stream != nil {
+		return e.stream.Synchronize()
+	}
+
+	return nil
 }
 
 // Static type assertion: GPUEngine satisfies Engine.
