@@ -7,7 +7,6 @@ import (
 	"math"
 	"testing"
 
-	"github.com/zerfoo/zerfoo/graph"
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
 )
@@ -533,17 +532,12 @@ func TestGPUEngine_LinearLayerEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	inputDim, outputDim := 4, 2
 
-	// Create weights as a Parameter (like a real Linear layer would)
 	weightsTensor, _ := tensor.New[float32]([]int{inputDim, outputDim}, []float32{
 		0.1, 0.2,
 		0.3, 0.4,
 		0.5, 0.6,
 		0.7, 0.8,
 	})
-	_, err = graph.NewParameter[float32]("test_weights", weightsTensor, tensor.New[float32])
-	if err != nil {
-		t.Fatalf("NewParameter: %v", err)
-	}
 
 	// Forward pass: input @ weights
 	input, _ := tensor.New[float32]([]int{2, inputDim}, []float32{
