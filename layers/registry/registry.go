@@ -67,6 +67,7 @@ func RegisterAll() {
 	model.RegisterLayer("Trilu", core.BuildTrilu[float32])
 	model.RegisterLayer("Max", core.BuildMax[float32])
 	model.RegisterLayer("LessOrEqual", core.BuildLessOrEqual[float32])
+	model.RegisterLayer("Or", core.BuildOr[float32])
 
 	// Embeddings
 
