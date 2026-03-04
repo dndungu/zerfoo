@@ -77,6 +77,12 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
   multiplication, enabling GPU-accelerated inference with quantized weights.
 - O28: Add TensorRT dynamic shape support with optimization profiles for
   variable batch size and sequence length.
+- O29: Fix ARM64 (aarch64) build compatibility so all CUDA, cuDNN, TensorRT,
+  and CUTLASS code compiles natively on the NVIDIA DGX Spark GB10. **(NEW)**
+- O30: Validate all GPU tests on real Blackwell hardware (DGX Spark GB10,
+  sm_121, CUDA 13.0) and capture performance benchmarks. **(NEW)**
+- O31: Assess and document feature gaps for Blackwell architecture: FP4 tensor
+  cores, BF16 support, unified memory, ConnectX-7 multi-node. **(NEW)**
 
 ### Non-Goals
 
@@ -93,6 +99,9 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 - ROCm TensorRT equivalent (MIGraphX integration deferred).
 - OpenCL multi-GPU collective communications (no NCCL equivalent).
 - OpenCL flash attention (too complex for OpenCL kernel model).
+- FP4 kernel implementation (assessment only in Phase 20; implementation deferred).
+- BF16 training loop (assessment only; implementation deferred).
+- ConnectX-7 multi-node inference (assessment only; implementation deferred).
 
 ### Constraints and Assumptions
 
@@ -104,7 +113,7 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 - cuDNN code behind `//go:build cuda` (requires libcudnn8 or libcudnn9).
 - TensorRT code behind `//go:build cuda` (requires libnvinfer).
 - CUTLASS requires nvcc and CUTLASS headers at build time; kernels compile into
-  the existing `libkernels.a` static library.
+  the existing `libkernels.a` static library. CUTLASS >= 4.2 required for sm_121.
 - ROCm requires HIP SDK >= 5.0, rocBLAS, and MIOpen.
 - OpenCL requires OpenCL 2.0+ headers and ICD loader (libOpenCL.so).
   CLBlast required for BLAS operations.
@@ -117,6 +126,9 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 - TensorRT dynamic shapes use optimization profiles with min/opt/max dimensions.
 - cuDNN backward-pass requires cuDNN >= 8.0 (same as forward).
 - CUTLASS INT4/INT8 GEMM requires CUTLASS >= 3.0 with INT quantization support.
+- DGX Spark GB10 is ARM64 (aarch64), not x86_64. CUDA 13.0 pre-installed.
+  Compute capability sm_121 (Blackwell). 128GB unified LPDDR5X memory.
+  Single GPU -- multi-GPU tests require two units linked via ConnectX-7.
 
 ### Success Metrics
 
@@ -142,6 +154,9 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 | cuDNN backward | Conv2d backward on GPU | Gradient parity within 1e-5 vs CPU reference |
 | INT4 GEMM | Quantized MatMul on GPU | MatMulNBits parity within 1e-2 vs CPU dequant+matmul |
 | TRT dynamic shapes | Variable batch/seq_len | Same model handles batch 1 and 32 without rebuild |
+| ARM64 build | All CUDA code builds on aarch64 | `go build -tags cuda ./...` on DGX Spark succeeds |
+| Blackwell GPU tests | All GPU tests pass on sm_121 | `go test -tags cuda ./...` on DGX Spark, 0 failures |
+| GPU benchmarks | Performance documented | MatMul, attention, INT4 GEMM benchmarks in design.md |
 
 ---
 
@@ -188,6 +203,12 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 | D45 | MatMulNBits GPU path | MatMulNBits layer uses CUTLASS INT4/INT8 on GPU **(COMPLETE)** |
 | D46 | TRT optimization profiles | Builder creates profiles with min/opt/max dimensions **(COMPLETE)** |
 | D47 | TRT dynamic inference | TRT engine handles variable batch and sequence length **(COMPLETE)** |
+| D48 | ARM64 build fix | Makefiles detect architecture; CUDA/TensorRT compile on aarch64 |
+| D49 | sm_121 kernel compilation | libkernels.a and libtrt_capi.a build for Blackwell (sm_121) |
+| D50 | GPU test validation | All 16 GPU test files pass on DGX Spark hardware |
+| D51 | Performance benchmarks | MatMul, attention, INT4 GEMM benchmark results documented |
+| D52 | Feature gap assessment | FP4, BF16, unified memory, ConnectX-7 gaps documented in ADR |
+| D53 | Hardware validation ADR | ADR-017 documenting DGX Spark validation results and gaps |
 
 ### Out of Scope
 
@@ -236,15 +257,13 @@ decisions.
 
 #### E29: GPU Hardware Validation
 
-- [ ] T29.1 Create GCP T4 spot VM and validate GPU tests  **BLOCKED:** GCP GPU quota = 0.
-  - Quota increase request pending (preference ID: zerfoo-gpu-test, project: numerai-488804).
-  - Unblock: `gcloud beta quotas preferences describe zerfoo-gpu-test --project=numerai-488804`
-  - Alternative: try a different GCP project or cloud provider.
-  - Steps: create n1-standard-4 spot VM with T4, install CUDA 12.x + Go 1.25,
-    `go test -tags cuda ./...`, capture benchmarks, delete VM immediately.
-- [ ] T29.2 Run optimized benchmarks on T4  **BLOCKED:** Depends on T29.1.
-  - Benchmark MatMul (128/512/1024), Softmax, chained attention ops.
-  - Document results in docs/design.md.
+- [ ] T29.1 Validate GPU tests on hardware  **UNBLOCKED:** DGX Spark GB10 acquired.
+  - Previously blocked on GCP GPU quota (preference ID: zerfoo-gpu-test).
+  - Now resolved: GIGABYTE AI TOP Atom (DGX Spark GB10, Blackwell sm_121,
+    CUDA 13.0, ARM64 aarch64, 128GB LPDDR5X) available locally.
+  - Superseded by Phase 20 (E109-E114) which covers ARM64 fixes, validation,
+    and benchmarking on the DGX Spark.
+- [ ] T29.2 Run optimized benchmarks  **UNBLOCKED:** Superseded by E112.
 
 ---
 
@@ -566,6 +585,279 @@ shapes in section 4.10 and ADR index. plan.md updated.
 
 ---
 
+### Phase 20: DGX Spark Hardware Validation (Blackwell sm_121, ARM64)
+
+#### Phase 20 Context
+
+A GIGABYTE AI TOP Atom Personal AI Supercomputer (NVIDIA DGX Spark GB10) has
+been acquired for GPU hardware validation. This unblocks E29 (previously blocked
+on GCP GPU quota) and enables first-ever hardware validation of all GPU code.
+
+**Network access:** `ssh ndungu@192.168.86.250` (hostname: `aitopatom-bfc8`).
+Passwordless SSH key authentication configured from development machine.
+
+**Hardware specifications (verified via SSH):**
+- NVIDIA GB10 Grace Blackwell Superchip (sm_121, compute capability 12.1)
+- ARM aarch64 CPU: 10x Cortex-X295 + 10x Cortex-A725 (20 cores total)
+- 128 GB LPDDR5X unified memory (119Gi total, ~112Gi free)
+- CUDA 13.0.2, driver 580.126.09
+- OS: Ubuntu 24.04.4 LTS, kernel 6.17.0-1008-nvidia, aarch64
+- Single GPU -- multi-GPU tests require connecting two units via ConnectX-7
+- 1 PFLOP FP4 AI performance
+
+**Software inventory (probed 2026-03-03):**
+- CUDA toolkit: 13.0.2 -- INSTALLED
+- NVIDIA driver: 580.126.09 -- INSTALLED
+- Go: NOT INSTALLED (required: Go 1.25+ for linux/arm64)
+- cuDNN: NOT INSTALLED (required: cuDNN 9.x for CUDA 13.0)
+- TensorRT: NOT INSTALLED (required: libnvinfer for TRT tests)
+- NCCL: NOT INSTALLED (required: libnccl2 for NCCL tests)
+- CUTLASS: NOT INSTALLED (required: CUTLASS >= 4.2 for sm_121)
+- gcc/g++: Available via system packages (needed for CGo and nvcc)
+
+**Known issues to fix before validation:**
+1. TensorRT Makefile hardcodes x86_64 include path (`-I/usr/include/x86_64-linux-gnu`)
+2. CUDA kernels Makefile defaults to sm_75 (needs sm_121 for DGX Spark)
+3. CUDA 13.0 -- our docs reference CUDA 12.x; API compatibility needs verification
+4. CUTLASS on ARM64 -- requires CUTLASS >= 4.2 for sm_121 support
+5. Gonum falls back to non-SIMD (safe) path on ARM64 -- CPU fallback slower
+
+**Feature gaps identified for Blackwell architecture:**
+1. No FP4 data type -- GB10 delivers 1 PFLOP FP4, but we have no FP4 support
+2. No BF16 tensor operations -- Blackwell has excellent BF16 tensor cores
+3. No unified memory (cudaMallocManaged) -- 128GB shared memory is untapped
+4. No ConnectX-7 multi-node support -- two DGX Sparks could do 2-GPU inference
+5. CUTLASS kernels use 32x32 tiles -- Blackwell may prefer larger tile configs
+6. No Blackwell-specific TMA (Tensor Memory Accelerator) instructions
+
+#### E109: ARM64 Build Compatibility
+
+- [ ] T109.0 Install required software on DGX Spark  Owner: TBD  Est: 1h
+  - Dependencies: None
+  - Machine: ndungu@192.168.86.250 (aitopatom-bfc8)
+  - Steps (run via SSH):
+    1. Install Go 1.25+ for linux/arm64 (download from go.dev, extract to /usr/local)
+    2. Install cuDNN 9.x for CUDA 13.0 aarch64 (apt: libcudnn9-dev-cuda-13)
+    3. Install TensorRT for CUDA 13.0 aarch64 (apt: libnvinfer-dev or NVIDIA repo)
+    4. Install NCCL (apt: libnccl-dev or NVIDIA repo)
+    5. Install CUTLASS >= 4.2 headers (git clone from NVIDIA/cutlass, checkout v4.2+)
+    6. Install build essentials if missing (apt: build-essential)
+    7. Verify all installations: go version, dpkg -l | grep cudnn, etc.
+  - Acceptance: `go version` shows 1.25+, `dpkg -l | grep cudnn` shows 9.x,
+    `dpkg -l | grep nvinfer` shows TensorRT, CUTLASS headers in /usr/local/cutlass.
+  - [ ] S109.0.1 Install Go 1.25+ for linux/arm64  Est: 10m
+  - [ ] S109.0.2 Install cuDNN 9.x from NVIDIA apt repo  Est: 10m
+  - [ ] S109.0.3 Install TensorRT from NVIDIA apt repo  Est: 10m
+  - [ ] S109.0.4 Install NCCL from NVIDIA apt repo  Est: 10m
+  - [ ] S109.0.5 Install CUTLASS >= 4.2 headers  Est: 10m
+  - [ ] S109.0.6 Verify all installations  Est: 10m
+
+- [ ] T109.1 Fix TensorRT Makefile for aarch64  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - File: internal/tensorrt/Makefile
+  - Change: Replace `-I/usr/include/x86_64-linux-gnu` with architecture detection:
+    `ARCH_INCLUDE ?= /usr/include/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo x86_64-linux-gnu)`
+    or use `-I/usr/include/aarch64-linux-gnu` on ARM64 systems.
+  - Acceptance: `make` in internal/tensorrt/ succeeds on both x86_64 and aarch64.
+  - [ ] S109.1.1 Update Makefile with architecture-aware include path  Est: 15m
+  - [ ] S109.1.2 Verify `make clean && make` builds libtrt_capi.a on macOS/Linux  Est: 10m
+  - [ ] S109.1.3 Run golangci-lint  Est: 5m
+
+- [ ] T109.2 Update CUDA kernels Makefile for sm_121  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - File: internal/cuda/kernels/Makefile
+  - Change: Keep `sm_75` default but document override. Add comment for DGX Spark:
+    `make CUDA_ARCH=sm_121`. Alternatively, auto-detect via `nvidia-smi`.
+  - Acceptance: `make CUDA_ARCH=sm_121` compiles all 4 kernel files on DGX Spark.
+  - [ ] S109.2.1 Add CUDA_ARCH documentation comment to Makefile  Est: 10m
+  - [ ] S109.2.2 Verify all .cu files compile with sm_121 flag  Est: 15m
+  - [ ] S109.2.3 Run golangci-lint  Est: 5m
+
+- [ ] T109.3 Verify CGo linkage on aarch64 CUDA 13.0  Owner: TBD  Est: 1h
+  - Dependencies: T109.0, T109.1, T109.2
+  - Files: All files with `//go:build cuda` (29 production files)
+  - Steps on DGX Spark (ndungu@192.168.86.250):
+    1. Clone repo and run `go build -tags cuda ./...`
+    3. Run `go build -tags cuda,cutlass ./...`
+    4. Fix any compilation errors from CUDA 13 API changes
+  - Acceptance: Both builds succeed with 0 errors on DGX Spark.
+  - Risk: CUDA 13.0 may deprecate APIs we use. Check cudaGetDeviceProperties,
+    cudnnCreate, cublasCreate signatures.
+  - [ ] S109.3.1 Clone repo on DGX Spark  Est: 10m
+  - [ ] S109.3.2 Build static libraries (libkernels.a sm_121, libtrt_capi.a aarch64)  Est: 15m
+  - [ ] S109.3.3 Run go build -tags cuda ./...  Est: 10m
+  - [ ] S109.3.4 Fix any CUDA 13 API deprecation errors  Est: 20m
+  - [ ] S109.3.5 Run go build -tags cuda,cutlass ./...  Est: 10m
+
+- [ ] T109.4 Verify non-GPU build on aarch64  Owner: TBD  Est: 15m
+  - Dependencies: T109.0 (Go must be installed)
+  - Steps: Run `go build ./...` and `go test ./...` on DGX Spark (ndungu@192.168.86.250) without GPU tags.
+  - Acceptance: CPU-only build and all non-GPU tests pass on ARM64.
+  - Note: Gonum uses safe (non-SIMD) path on ARM64 automatically.
+  - [ ] S109.4.1 Run go build ./... and go test ./... on DGX Spark  Est: 10m
+  - [ ] S109.4.2 Document any ARM64-specific test failures  Est: 5m
+
+#### E110: GPU Test Validation on DGX Spark
+
+- [ ] T110.1 Run CUDA runtime and memory tests  Owner: TBD  Est: 30m
+  - Dependencies: E109
+  - Files tested: internal/cuda/runtime_test.go, internal/cuda/mempool_test.go
+  - Acceptance: All 15 tests pass on sm_121 hardware.
+  - [ ] S110.1.1 Run `go test -tags cuda ./internal/cuda/ -v`  Est: 10m
+  - [ ] S110.1.2 Fix any hardware-specific failures  Est: 15m
+  - [ ] S110.1.3 Document device properties (sm_121, memory, clock)  Est: 5m
+
+- [ ] T110.2 Run cuBLAS and cuDNN tests  Owner: TBD  Est: 30m
+  - Dependencies: E109
+  - Files tested: internal/cublas/cublas_test.go (3 tests),
+    internal/cudnn/cudnn_test.go (10+ tests)
+  - Acceptance: All cuBLAS SGEMM tests and cuDNN forward/backward tests pass.
+  - [ ] S110.2.1 Run `go test -tags cuda ./internal/cublas/ -v`  Est: 10m
+  - [ ] S110.2.2 Run `go test -tags cuda ./internal/cudnn/ -v`  Est: 10m
+  - [ ] S110.2.3 Fix any failures  Est: 10m
+
+- [ ] T110.3 Run TensorRT tests  Owner: TBD  Est: 30m
+  - Dependencies: E109
+  - Files tested: internal/tensorrt/tensorrt_test.go (11 tests),
+    inference/tensorrt_cache_test.go (3 tests)
+  - Acceptance: TRT engine build, serialization, deserialization, and inference
+    all work on Blackwell. Dynamic shapes create valid optimization profiles.
+  - [ ] S110.3.1 Run `go test -tags cuda ./internal/tensorrt/ -v`  Est: 10m
+  - [ ] S110.3.2 Run `go test -tags cuda ./inference/ -v`  Est: 10m
+  - [ ] S110.3.3 Fix any failures  Est: 10m
+
+- [ ] T110.4 Run CUTLASS kernel tests  Owner: TBD  Est: 30m
+  - Dependencies: E109
+  - Files tested: internal/cuda/kernels/elementwise_test.go (12 tests),
+    internal/cuda/kernels/flash_attention_test.go (2 tests)
+  - Acceptance: Elementwise kernels and flash attention pass on sm_121.
+  - Risk: CUTLASS >= 4.2 required for sm_121. If CUTLASS headers not available,
+    skip cutlass-tagged tests and document.
+  - [ ] S110.4.1 Install CUTLASS >= 4.2 headers on DGX Spark  Est: 10m
+  - [ ] S110.4.2 Build libkernels.a with CUDA_ARCH=sm_121  Est: 5m
+  - [ ] S110.4.3 Run `go test -tags cuda,cutlass ./internal/cuda/kernels/ -v`  Est: 10m
+  - [ ] S110.4.4 Fix any failures  Est: 10m
+
+- [ ] T110.5 Run GPU Engine and storage tests  Owner: TBD  Est: 45m
+  - Dependencies: T110.1, T110.2
+  - Files tested: compute/gpu_engine_test.go (21 tests),
+    compute/gpu_integration_test.go (15+ tests),
+    tensor/gpu_storage_test.go (17 tests), tensor/transfer_test.go
+  - Acceptance: All GPU Engine parity tests (MatMul, Softmax, elementwise,
+    reduction, training step) pass within documented tolerances.
+  - [ ] S110.5.1 Run `go test -tags cuda ./compute/ -v -run GPU`  Est: 15m
+  - [ ] S110.5.2 Run `go test -tags cuda ./tensor/ -v -run GPU`  Est: 10m
+  - [ ] S110.5.3 Fix any parity failures (adjust tolerances if needed for Blackwell)  Est: 15m
+  - [ ] S110.5.4 Run `go test -tags cuda,cutlass ./tests/parity/ -v`  Est: 10m
+
+- [ ] T110.6 Run full GPU test suite  Owner: TBD  Est: 30m
+  - Dependencies: T110.1-T110.5
+  - Steps: `go test -tags cuda,cutlass ./... -v -count=1`
+  - Acceptance: All GPU tests pass. Document any skipped tests (e.g., multi-GPU
+    tests that require >= 2 devices).
+  - Note: Multi-GPU tests (multigpu_test.go, nccl_strategy_test.go, nccl_test.go)
+    will skip because DGX Spark has a single GPU. This is expected.
+  - [ ] S110.6.1 Run full test suite with cuda,cutlass tags  Est: 15m
+  - [ ] S110.6.2 Capture and save test output  Est: 5m
+  - [ ] S110.6.3 Document skipped tests and reasons  Est: 10m
+
+#### E111: Performance Benchmarks on DGX Spark
+
+- [ ] T111.1 Benchmark MatMul throughput  Owner: TBD  Est: 45m
+  - Dependencies: E110
+  - Sizes: 128x128, 512x512, 1024x1024, 2048x2048, 4096x4096
+  - Measure: GFLOPS, latency (ms), GPU memory used
+  - Compare: CPU (gonum) vs GPU (cuBLAS on Blackwell)
+  - [ ] S111.1.1 Write or use existing MatMul benchmark  Est: 15m
+  - [ ] S111.1.2 Run benchmarks at each size  Est: 15m
+  - [ ] S111.1.3 Record results in a table  Est: 10m
+  - [ ] S111.1.4 Run golangci-lint  Est: 5m
+
+- [ ] T111.2 Benchmark flash attention  Owner: TBD  Est: 30m
+  - Dependencies: E110
+  - Sequence lengths: 128, 512, 1024, 2048
+  - Measure: Latency (ms), speedup vs naive attention
+  - [ ] S111.2.1 Run flash attention benchmark at each seq_len  Est: 15m
+  - [ ] S111.2.2 Record results  Est: 10m
+  - [ ] S111.2.3 Run golangci-lint  Est: 5m
+
+- [ ] T111.3 Benchmark INT4 quantized GEMM  Owner: TBD  Est: 30m
+  - Dependencies: E110
+  - Sizes: 1024x1024, 2048x2048, 4096x4096
+  - Measure: Throughput (GOPS), speedup vs CPU dequant+matmul
+  - [ ] S111.3.1 Run INT4 GEMM benchmark  Est: 15m
+  - [ ] S111.3.2 Record results  Est: 10m
+  - [ ] S111.3.3 Run golangci-lint  Est: 5m
+
+- [ ] T111.4 Benchmark TensorRT inference  Owner: TBD  Est: 30m
+  - Dependencies: E110
+  - Measure: TRT build time, first inference latency, steady-state throughput
+  - Compare: Direct CUDA inference vs TRT-optimized
+  - [ ] S111.4.1 Build a TRT engine for a test graph  Est: 10m
+  - [ ] S111.4.2 Measure build time, first run, subsequent runs  Est: 15m
+  - [ ] S111.4.3 Record results  Est: 5m
+
+- [ ] T111.5 Document benchmark results  Owner: TBD  Est: 30m
+  - Dependencies: T111.1-T111.4
+  - File: docs/design.md (new subsection in GPU section)
+  - Acceptance: Benchmark table with hardware specs, sizes, metrics.
+  - [ ] S111.5.1 Add benchmark results section to docs/design.md  Est: 20m
+  - [ ] S111.5.2 Run golangci-lint  Est: 5m
+
+#### E112: Blackwell Feature Gap Assessment
+
+- [ ] T112.1 Assess FP4 tensor core utilization  Owner: TBD  Est: 1h
+  - Dependencies: E110
+  - GB10 delivers 1 PFLOP FP4 but zerfoo has no FP4 data type.
+  - Steps: Research CUDA 13.0 FP4 APIs (nv_fp4), TensorRT FP4 quantization,
+    CUTLASS FP4 templates. Document what is needed to add FP4 support.
+  - Output: Section in ADR-017 describing FP4 gap and estimated effort.
+  - [ ] S112.1.1 Research CUDA 13.0 FP4 APIs and data types  Est: 20m
+  - [ ] S112.1.2 Research TensorRT FP4 quantization support  Est: 15m
+  - [ ] S112.1.3 Research CUTLASS FP4 GEMM templates for sm_121  Est: 15m
+  - [ ] S112.1.4 Document findings in ADR-017  Est: 10m
+
+- [ ] T112.2 Assess BF16 tensor operations  Owner: TBD  Est: 30m
+  - Dependencies: E110
+  - Blackwell has BF16 tensor cores. Our float16 package exists but BF16 is
+    only used for storage, not compute. Assess adding BF16 GEMM via cuBLAS.
+  - [ ] S112.2.1 Check cuBLAS BF16 GEMM availability on CUDA 13.0  Est: 15m
+  - [ ] S112.2.2 Document BF16 gap and effort estimate in ADR-017  Est: 15m
+
+- [ ] T112.3 Assess unified memory opportunities  Owner: TBD  Est: 30m
+  - Dependencies: E110
+  - DGX Spark has 128GB unified LPDDR5X. cudaMallocManaged could enable
+    zero-copy CPU-GPU data sharing for large models that exceed GPU memory.
+  - [ ] S112.3.1 Test cudaMallocManaged availability on DGX Spark  Est: 15m
+  - [ ] S112.3.2 Document unified memory gap and use cases in ADR-017  Est: 15m
+
+- [ ] T112.4 Assess ConnectX-7 multi-node scaling  Owner: TBD  Est: 30m
+  - Dependencies: E110
+  - Two DGX Spark units connected via ConnectX-7 could run multi-GPU tests
+    (NCCL AllReduce, multi-GPU inference). Assess feasibility.
+  - [ ] S112.4.1 Research ConnectX-7 NCCL over InfiniBand setup  Est: 15m
+  - [ ] S112.4.2 Document multi-node gap and requirements in ADR-017  Est: 15m
+
+#### E113: Phase 20 Final Verification and Documentation
+
+- [ ] T113.1 Create ADR-017  Owner: TBD  Est: 30m
+  - Dependencies: E109-E112
+  - File: docs/adr/017-dgx-spark-hardware-validation.md
+  - Content: Hardware specs, ARM64 build fixes, test results, benchmark data,
+    feature gaps (FP4, BF16, unified memory, ConnectX-7), recommendations.
+  - [ ] S113.1.1 Write ADR-017  Est: 20m
+  - [ ] S113.1.2 Run golangci-lint  Est: 5m
+
+- [ ] T113.2 Update docs/design.md and docs/plan.md  Owner: TBD  Est: 30m
+  - Dependencies: T113.1
+  - design.md: Add hardware validation section, benchmark table, ADR-017 index entry
+  - plan.md: Mark E109-E113 complete, update scorecard, progress log
+  - [ ] S113.2.1 Update design.md  Est: 15m
+  - [ ] S113.2.2 Update plan.md  Est: 10m
+  - [ ] S113.2.3 Run golangci-lint  Est: 5m
+
+---
+
 ## 4. Timeline and Milestones
 
 ### Phase 14-19 Milestones
@@ -589,6 +881,11 @@ shapes in section 4.10 and ADR index. plan.md updated.
 | M86 | Phase 18 complete | E106 | MatMulNBits on GPU; ADR-015 written |
 | M87 | TRT dynamic shapes | E107 | Variable batch engine builds and runs |
 | M88 | Phase 19 complete | E108 | Dynamic shapes operational; ADR-016 written |
+| M89 | ARM64 build works | E109 | go build -tags cuda ./... succeeds on DGX Spark aarch64 |
+| M90 | GPU tests pass | E110 | All GPU tests pass on sm_121 (except multi-GPU: expected skip) |
+| M91 | Benchmarks captured | E111 | MatMul, attention, INT4, TRT benchmarks documented |
+| M92 | Feature gaps documented | E112 | FP4, BF16, unified memory, ConnectX-7 gaps in ADR-017 |
+| M93 | Phase 20 complete | E113 | Hardware validation done; ADR-017 written; E29 resolved |
 
 ### Prior Phase Milestones (Complete)
 
@@ -606,11 +903,16 @@ Phases 1-13: 71 milestones (M1-M71) all complete. See prior plan versions.
    other new phases. Can start immediately.
 6. **Phase 19 (TRT Dynamic Shapes):** E107 -> E108. Independent of Phases 14-18.
    Can start immediately.
+7. **Phase 20 (DGX Spark Validation):** E109 -> E110 -> E111 -> E112 -> E113.
+   Depends on all prior phases being code-complete (Phases 14-19 done).
+   Must run ON the DGX Spark hardware.
 
 **Parallelism opportunities:**
 - Phases 17, 18, 19 are independent of each other and of 14-16. All three can
   start immediately.
 - Phases 15 and 16 can run in parallel after Phase 14 completes.
+- Phase 20 E111 (benchmarks) and E112 (gap assessment) can run in parallel
+  after E110 (test validation) completes.
 
 ---
 
@@ -622,7 +924,7 @@ Phases 1-13: 71 milestones (M1-M71) all complete. See prior plan versions.
 | R2 | Multi-GPU tests cannot run in CI | Reduced test coverage | High | Tests skip gracefully on < 2 GPUs. **(MITIGATED)** |
 | R3 | SetDevice overhead in tight loops | Performance regression | Low | SetDevice is a no-op when device matches. **(MITIGATED)** |
 | R4 | Cross-device D2D copy slower than expected | Transfer bottleneck | Medium | Document NVLink vs PCIe expectations. **(ACCEPTED)** |
-| R5 | GCP GPU quota still blocked for E29 | Cannot validate on hardware | High | Try alternative cloud provider. **(ONGOING)** |
+| R5 | GCP GPU quota still blocked for E29 | Cannot validate on hardware | High | RESOLVED: DGX Spark GB10 acquired locally. **(RESOLVED)** |
 | R6 | Breaking existing single-GPU callers | Regression | Medium | Variadic constructor defaults to device 0. **(MITIGATED)** |
 | R7 | cuDNN version incompatibility | Bindings fail on older systems | Medium | Target cuDNN >= 8.0; document minimum version. **(MITIGATED)** |
 | R8 | TensorRT C++ API requires C shim | Increased binding complexity | High | Write minimal C wrapper; limit to essential API surface. **(MITIGATED)** |
@@ -643,6 +945,12 @@ Phases 1-13: 71 milestones (M1-M71) all complete. See prior plan versions.
 | R23 | TRT dynamic shapes slower than fixed shapes | Performance regression | Medium | Optimization profile's "opt" dimension guides kernel selection. Document tradeoff. |
 | R24 | Three GPU backends increase maintenance burden | Bug surface area grows | High | GRAL abstraction minimizes duplication. Only vendor-specific code is in internal/ packages. |
 | R25 | OpenCL DNN ops missing (no cuDNN/MIOpen equivalent) | Incomplete OpenCL support | High | Document that OpenCL does not support Conv2d/BatchNorm on GPU. CPU fallback is acceptable. |
+| R26 | CUDA 13.0 deprecates APIs used by zerfoo | Build failures on DGX Spark | Medium | CUDA has strong backward compatibility. Fix deprecated calls if found. |
+| R27 | CUTLASS sm_121 requires version >= 4.2 | Flash attention and INT4 GEMM kernels may not compile | High | Install CUTLASS 4.2+. If unavailable, skip cutlass-tagged tests; CPU fallback works. |
+| R28 | ARM64 memory ordering differs from x86 | Subtle concurrency bugs in CGo code | Low | Go runtime handles memory barriers. Monitor for flaky tests on ARM64. |
+| R29 | TensorRT include path varies by Linux distribution | Build failure on DGX Spark (Ubuntu 24.04 aarch64) | Medium | Use pkg-config or dpkg-architecture for path detection. |
+| R30 | Gonum BLAS slower on ARM64 (no SIMD assembly) | CPU fallback operations significantly slower | Medium | Document perf gap. Long-term: link ARM-optimized BLAS (OpenBLAS with NEON). |
+| R31 | Single-GPU DGX Spark cannot validate multi-GPU code | NCCL and multi-GPU tests remain unvalidated | High | Tests skip gracefully. Second DGX Spark unit needed for full multi-GPU validation. |
 
 ---
 
@@ -694,6 +1002,8 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-03 | 20 | SSH validated: ndungu@192.168.86.250 (aitopatom-bfc8). Environment probed: CUDA 13.0.2/driver 580.126.09 installed; Go, cuDNN, TensorRT, NCCL, CUTLASS all missing. Added T109.0 (software installation, 6 subtasks). Updated E109 dependencies. Updated Phase 20 context with verified hardware specs, network access, and software inventory. |
+| 2026-03-03 | 20 | Planned Phase 20 (DGX Spark Hardware Validation). GIGABYTE AI TOP Atom (DGX Spark GB10, Blackwell sm_121, ARM64 aarch64, CUDA 13.0, 128GB) acquired. Unblocks E29. Added E109-E113 (5 epics, ~25 tasks). Identified 2 blocking ARM64 build issues (TensorRT x86_64 include path, CUDA kernels sm_75 default). Identified 6 Blackwell feature gaps (FP4, BF16, unified memory, ConnectX-7, TMA instructions, tile size tuning). Added objectives O29-O31, deliverables D48-D53, milestones M89-M93, risks R26-R31. |
 | 2026-03-03 | 19 | Phase 19 complete. TensorRT dynamic shapes: C shim functions for optimization profiles (E107), Go bindings OptimizationProfile/SetDimensions/SetInputShape (E107), DynamicShapeConfig in converter (E107), Forward calls SetInputShape in dynamic mode (E107), cache key includes shape ranges (E107), ADR-016 written (E108). 4 files modified: trt_capi.h, trt_capi.cpp, tensorrt.go, tensorrt_convert.go, tensorrt_pipeline.go. |
 | 2026-03-03 | 18 | Phase 18 complete. CUTLASS quantized GEMM: INT8 tiled kernel (E104), INT4 packed kernel with left/right-multiply (E104), CGo bindings (E104), MatMulNBits GPU dispatch (E105), ADR-015 written (E106). 8 new files across internal/cuda/kernels/ and layers/core/. |
 | 2026-03-03 | 17 | Phase 17 complete. cuDNN backward pass: CGo bindings for 8 backward functions (E101), CUDA DNN adapter implementations (E102), GPUEngine backward methods (E102), ADR-014 written (E103). 3 files modified: internal/cudnn/cudnn.go, internal/gpuapi/cuda_dnn.go, compute/gpu_cudnn.go. |
@@ -740,26 +1050,36 @@ A task is done when:
   internal/cuda/kernels/. MatMulNBits GPU dispatch via build tags.
 - **Phase 19 (TRT dynamic shapes):** Complete. Optimization profiles in
   tensorrt bindings. DynamicShapeConfig in converter/pipeline.
-- **GPU hardware validation (E29):** Blocked on GCP GPU quota.
+- **Phase 20 (DGX Spark validation):** Planned. SSH: `ndungu@192.168.86.250`.
+  First install missing software (T109.0: Go, cuDNN, TensorRT, NCCL, CUTLASS),
+  fix ARM64 build issues, run GPU tests on Blackwell sm_121, capture benchmarks,
+  assess feature gaps.
+- **GPU hardware validation (E29):** UNBLOCKED -- DGX Spark GB10 acquired.
+  Superseded by Phase 20 epics (E109-E113).
 - **How to build:**
   - CPU: `go build ./...`
   - CUDA: `go build -tags cuda ./...`
   - CUDA+CUTLASS: `go build -tags cuda,cutlass ./...`
-  - ROCm: `go build -tags rocm ./...` (after Phase 15)
-  - OpenCL: `go build -tags opencl ./...` (after Phase 16)
+  - CUDA on DGX Spark: `make CUDA_ARCH=sm_121` in internal/cuda/kernels/,
+    then `go build -tags cuda,cutlass ./...`
+  - ROCm: `go build -tags rocm ./...`
+  - OpenCL: `go build -tags opencl ./...`
 - **Pre-commit hook:** Runs golangci-lint and tests. Rejects multi-directory commits.
 
 ### External Dependencies
 
-- GCP GPU quota increase for hardware validation (preference ID: zerfoo-gpu-test,
-  project: numerai-488804).
-- NCCL library (libnccl2) for distributed GPU ops.
-- cuDNN library (libcudnn8 or libcudnn9) for cuDNN operations.
-- TensorRT library (libnvinfer) for graph optimization.
-- CUTLASS headers (>= 3.0) for flash attention and quantized GEMM.
+- ~~GCP GPU quota increase~~ RESOLVED: DGX Spark GB10 acquired locally.
+- **DGX Spark (ndungu@192.168.86.250, aitopatom-bfc8):**
+  - Go 1.25+ for linux/arm64 -- NOT INSTALLED, required for all Go builds.
+  - cuDNN 9.x for CUDA 13.0 -- NOT INSTALLED, required for cuDNN tests.
+  - TensorRT (libnvinfer) -- NOT INSTALLED, required for TRT tests.
+  - NCCL (libnccl2) -- NOT INSTALLED, required for NCCL tests (single GPU: will skip multi-GPU).
+  - CUTLASS >= 4.2 headers -- NOT INSTALLED, required for flash attention and INT4/INT8 GEMM on sm_121.
+  - CUDA 13.0.2 and driver 580.126.09 -- INSTALLED.
 - HIP SDK (>= 5.0) for AMD ROCm backend. Includes hipcc, rocBLAS, MIOpen.
 - OpenCL 2.0+ headers and ICD loader (libOpenCL.so) for OpenCL backend.
 - CLBlast library for OpenCL BLAS operations.
+- Second DGX Spark unit (optional) for multi-GPU validation via ConnectX-7.
 
 ---
 
