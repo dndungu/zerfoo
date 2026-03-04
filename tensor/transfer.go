@@ -1,4 +1,4 @@
-//go:build cuda || rocm
+//go:build cuda || rocm || opencl
 
 package tensor
 
