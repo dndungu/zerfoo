@@ -362,6 +362,10 @@ func BuildFromZMF[T tensor.Numeric](
 						}
 					}
 					actualInputNames = actualInputNames[:1]
+				} else {
+					// zonnx may promote the axes constant into an attribute.
+					// Translate the promoted key to "axes" and rebuild.
+					currentNode = rebuildWithPromotedAxes(nodeProto, engine, ops, instantiatedNodes, currentNode)
 				}
 			}
 		}
@@ -369,8 +373,14 @@ func BuildFromZMF[T tensor.Numeric](
 		// Materialize constant-promoted attributes as additional inputs.
 		// The zonnx converter promotes constant ONNX inputs to node
 		// attributes (keys look like "/Constant_output_0" or "onnx::...").
-		// Gather nodes already handle this in BuildGather, so skip them.
-		if nodeProto.OpType != "Gather" {
+		// Skip ops whose constants are already consumed by special-case
+		// handling above (Gather in BuildGather, Unsqueeze/Reshape in the
+		// switch above).
+		switch nodeProto.OpType {
+		case "Gather", "Unsqueeze", "Reshape", "Constant",
+			"SimplifiedLayerNormalization", "SkipSimplifiedLayerNormalization":
+			// Already handled.
+		default:
 			actualInputNames = materializeConstantAttrs(
 				nodeProto, actualInputNames, instantiatedNodes, ops,
 			)
@@ -659,6 +669,46 @@ func buildConstantNode[T tensor.Numeric](nodeProto *zmf.Node) (*parameterNode[T]
 	}
 
 	return &parameterNode[T]{value: decoded}, nil
+}
+
+// rebuildWithPromotedAxes checks if a node has a constant-promoted attribute
+// that should be interpreted as "axes" (for Unsqueeze). If found, it sets
+// the "axes" key and rebuilds the node.
+func rebuildWithPromotedAxes[T tensor.Numeric](
+	nodeProto *zmf.Node,
+	engine compute.Engine[T],
+	ops numeric.Arithmetic[T],
+	nodes map[string]graph.Node[T],
+	currentNode graph.Node[T],
+) graph.Node[T] {
+	for k, attr := range nodeProto.Attributes {
+		if !isConstantPromotedAttr(k) {
+			continue
+		}
+		if v, ok := attr.Value.(*zmf.Attribute_Ints); ok {
+			if nodeProto.Attributes == nil {
+				nodeProto.Attributes = make(map[string]*zmf.Attribute)
+			}
+			nodeProto.Attributes["axes"] = &zmf.Attribute{
+				Value: &zmf.Attribute_Ints{Ints: &zmf.Ints{Val: v.Ints.Val}},
+			}
+			updatedAttrs := convertAttributes(nodeProto.Attributes)
+			rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+			if rebuildErr == nil {
+				node, nodeErr := rebuilt(engine, ops, nodeProto.Name, nil, updatedAttrs)
+				if nodeErr == nil {
+					nodes[nodeProto.Name] = node
+					for _, outName := range nodeProto.Outputs {
+						if outName != "" && outName != nodeProto.Name {
+							nodes[outName] = node
+						}
+					}
+					return node
+				}
+			}
+		}
+	}
+	return currentNode
 }
 
 // isConstantPromotedAttr returns true if the attribute key looks like an ONNX
