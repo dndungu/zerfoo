@@ -148,8 +148,8 @@ func TestFloat32Ops_TanhGrad(t *testing.T) {
 		x, expected float32
 	}{
 		{"zero", 0.0, 1.0},
-		{"positive", 1.0, 1.0 - float32(math.Pow(math.Tanh(1.0), 2))},
-		{"negative", -1.0, 1.0 - float32(math.Pow(math.Tanh(-1.0), 2))},
+		{"positive", 1.0, func() float32 { t := ops.Tanh(1.0); return 1.0 - t*t }()},
+		{"negative", -1.0, func() float32 { t := ops.Tanh(-1.0); return 1.0 - t*t }()},
 	}
 
 	for _, tt := range tests {
