@@ -372,3 +372,522 @@ func (e *GPUEngine[T]) CudnnSoftmaxForward(
 
 	return makeGPUResult[T](e, shape, devY, numElems)
 }
+
+// Conv2dBackwardData computes the gradient of the convolution input via cuDNN.
+// w: [C_out, C_in/groups, kH, kW], dy: [N, C_out, outH, outW].
+// Returns dx: [N, C_in, H, W].
+func (e *GPUEngine[T]) Conv2dBackwardData(
+	_ context.Context,
+	w *tensor.TensorNumeric[T],
+	dy *tensor.TensorNumeric[T],
+	dxShape [4]int,
+	strides [2]int,
+	pads [4]int,
+	dilations [2]int,
+	groups int,
+) (*tensor.TensorNumeric[T], error) {
+	var zero T
+	if _, ok := any(zero).(float32); !ok {
+		return nil, fmt.Errorf("Conv2dBackwardData: only float32 supported, got %T", zero)
+	}
+	e.setDevice()
+
+	wShape := w.Shape()
+	dyShape := dy.Shape()
+	if len(wShape) != 4 {
+		return nil, fmt.Errorf("Conv2dBackwardData: w must be 4D, got %v", wShape)
+	}
+	if len(dyShape) != 4 {
+		return nil, fmt.Errorf("Conv2dBackwardData: dy must be 4D, got %v", dyShape)
+	}
+
+	padH, padW := pads[0], pads[1]
+	if pads[0] != pads[2] || pads[1] != pads[3] {
+		return nil, fmt.Errorf("Conv2dBackwardData: DNN requires symmetric padding, got [%d,%d,%d,%d]", pads[0], pads[1], pads[2], pads[3])
+	}
+
+	devW, cleanW, err := getDevicePtr(e, w)
+	if err != nil {
+		return nil, fmt.Errorf("Conv2dBackwardData: getDevicePtr(w): %w", err)
+	}
+	defer cleanW()
+
+	devDY, cleanDY, err := getDevicePtr(e, dy)
+	if err != nil {
+		return nil, fmt.Errorf("Conv2dBackwardData: getDevicePtr(dy): %w", err)
+	}
+	defer cleanDY()
+
+	dxElems := dxShape[0] * dxShape[1] * dxShape[2] * dxShape[3]
+	devDX, err := e.pool.Alloc(e.deviceID, dxElems*f32Size)
+	if err != nil {
+		return nil, fmt.Errorf("Conv2dBackwardData: output alloc: %w", err)
+	}
+
+	if err := e.dnn.ConvBackwardData(
+		devW, [4]int{wShape[0], wShape[1], wShape[2], wShape[3]},
+		devDY, [4]int{dyShape[0], dyShape[1], dyShape[2], dyShape[3]},
+		devDX, dxShape,
+		[2]int{padH, padW}, strides, dilations,
+		groups,
+		e.stream,
+	); err != nil {
+		e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+		return nil, fmt.Errorf("Conv2dBackwardData: %w", err)
+	}
+
+	if e.stream != nil {
+		if err := e.stream.Synchronize(); err != nil {
+			e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+			return nil, fmt.Errorf("Conv2dBackwardData: stream sync: %w", err)
+		}
+	}
+
+	return makeGPUResult[T](e, dxShape[:], devDX, dxElems)
+}
+
+// Conv2dBackwardFilter computes the gradient of the convolution filter via cuDNN.
+// x: [N, C_in, H, W], dy: [N, C_out, outH, outW].
+// Returns dw: [C_out, C_in/groups, kH, kW].
+func (e *GPUEngine[T]) Conv2dBackwardFilter(
+	_ context.Context,
+	x *tensor.TensorNumeric[T],
+	dy *tensor.TensorNumeric[T],
+	dwShape [4]int,
+	strides [2]int,
+	pads [4]int,
+	dilations [2]int,
+	groups int,
+) (*tensor.TensorNumeric[T], error) {
+	var zero T
+	if _, ok := any(zero).(float32); !ok {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: only float32 supported, got %T", zero)
+	}
+	e.setDevice()
+
+	xShape := x.Shape()
+	dyShape := dy.Shape()
+	if len(xShape) != 4 {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: x must be 4D, got %v", xShape)
+	}
+	if len(dyShape) != 4 {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: dy must be 4D, got %v", dyShape)
+	}
+
+	padH, padW := pads[0], pads[1]
+	if pads[0] != pads[2] || pads[1] != pads[3] {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: DNN requires symmetric padding, got [%d,%d,%d,%d]", pads[0], pads[1], pads[2], pads[3])
+	}
+
+	devX, cleanX, err := getDevicePtr(e, x)
+	if err != nil {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: getDevicePtr(x): %w", err)
+	}
+	defer cleanX()
+
+	devDY, cleanDY, err := getDevicePtr(e, dy)
+	if err != nil {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: getDevicePtr(dy): %w", err)
+	}
+	defer cleanDY()
+
+	dwElems := dwShape[0] * dwShape[1] * dwShape[2] * dwShape[3]
+	devDW, err := e.pool.Alloc(e.deviceID, dwElems*f32Size)
+	if err != nil {
+		return nil, fmt.Errorf("Conv2dBackwardFilter: output alloc: %w", err)
+	}
+
+	if err := e.dnn.ConvBackwardFilter(
+		devX, [4]int{xShape[0], xShape[1], xShape[2], xShape[3]},
+		devDY, [4]int{dyShape[0], dyShape[1], dyShape[2], dyShape[3]},
+		devDW, dwShape,
+		[2]int{padH, padW}, strides, dilations,
+		groups,
+		e.stream,
+	); err != nil {
+		e.pool.Free(e.deviceID, devDW, dwElems*f32Size)
+		return nil, fmt.Errorf("Conv2dBackwardFilter: %w", err)
+	}
+
+	if e.stream != nil {
+		if err := e.stream.Synchronize(); err != nil {
+			e.pool.Free(e.deviceID, devDW, dwElems*f32Size)
+			return nil, fmt.Errorf("Conv2dBackwardFilter: stream sync: %w", err)
+		}
+	}
+
+	return makeGPUResult[T](e, dwShape[:], devDW, dwElems)
+}
+
+// BatchNormForwardTraining performs batch normalization computing batch statistics.
+// x: [N, C, H, W], scale/bias: [C].
+// Returns y: [N, C, H, W], saveMean: [C], saveInvVariance: [C].
+// Updates runningMean and runningVariance in-place.
+func (e *GPUEngine[T]) BatchNormForwardTraining(
+	_ context.Context,
+	x, scale, bias *tensor.TensorNumeric[T],
+	runningMean, runningVariance *tensor.TensorNumeric[T],
+	epsilon, expAvgFactor float64,
+) (*tensor.TensorNumeric[T], *tensor.TensorNumeric[T], *tensor.TensorNumeric[T], error) {
+	var zero T
+	if _, ok := any(zero).(float32); !ok {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: only float32 supported")
+	}
+	e.setDevice()
+
+	xShape := x.Shape()
+	if len(xShape) != 4 {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: x must be 4D, got %v", xShape)
+	}
+	n, c, h, w := xShape[0], xShape[1], xShape[2], xShape[3]
+
+	devX, cleanX, err := getDevicePtr(e, x)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: getDevicePtr(x): %w", err)
+	}
+	defer cleanX()
+
+	devScale, cleanScale, err := getDevicePtr(e, scale)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: getDevicePtr(scale): %w", err)
+	}
+	defer cleanScale()
+
+	devBias, cleanBias, err := getDevicePtr(e, bias)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: getDevicePtr(bias): %w", err)
+	}
+	defer cleanBias()
+
+	devRunMean, cleanRM, err := getDevicePtr(e, runningMean)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: getDevicePtr(runningMean): %w", err)
+	}
+	defer cleanRM()
+
+	devRunVar, cleanRV, err := getDevicePtr(e, runningVariance)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: getDevicePtr(runningVar): %w", err)
+	}
+	defer cleanRV()
+
+	outElems := n * c * h * w
+	devY, err := e.pool.Alloc(e.deviceID, outElems*f32Size)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: output alloc: %w", err)
+	}
+
+	devSaveMean, err := e.pool.Alloc(e.deviceID, c*f32Size)
+	if err != nil {
+		e.pool.Free(e.deviceID, devY, outElems*f32Size)
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: saveMean alloc: %w", err)
+	}
+
+	devSaveInvVar, err := e.pool.Alloc(e.deviceID, c*f32Size)
+	if err != nil {
+		e.pool.Free(e.deviceID, devY, outElems*f32Size)
+		e.pool.Free(e.deviceID, devSaveMean, c*f32Size)
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: saveInvVar alloc: %w", err)
+	}
+
+	if err := e.dnn.BatchNormForwardTraining(
+		devX, [4]int{n, c, h, w},
+		devScale, devBias,
+		c,
+		epsilon, expAvgFactor,
+		devRunMean, devRunVar,
+		devSaveMean, devSaveInvVar,
+		devY,
+		e.stream,
+	); err != nil {
+		e.pool.Free(e.deviceID, devY, outElems*f32Size)
+		e.pool.Free(e.deviceID, devSaveMean, c*f32Size)
+		e.pool.Free(e.deviceID, devSaveInvVar, c*f32Size)
+		return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: %w", err)
+	}
+
+	if e.stream != nil {
+		if err := e.stream.Synchronize(); err != nil {
+			e.pool.Free(e.deviceID, devY, outElems*f32Size)
+			e.pool.Free(e.deviceID, devSaveMean, c*f32Size)
+			e.pool.Free(e.deviceID, devSaveInvVar, c*f32Size)
+			return nil, nil, nil, fmt.Errorf("BatchNormForwardTraining: stream sync: %w", err)
+		}
+	}
+
+	y, err := makeGPUResult[T](e, xShape, devY, outElems)
+	if err != nil {
+		e.pool.Free(e.deviceID, devSaveMean, c*f32Size)
+		e.pool.Free(e.deviceID, devSaveInvVar, c*f32Size)
+		return nil, nil, nil, err
+	}
+
+	saveMeanT, err := makeGPUResult[T](e, []int{c}, devSaveMean, c)
+	if err != nil {
+		e.pool.Free(e.deviceID, devSaveInvVar, c*f32Size)
+		return nil, nil, nil, err
+	}
+
+	saveInvVarT, err := makeGPUResult[T](e, []int{c}, devSaveInvVar, c)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return y, saveMeanT, saveInvVarT, nil
+}
+
+// CudnnBatchNormBackward computes gradients for batch normalization via cuDNN.
+// x: [N, C, H, W], dy: [N, C, H, W], scale: [C].
+// saveMean, saveInvVariance: [C] (from BatchNormForwardTraining).
+// Returns dx: [N, C, H, W], dScale: [C], dBias: [C].
+func (e *GPUEngine[T]) CudnnBatchNormBackward(
+	_ context.Context,
+	x, dy, scale *tensor.TensorNumeric[T],
+	saveMean, saveInvVariance *tensor.TensorNumeric[T],
+) (*tensor.TensorNumeric[T], *tensor.TensorNumeric[T], *tensor.TensorNumeric[T], error) {
+	var zero T
+	if _, ok := any(zero).(float32); !ok {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: only float32 supported")
+	}
+	e.setDevice()
+
+	xShape := x.Shape()
+	if len(xShape) != 4 {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: x must be 4D, got %v", xShape)
+	}
+	n, c, h, w := xShape[0], xShape[1], xShape[2], xShape[3]
+
+	devX, cleanX, err := getDevicePtr(e, x)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: getDevicePtr(x): %w", err)
+	}
+	defer cleanX()
+
+	devDY, cleanDY, err := getDevicePtr(e, dy)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: getDevicePtr(dy): %w", err)
+	}
+	defer cleanDY()
+
+	devScale, cleanScale, err := getDevicePtr(e, scale)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: getDevicePtr(scale): %w", err)
+	}
+	defer cleanScale()
+
+	devSaveMean, cleanSM, err := getDevicePtr(e, saveMean)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: getDevicePtr(saveMean): %w", err)
+	}
+	defer cleanSM()
+
+	devSaveInvVar, cleanSIV, err := getDevicePtr(e, saveInvVariance)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: getDevicePtr(saveInvVar): %w", err)
+	}
+	defer cleanSIV()
+
+	dxElems := n * c * h * w
+	devDX, err := e.pool.Alloc(e.deviceID, dxElems*f32Size)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: dx alloc: %w", err)
+	}
+
+	devDScale, err := e.pool.Alloc(e.deviceID, c*f32Size)
+	if err != nil {
+		e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: dScale alloc: %w", err)
+	}
+
+	devDBias, err := e.pool.Alloc(e.deviceID, c*f32Size)
+	if err != nil {
+		e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+		e.pool.Free(e.deviceID, devDScale, c*f32Size)
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: dBias alloc: %w", err)
+	}
+
+	if err := e.dnn.BatchNormBackward(
+		devX, [4]int{n, c, h, w},
+		devDY,
+		devScale,
+		c,
+		devSaveMean, devSaveInvVar,
+		devDX, devDScale, devDBias,
+		e.stream,
+	); err != nil {
+		e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+		e.pool.Free(e.deviceID, devDScale, c*f32Size)
+		e.pool.Free(e.deviceID, devDBias, c*f32Size)
+		return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: %w", err)
+	}
+
+	if e.stream != nil {
+		if err := e.stream.Synchronize(); err != nil {
+			e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+			e.pool.Free(e.deviceID, devDScale, c*f32Size)
+			e.pool.Free(e.deviceID, devDBias, c*f32Size)
+			return nil, nil, nil, fmt.Errorf("CudnnBatchNormBackward: stream sync: %w", err)
+		}
+	}
+
+	dx, err := makeGPUResult[T](e, xShape, devDX, dxElems)
+	if err != nil {
+		e.pool.Free(e.deviceID, devDScale, c*f32Size)
+		e.pool.Free(e.deviceID, devDBias, c*f32Size)
+		return nil, nil, nil, err
+	}
+
+	dScale, err := makeGPUResult[T](e, []int{c}, devDScale, c)
+	if err != nil {
+		e.pool.Free(e.deviceID, devDBias, c*f32Size)
+		return nil, nil, nil, err
+	}
+
+	dBias, err := makeGPUResult[T](e, []int{c}, devDBias, c)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return dx, dScale, dBias, nil
+}
+
+// CudnnActivationBackward computes the gradient of an activation function via cuDNN.
+// y: forward output, dy: upstream gradient, x: original input.
+// All must have the same shape. Returns dx with the same shape.
+func (e *GPUEngine[T]) CudnnActivationBackward(
+	_ context.Context,
+	x, y, dy *tensor.TensorNumeric[T],
+	mode gpuapi.ActivationMode,
+) (*tensor.TensorNumeric[T], error) {
+	var zero T
+	if _, ok := any(zero).(float32); !ok {
+		return nil, fmt.Errorf("CudnnActivationBackward: only float32 supported")
+	}
+	e.setDevice()
+
+	shape := x.Shape()
+	numElems := 1
+	for _, d := range shape {
+		numElems *= d
+	}
+
+	n4, c4, h4, w4 := 1, 1, 1, 1
+	switch len(shape) {
+	case 4:
+		n4, c4, h4, w4 = shape[0], shape[1], shape[2], shape[3]
+	case 3:
+		n4, c4, h4 = shape[0], shape[1], shape[2]
+	case 2:
+		n4, c4 = shape[0], shape[1]
+	case 1:
+		c4 = shape[0]
+	default:
+		c4 = numElems
+	}
+
+	devY, cleanY, err := getDevicePtr(e, y)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnActivationBackward: getDevicePtr(y): %w", err)
+	}
+	defer cleanY()
+
+	devDY, cleanDY, err := getDevicePtr(e, dy)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnActivationBackward: getDevicePtr(dy): %w", err)
+	}
+	defer cleanDY()
+
+	devX, cleanX, err := getDevicePtr(e, x)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnActivationBackward: getDevicePtr(x): %w", err)
+	}
+	defer cleanX()
+
+	devDX, err := e.pool.Alloc(e.deviceID, numElems*f32Size)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnActivationBackward: output alloc: %w", err)
+	}
+
+	if err := e.dnn.ActivationBackward(mode, devY, devDY, devX, devDX, [4]int{n4, c4, h4, w4}, e.stream); err != nil {
+		e.pool.Free(e.deviceID, devDX, numElems*f32Size)
+		return nil, fmt.Errorf("CudnnActivationBackward: %w", err)
+	}
+
+	if e.stream != nil {
+		if err := e.stream.Synchronize(); err != nil {
+			e.pool.Free(e.deviceID, devDX, numElems*f32Size)
+			return nil, fmt.Errorf("CudnnActivationBackward: stream sync: %w", err)
+		}
+	}
+
+	return makeGPUResult[T](e, shape, devDX, numElems)
+}
+
+// CudnnPoolingBackward computes the gradient of 2D pooling via cuDNN.
+// y: forward output [N,C,outH,outW], dy: upstream gradient [N,C,outH,outW],
+// x: forward input [N,C,H,W]. Returns dx: [N,C,H,W].
+func (e *GPUEngine[T]) CudnnPoolingBackward(
+	_ context.Context,
+	x, y, dy *tensor.TensorNumeric[T],
+	mode gpuapi.PoolingMode,
+	windowH, windowW, padH, padW, strideH, strideW int,
+) (*tensor.TensorNumeric[T], error) {
+	var zero T
+	if _, ok := any(zero).(float32); !ok {
+		return nil, fmt.Errorf("CudnnPoolingBackward: only float32 supported")
+	}
+	e.setDevice()
+
+	xShape := x.Shape()
+	yShape := y.Shape()
+	if len(xShape) != 4 {
+		return nil, fmt.Errorf("CudnnPoolingBackward: x must be 4D, got %v", xShape)
+	}
+	if len(yShape) != 4 {
+		return nil, fmt.Errorf("CudnnPoolingBackward: y must be 4D, got %v", yShape)
+	}
+
+	devY, cleanY, err := getDevicePtr(e, y)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnPoolingBackward: getDevicePtr(y): %w", err)
+	}
+	defer cleanY()
+
+	devDY, cleanDY, err := getDevicePtr(e, dy)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnPoolingBackward: getDevicePtr(dy): %w", err)
+	}
+	defer cleanDY()
+
+	devX, cleanX, err := getDevicePtr(e, x)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnPoolingBackward: getDevicePtr(x): %w", err)
+	}
+	defer cleanX()
+
+	dxElems := xShape[0] * xShape[1] * xShape[2] * xShape[3]
+	devDX, err := e.pool.Alloc(e.deviceID, dxElems*f32Size)
+	if err != nil {
+		return nil, fmt.Errorf("CudnnPoolingBackward: output alloc: %w", err)
+	}
+
+	if err := e.dnn.PoolingBackward(
+		mode,
+		devY, devDY, [4]int{yShape[0], yShape[1], yShape[2], yShape[3]},
+		devX, devDX, [4]int{xShape[0], xShape[1], xShape[2], xShape[3]},
+		windowH, windowW, padH, padW, strideH, strideW,
+		e.stream,
+	); err != nil {
+		e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+		return nil, fmt.Errorf("CudnnPoolingBackward: %w", err)
+	}
+
+	if e.stream != nil {
+		if err := e.stream.Synchronize(); err != nil {
+			e.pool.Free(e.deviceID, devDX, dxElems*f32Size)
+			return nil, fmt.Errorf("CudnnPoolingBackward: stream sync: %w", err)
+		}
+	}
+
+	return makeGPUResult[T](e, xShape, devDX, dxElems)
+}
