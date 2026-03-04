@@ -401,8 +401,14 @@ operations are non-interface methods on GPUEngine in `compute/gpu_cudnn.go`:
 | CudnnActivationForward | cudnnActivationForward | ReLU, Sigmoid, Tanh |
 | CudnnPoolingForward | cudnnPoolingForward | Max, AvgIncPad, AvgExcPad |
 | CudnnSoftmaxForward | cudnnSoftmaxForward | Channel-mode softmax |
+| Conv2dBackwardData | cudnnConvolutionBackwardData | Algo0, workspace-based |
+| Conv2dBackwardFilter | cudnnConvolutionBackwardFilter | Algo0, workspace-based |
+| BatchNormForwardTraining | cudnnBatchNormalizationForwardTraining | Saves mean/invVar for backward |
+| CudnnBatchNormBackward | cudnnBatchNormalizationBackward | Returns dx, dScale, dBias |
+| CudnnActivationBackward | cudnnActivationBackward | ReLU, Sigmoid, Tanh |
+| CudnnPoolingBackward | cudnnPoolingBackward | Max, AvgIncPad, AvgExcPad |
 
-See [ADR-008](adr/008-cudnn-integration.md) for architecture decisions.
+See [ADR-008](adr/008-cudnn-integration.md) and [ADR-014](adr/014-cudnn-backward-pass.md) for architecture decisions.
 
 ### 4.10 TensorRT Integration
 
@@ -1073,3 +1079,4 @@ ADR files in `docs/adr/`.
 | [011](adr/011-gpu-runtime-abstraction-layer.md) | GPU Runtime Abstraction Layer | 14 | GRAL interfaces decouple compute/tensor from vendor SDKs, CUDA adapters, operation-level DNN |
 | [012](adr/012-amd-rocm-backend.md) | AMD ROCm Backend | 15 | HIP runtime, rocBLAS, MIOpen adapters, HIP kernels, device registration, inference routing |
 | [013](adr/013-opencl-backend.md) | OpenCL Backend | 16 | OpenCL runtime, CLBlast, runtime kernel compilation, DNN stub, cl_mem memory pool |
+| [014](adr/014-cudnn-backward-pass.md) | cuDNN Backward Pass | 17 | Backward CGo bindings, CUDA DNN adapter, GPUEngine backward methods for training |

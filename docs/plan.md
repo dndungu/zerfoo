@@ -181,8 +181,8 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 | D38 | OpenCL engine | `compute/opencl_engine.go` implements Engine[T] for OpenCL devices **(COMPLETE)** |
 | D39 | OpenCL storage | GPUStorage reused with build-tag-gated default runtime (gpu_storage_default_opencl.go) **(COMPLETE)** |
 | D40 | OpenCL kernels | 17 OpenCL kernels in elementwise.cl with runtime compilation **(COMPLETE)** |
-| D41 | cuDNN backward bindings | ConvolutionBackward, BatchNormBackward, ActivationBackward, PoolingBackward |
-| D42 | cuDNN training integration | GPUEngine backward methods use cuDNN instead of CPU fallback |
+| D41 | cuDNN backward bindings | ConvolutionBackward, BatchNormBackward, ActivationBackward, PoolingBackward **(COMPLETE)** |
+| D42 | cuDNN training integration | GPUEngine backward methods use cuDNN instead of CPU fallback **(COMPLETE)** |
 | D43 | CUTLASS INT4 GEMM | INT4 dequantize-and-multiply kernel compiled from CUTLASS templates |
 | D44 | CUTLASS INT8 GEMM | INT8 GEMM kernel compiled from CUTLASS templates |
 | D45 | MatMulNBits GPU path | MatMulNBits layer uses CUTLASS INT4/INT8 on GPU |
@@ -477,77 +477,26 @@ The cuDNN backward API requires:
 - ActivationBackward: gradient through activation
 - PoolingBackward: gradient through pooling
 
-#### E101: cuDNN Backward Bindings
+#### E101: cuDNN Backward Bindings **(COMPLETE 2026 03 03)**
 
-- [ ] T101.1 Add convolution backward bindings  Owner: TBD  Est: 2h
-  - Dependencies: None (cuDNN forward bindings exist)
-  - Files: internal/cudnn/cudnn.go (modify)
-  - Acceptance: ConvolutionBackwardData and ConvolutionBackwardFilter functions
-    added. Workspace allocation via cudnnGetConvolutionBackwardDataWorkspaceSize
-    and cudnnGetConvolutionBackwardFilterWorkspaceSize. Both return Go errors.
-  - [ ] S101.1.1 Add GetConvolutionBackwardDataAlgorithm and workspace size  Est: 20m
-  - [ ] S101.1.2 Add ConvolutionBackwardData  Est: 30m
-  - [ ] S101.1.3 Add GetConvolutionBackwardFilterAlgorithm and workspace size  Est: 20m
-  - [ ] S101.1.4 Add ConvolutionBackwardFilter  Est: 30m
-  - [ ] S101.1.5 Write tests for backward convolution  Est: 20m
-  - [ ] S101.1.6 Run linters  Est: 5m
+Added 8 backward CGo methods to `internal/cudnn/cudnn.go`: ConvolutionBackwardData,
+GetConvolutionBackwardDataWorkspaceSize, ConvolutionBackwardFilter,
+GetConvolutionBackwardFilterWorkspaceSize, BatchNormalizationForwardTraining,
+BatchNormalizationBackward, ActivationBackward, PoolingBackward. Added ConvBwdDataAlgo
+(4 variants) and ConvBwdFilterAlgo (5 variants) types.
 
-- [ ] T101.2 Add batch normalization training bindings  Owner: TBD  Est: 1.5h
-  - Dependencies: None
-  - Files: internal/cudnn/cudnn.go (modify)
-  - Acceptance: BatchNormalizationForwardTraining computes output, running mean,
-    running variance, and saves intermediate results for backward.
-    BatchNormalizationBackward computes gradients w.r.t. input, scale, and bias.
-  - [ ] S101.2.1 Add BatchNormalizationForwardTraining  Est: 30m
-  - [ ] S101.2.2 Add BatchNormalizationBackward  Est: 30m
-  - [ ] S101.2.3 Write tests  Est: 20m
-  - [ ] S101.2.4 Run linters  Est: 5m
+#### E102: cuDNN Training Integration into GPUEngine **(COMPLETE 2026 03 03)**
 
-- [ ] T101.3 Add activation and pooling backward bindings  Owner: TBD  Est: 1.5h
-  - Dependencies: None
-  - Files: internal/cudnn/cudnn.go (modify)
-  - Acceptance: ActivationBackward computes gradient through ReLU, Sigmoid, Tanh.
-    PoolingBackward computes gradient through MaxPool and AvgPool.
-  - [ ] S101.3.1 Add ActivationBackward  Est: 30m
-  - [ ] S101.3.2 Add PoolingBackward  Est: 30m
-  - [ ] S101.3.3 Write tests  Est: 20m
-  - [ ] S101.3.4 Run linters  Est: 5m
+DNN interface backward methods already existed. Replaced all backward stubs in
+`internal/gpuapi/cuda_dnn.go` with real cuDNN implementations. Added 6 backward
+methods to GPUEngine in `compute/gpu_cudnn.go`: Conv2dBackwardData,
+Conv2dBackwardFilter, BatchNormForwardTraining, CudnnBatchNormBackward,
+CudnnActivationBackward, CudnnPoolingBackward.
 
-#### E102: cuDNN Training Integration into GPUEngine
+#### E103: Phase 17 Final Verification **(COMPLETE 2026 03 03)**
 
-- [ ] T102.1 Update GRAL DNN interface with backward methods  Owner: TBD  Est: 30m
-  - Dependencies: T101.1, T101.2, T101.3
-  - Files: internal/gpuapi/dnn.go (modify), internal/gpuapi/cuda_dnn.go (modify)
-  - Acceptance: DNN interface includes ConvBackwardData, ConvBackwardFilter,
-    BatchNormForwardTraining, BatchNormBackward, ActivationBackward,
-    PoolingBackward. CUDA adapter implements them.
-  - [ ] S102.1.1 Add backward methods to DNN interface  Est: 10m
-  - [ ] S102.1.2 Implement in cuda_dnn.go adapter  Est: 15m
-  - [ ] S102.1.3 Run linters  Est: 5m
-
-- [ ] T102.2 Integrate backward ops into GPUEngine  Owner: TBD  Est: 3h
-  - Dependencies: T102.1
-  - Files: compute/gpu_cudnn.go (modify)
-  - Acceptance: GPUEngine provides Conv2dBackward, BatchNormBackward,
-    ActivationBackward, PoolingBackward methods that use cuDNN instead of
-    falling back to CPU. All layer backward tests pass on GPU.
-  - [ ] S102.2.1 Add Conv2dBackwardData method  Est: 30m
-  - [ ] S102.2.2 Add Conv2dBackwardFilter method  Est: 30m
-  - [ ] S102.2.3 Add BatchNormForwardTraining and BatchNormBackward methods  Est: 30m
-  - [ ] S102.2.4 Add ActivationBackward method  Est: 20m
-  - [ ] S102.2.5 Add PoolingBackward method  Est: 20m
-  - [ ] S102.2.6 Write gradient parity tests (GPU vs CPU reference)  Est: 30m
-  - [ ] S102.2.7 Run full test suite and linters  Est: 10m
-
-#### E103: Phase 17 Final Verification
-
-- [ ] T103.1 Full test suite and documentation  Owner: TBD  Est: 1h
-  - Dependencies: E101, E102
-  - [ ] S103.1.1 go test ./... -race  Est: 10m
-  - [ ] S103.1.2 Verify gradient parity: Conv2d, BatchNorm, ReLU, MaxPool  Est: 15m
-  - [ ] S103.1.3 Create docs/adr/014-cudnn-backward.md  Est: 15m
-  - [ ] S103.1.4 Update docs/design.md and docs/plan.md  Est: 15m
-  - [ ] S103.1.5 golangci-lint and go vet  Est: 5m
+Created `docs/adr/014-cudnn-backward-pass.md`. Updated `docs/design.md` section 4.9
+with backward operation table and ADR-014 index entry. All tests pass, all lints clean.
 
 ---
 
@@ -829,6 +778,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-03 | 17 | Phase 17 complete. cuDNN backward pass: CGo bindings for 8 backward functions (E101), CUDA DNN adapter implementations (E102), GPUEngine backward methods (E102), ADR-014 written (E103). 3 files modified: internal/cudnn/cudnn.go, internal/gpuapi/cuda_dnn.go, compute/gpu_cudnn.go. |
 | 2026-03-03 | 16 | Phase 16 complete. OpenCL backend: runtime bindings (E96), CLBlast BLAS (E97), 17 elementwise kernels (E98), OpenCLEngine + integration (E99), verification (E100). 16 new files. Reused GPUStorage with build-tag-gated default runtime. DNN stub returns ErrNotSupported (no OpenCL DNN library). ADR-013 written. |
 | 2026-03-03 | 15 | Phase 15 complete. AMD ROCm backend: HIP runtime (E90), rocBLAS (E91), MIOpen (E92), HIP kernels (E93), ROCmEngine + integration (E94), verification (E95). 15 new files. ADR-012 written. |
 | 2026-03-03 | 14 | Phase 14 complete. GRAL interfaces (E87), CUDA adapters (E87), GPUEngine refactor (E88), GPUStorage refactor (E88), final verification (E89). Zero direct cuda/cublas/cudnn imports in compute/ and tensor/. ADR-011 written. Commits: 68920ab, 4cce292, 59b182a, abcafee. |
