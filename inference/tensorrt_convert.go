@@ -12,6 +12,22 @@ import (
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
+// ShapeRange defines min/opt/max dimensions for a single input tensor.
+// Used with DynamicShapeConfig to support variable-size inputs.
+type ShapeRange struct {
+	Min []int32
+	Opt []int32
+	Max []int32
+}
+
+// DynamicShapeConfig specifies per-input shape ranges for TensorRT optimization
+// profiles. When non-nil, the converter creates an optimization profile that
+// allows variable-size inputs within the specified ranges.
+type DynamicShapeConfig struct {
+	// InputShapes maps input index (0-based) to its shape range.
+	InputShapes []ShapeRange
+}
+
 // trtConversionResult holds the result of converting a graph to TensorRT.
 type trtConversionResult struct {
 	// serialized is the TensorRT engine bytes ready for deserialization.
@@ -20,6 +36,8 @@ type trtConversionResult struct {
 	inputNames []string
 	// outputName is the TRT output tensor name.
 	outputName string
+	// profileIndex is the optimization profile index (-1 if no dynamic shapes).
+	profileIndex int
 }
 
 // supportedTRTOps lists the operation types that can be mapped to TensorRT layers.
@@ -55,7 +73,9 @@ func (e *UnsupportedOpError) Error() string {
 // ConvertGraphToTRT walks a graph in topological order and maps each node to a
 // TensorRT layer. Returns serialized engine bytes or an UnsupportedOpError if
 // the graph contains operations that cannot be converted.
-func ConvertGraphToTRT(g *graph.Graph[float32], workspaceBytes int, fp16 bool) (*trtConversionResult, error) {
+// If dynamicShapes is non-nil, an optimization profile is created with the
+// specified min/opt/max dimensions for each input.
+func ConvertGraphToTRT(g *graph.Graph[float32], workspaceBytes int, fp16 bool, dynamicShapes *DynamicShapeConfig) (*trtConversionResult, error) {
 	nodes := g.Nodes()
 
 	// Check for unsupported ops first.
@@ -391,6 +411,29 @@ func ConvertGraphToTRT(g *graph.Graph[float32], workspaceBytes int, fp16 bool) (
 	}
 	network.MarkOutput(outTensor)
 
+	// Add optimization profile for dynamic shapes.
+	profileIndex := -1
+	if dynamicShapes != nil && len(dynamicShapes.InputShapes) > 0 {
+		if len(dynamicShapes.InputShapes) != len(inputNames) {
+			return nil, fmt.Errorf("tensorrt convert: dynamic shape config has %d entries but graph has %d inputs",
+				len(dynamicShapes.InputShapes), len(inputNames))
+		}
+		profile, err := builder.CreateOptimizationProfile()
+		if err != nil {
+			return nil, fmt.Errorf("tensorrt convert: %w", err)
+		}
+		for i, sr := range dynamicShapes.InputShapes {
+			if err := profile.SetDimensions(inputNames[i], sr.Min, sr.Opt, sr.Max); err != nil {
+				return nil, fmt.Errorf("tensorrt convert: set dimensions for %q: %w", inputNames[i], err)
+			}
+		}
+		idx, err := profile.AddToConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("tensorrt convert: add optimization profile: %w", err)
+		}
+		profileIndex = idx
+	}
+
 	// Build serialized engine.
 	serialized, err := builder.BuildSerializedNetwork(network, config)
 	if err != nil {
@@ -425,9 +468,10 @@ func ConvertGraphToTRT(g *graph.Graph[float32], workspaceBytes int, fp16 bool) (
 	}
 
 	return &trtConversionResult{
-		serialized: serialized,
-		inputNames: inputNames,
-		outputName: outputName,
+		serialized:   serialized,
+		inputNames:   inputNames,
+		outputName:   outputName,
+		profileIndex: profileIndex,
 	}, nil
 }
 

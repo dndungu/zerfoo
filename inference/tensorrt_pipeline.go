@@ -22,21 +22,31 @@ type TRTInferenceEngine struct {
 	context *tensorrt.ExecutionContext
 	stream  *cuda.Stream
 
-	inputNames []string
-	outputName string
+	inputNames   []string
+	outputName   string
+	profileIndex int  // optimization profile index; -1 means static shapes
+	dynamic      bool // whether dynamic shapes are enabled
 }
 
 // buildTRTEngine converts a graph to a TensorRT engine, using the cache if
 // available. Returns a ready-to-use TRTInferenceEngine.
-func buildTRTEngine(g *graph.Graph[float32], modelID string, opts *loadOptions) (*TRTInferenceEngine, error) {
+// If dynamicShapes is non-nil, the engine supports variable-size inputs.
+func buildTRTEngine(g *graph.Graph[float32], modelID string, opts *loadOptions, dynamicShapes *DynamicShapeConfig) (*TRTInferenceEngine, error) {
 	precision := opts.precision
 	if precision == "" {
 		precision = "fp32"
 	}
 	fp16 := precision == "fp16"
 
-	// Check cache first.
-	cacheKey, err := TRTCacheKey(modelID, precision)
+	// Build cache key including dynamic shape ranges if present.
+	cacheKeyPrecision := precision
+	if dynamicShapes != nil && len(dynamicShapes.InputShapes) > 0 {
+		cacheKeyPrecision = fmt.Sprintf("%s|dyn_%d", precision, len(dynamicShapes.InputShapes))
+		for i, sr := range dynamicShapes.InputShapes {
+			cacheKeyPrecision = fmt.Sprintf("%s|%d:%v-%v-%v", cacheKeyPrecision, i, sr.Min, sr.Opt, sr.Max)
+		}
+	}
+	cacheKey, err := TRTCacheKey(modelID, cacheKeyPrecision)
 	if err != nil {
 		return nil, fmt.Errorf("tensorrt pipeline: cache key: %w", err)
 	}
@@ -44,6 +54,7 @@ func buildTRTEngine(g *graph.Graph[float32], modelID string, opts *loadOptions) 
 	var serialized []byte
 	var inputNames []string
 	var outputName string
+	profileIndex := -1
 
 	cached, err := LoadTRTEngine(cacheKey)
 	if err != nil {
@@ -56,13 +67,14 @@ func buildTRTEngine(g *graph.Graph[float32], modelID string, opts *loadOptions) 
 		// We need to discover I/O names from the engine itself.
 	} else {
 		// Cache miss -- convert and build.
-		result, err := ConvertGraphToTRT(g, 1<<28, fp16) // 256 MB workspace
+		result, err := ConvertGraphToTRT(g, 1<<28, fp16, dynamicShapes) // 256 MB workspace
 		if err != nil {
 			return nil, fmt.Errorf("tensorrt pipeline: convert: %w", err)
 		}
 		serialized = result.serialized
 		inputNames = result.inputNames
 		outputName = result.outputName
+		profileIndex = result.profileIndex
 
 		// Save to cache.
 		if saveErr := SaveTRTEngine(cacheKey, serialized); saveErr != nil {
@@ -117,15 +129,27 @@ func buildTRTEngine(g *graph.Graph[float32], modelID string, opts *loadOptions) 
 		return nil, fmt.Errorf("tensorrt pipeline: %w", err)
 	}
 
-	return &TRTInferenceEngine{
-		logger:     logger,
-		runtime:    rt,
-		engine:     engine,
-		context:    ctx,
-		stream:     stream,
-		inputNames: inputNames,
-		outputName: outputName,
-	}, nil
+	ie := &TRTInferenceEngine{
+		logger:       logger,
+		runtime:      rt,
+		engine:       engine,
+		context:      ctx,
+		stream:       stream,
+		inputNames:   inputNames,
+		outputName:   outputName,
+		profileIndex: profileIndex,
+		dynamic:      dynamicShapes != nil && len(dynamicShapes.InputShapes) > 0,
+	}
+
+	// Set the optimization profile on the context if dynamic shapes are used.
+	if ie.dynamic && profileIndex >= 0 {
+		if err := ctx.SetOptimizationProfile(profileIndex); err != nil {
+			ie.Close()
+			return nil, fmt.Errorf("tensorrt pipeline: %w", err)
+		}
+	}
+
+	return ie, nil
 }
 
 // Forward runs inference through TensorRT with the given input tensors.
@@ -135,8 +159,14 @@ func (e *TRTInferenceEngine) Forward(inputs []*tensor.TensorNumeric[float32], ou
 		return nil, fmt.Errorf("tensorrt: expected %d inputs, got %d", len(e.inputNames), len(inputs))
 	}
 
-	// Bind input tensors.
+	// Bind input tensors and set input shapes for dynamic mode.
 	for i, t := range inputs {
+		if e.dynamic {
+			dims := toInt32Slice(t.Shape())
+			if err := e.context.SetInputShape(e.inputNames[i], dims); err != nil {
+				return nil, fmt.Errorf("tensorrt: set input shape %d: %w", i, err)
+			}
+		}
 		data := t.Data()
 		if err := e.context.SetTensorAddress(e.inputNames[i], unsafe.Pointer(&data[0])); err != nil {
 			return nil, fmt.Errorf("tensorrt: bind input %d: %w", i, err)
