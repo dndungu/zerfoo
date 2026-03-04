@@ -277,6 +277,14 @@ func (c *ConvolutionDescriptor) Set2d(padH, padW, strideH, strideW, dilationH, d
 	)
 }
 
+// SetGroupCount sets the number of groups for grouped convolution.
+func (c *ConvolutionDescriptor) SetGroupCount(groups int) error {
+	return statusError(
+		C.cudnnSetConvolutionGroupCount(c.d, C.int(groups)),
+		"cudnnSetConvolutionGroupCount",
+	)
+}
+
 // Destroy releases the convolution descriptor.
 func (c *ConvolutionDescriptor) Destroy() error {
 	return statusError(C.cudnnDestroyConvolutionDescriptor(c.d), "cudnnDestroyConvolutionDescriptor")
@@ -489,6 +497,28 @@ func (h *Handle) PoolingForward(
 			yDesc.d, y,
 		),
 		"cudnnPoolingForward",
+	)
+}
+
+// AddTensor adds a bias tensor to the output: y = alpha*b + beta*y.
+// This is commonly used to add bias after convolution.
+func (h *Handle) AddTensor(
+	alpha float32,
+	bDesc *TensorDescriptor, b unsafe.Pointer,
+	beta float32,
+	yDesc *TensorDescriptor, y unsafe.Pointer,
+) error {
+	a := C.float(alpha)
+	bt := C.float(beta)
+	return statusError(
+		C.cudnnAddTensor(
+			h.h,
+			unsafe.Pointer(&a),
+			bDesc.d, b,
+			unsafe.Pointer(&bt),
+			yDesc.d, y,
+		),
+		"cudnnAddTensor",
 	)
 }
 
