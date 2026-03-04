@@ -9,9 +9,9 @@ import (
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
-// BuildGather constructs a Gather layer. For embedding-style nodes (name contains
-// "embed_tokens" or matches known weight patterns), weights are embedded in the
-// layer. All other Gather nodes operate as general ONNX Gather (axis-0 indexing).
+// BuildGather constructs a Gather layer. For embedding-style nodes whose name
+// maps to a known weight parameter, weights are embedded in the layer. All
+// other Gather nodes operate as general ONNX Gather (axis-0 indexing).
 func BuildGather[T tensor.Numeric](
 	engine compute.Engine[T],
 	_ numeric.Arithmetic[T],
@@ -19,11 +19,15 @@ func BuildGather[T tensor.Numeric](
 	params map[string]*graph.Parameter[T],
 	_ map[string]interface{},
 ) (graph.Node[T], error) {
-	// Only embed weights for nodes that are clearly embedding lookups.
+	// Derive weight patterns from the node name. ONNX node names use "/"
+	// separators (e.g. "/model/embed_tokens/Gather") while parameter names
+	// use "." separators (e.g. "model.embed_tokens.weight"). Normalize the
+	// node name so the pattern matches the parameter.
+	normalized := strings.ReplaceAll(strings.TrimPrefix(name, "/"), "/", ".")
 	weightPatterns := []string{
-		"model.embed_tokens.weight",
 		name + ".weight",
 		strings.TrimSuffix(name, "/Gather") + ".weight",
+		strings.TrimSuffix(normalized, ".Gather") + ".weight",
 	}
 	for _, pattern := range weightPatterns {
 		if param, exists := params[pattern]; exists {
