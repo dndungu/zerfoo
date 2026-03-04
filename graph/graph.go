@@ -99,6 +99,27 @@ func (g *Graph[T]) Backward(ctx context.Context, mode types.BackwardMode, initia
 	return nil
 }
 
+// ClearMemo releases intermediate tensors from the last forward pass.
+// Call this after Backward to free GPU device memory between training steps.
+// Input tensors and parameter values are not released.
+func (g *Graph[T]) ClearMemo() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	inputSet := make(map[Node[T]]bool, len(g.inputs))
+	for _, n := range g.inputs {
+		inputSet[n] = true
+	}
+
+	for node, t := range g.memo {
+		if inputSet[node] {
+			continue // Don't release caller-owned input tensors.
+		}
+		t.Release()
+	}
+	g.memo = nil
+}
+
 // Parameters returns all the trainable parameters in the graph.
 func (g *Graph[T]) Parameters() []*Parameter[T] {
 	var params []*Parameter[T]
