@@ -90,6 +90,12 @@ func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 		if start < 0 {
 			start = 0
 		}
+		if start > shape[dim] {
+			start = shape[dim]
+		}
+		if start > end {
+			end = start // empty range
+		}
 		ranges[dim] = [2]int{start, end}
 	}
 
