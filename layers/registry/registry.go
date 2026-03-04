@@ -65,6 +65,7 @@ func RegisterAll() {
 	model.RegisterLayer("ConstantOfShape", core.BuildConstantOfShape[float32])
 	model.RegisterLayer("ScatterND", core.BuildScatterND[float32])
 	model.RegisterLayer("Trilu", core.BuildTrilu[float32])
+	model.RegisterLayer("Max", core.BuildMax[float32])
 
 	// Embeddings
 

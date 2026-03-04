@@ -65,6 +65,7 @@ func TestRegisterAll(t *testing.T) {
 		"ConstantOfShape",
 		"ScatterND",
 		"Trilu",
+		"Max",
 		// ReduceSum
 		"ReduceSum",
 		// Transpose
