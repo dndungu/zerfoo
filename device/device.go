@@ -24,6 +24,8 @@ const (
 	CPU Type = iota
 	// CUDA represents the NVIDIA GPU device type.
 	CUDA
+	// ROCm represents the AMD GPU device type via HIP/ROCm.
+	ROCm
 )
 
 // --- Device Registry ---
