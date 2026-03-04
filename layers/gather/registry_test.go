@@ -37,7 +37,7 @@ func TestBuildGather_WithWeightParam(t *testing.T) {
 	}
 }
 
-func TestBuildGather_WithGenericWeightParam(t *testing.T) {
+func TestBuildGather_WithGenericWeightParam_NoEmbed(t *testing.T) {
 	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
 	ops := numeric.Float32Ops{}
 
@@ -46,7 +46,8 @@ func TestBuildGather_WithGenericWeightParam(t *testing.T) {
 		t.Fatalf("failed to create weight tensor: %v", err)
 	}
 
-	// Use a param name that contains "weight" but doesn't match specific patterns
+	// Generic weight param that doesn't match any embedding pattern should
+	// NOT be embedded — the node operates as a general Gather.
 	params := map[string]*graph.Parameter[float32]{
 		"some_layer.weight_data": {Value: w},
 	}
@@ -61,8 +62,8 @@ func TestBuildGather_WithGenericWeightParam(t *testing.T) {
 		t.Fatalf("BuildGather returned %T, want *Gather[float32]", node)
 	}
 
-	if !g.HasEmbeddedWeights() {
-		t.Error("expected embedded weights from generic weight parameter")
+	if g.HasEmbeddedWeights() {
+		t.Error("generic weight param should NOT be embedded")
 	}
 }
 
@@ -79,7 +80,6 @@ func TestBuildGather_WithNamedWeightParam(t *testing.T) {
 	}{
 		{"name.weight", "emb", "emb.weight"},
 		{"name/Gather trimmed", "emb/Gather", "emb.weight"},
-		{"name_weight", "emb", "emb_weight"},
 	}
 
 	for _, tc := range tests {
@@ -101,7 +101,7 @@ func TestBuildGather_WithNamedWeightParam(t *testing.T) {
 	}
 }
 
-func TestBuildGather_NoParams_CreatesDummy(t *testing.T) {
+func TestBuildGather_NoParams_GeneralGather(t *testing.T) {
 	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
 	ops := numeric.Float32Ops{}
 
@@ -117,7 +117,7 @@ func TestBuildGather_NoParams_CreatesDummy(t *testing.T) {
 		t.Fatalf("BuildGather returned %T, want *Gather[float32]", node)
 	}
 
-	if !g.HasEmbeddedWeights() {
-		t.Error("expected dummy embedded weights")
+	if g.HasEmbeddedWeights() {
+		t.Error("no-params Gather should NOT have embedded weights")
 	}
 }

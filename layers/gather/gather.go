@@ -100,26 +100,76 @@ func (g *Gather[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 			indices = intTensor
 		}
 	} else {
-		// Original behavior: expect params and indices as inputs
-		if len(inputs) != 2 {
-			return nil, fmt.Errorf("Gather layer expects 2 inputs (params, indices), got %d", len(inputs))
+		// General ONNX Gather: data and indices as inputs, axis=0.
+		if len(inputs) < 2 {
+			return nil, fmt.Errorf("Gather layer expects 2 inputs (data, indices), got %d", len(inputs))
 		}
 
 		params = inputs[0]
 
-		var ok bool
+		// Convert float32 indices to int (ONNX Gather indices are int64 but
+		// zerfoo uses float32 throughout).
+		idxTensor := inputs[1]
+		idxData := idxTensor.Data()
+		intData := make([]int, len(idxData))
+		for i, v := range idxData {
+			intData[i] = int(float64(v))
+		}
 
-		indices, ok = any(inputs[1]).(*tensor.TensorNumeric[int])
-		if !ok {
-			return nil, fmt.Errorf("Gather layer expects indices to be of type *tensor.TensorNumeric[int], got %T", inputs[1])
+		var err error
+		indices, err = tensor.New[int](idxTensor.Shape(), intData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create int indices tensor: %w", err)
 		}
 	}
 
-	// For Gather operation, the output shape should be [batch_size, num_indices, embedding_dim]
-	// where batch_size and num_indices come from indices shape, and embedding_dim from params
-	batchSize := indices.Shape()[0]
-	numIndices := indices.Shape()[1]
-	embeddingDim := params.Shape()[1]
+	idxShape := indices.Shape()
+	paramShape := params.Shape()
+
+	// Handle scalar/1D index gathering from 1D data (e.g. gather one element
+	// from a Shape output).
+	if len(idxShape) == 0 || (len(idxShape) == 1 && idxShape[0] == 1) {
+		// Scalar gather: return a single element from params axis 0.
+		idx := indices.Data()[0]
+		if idx < 0 {
+			idx += paramShape[0]
+		}
+		subShape := paramShape[1:]
+		if len(subShape) == 0 {
+			subShape = []int{}
+		}
+		stride := 1
+		for _, d := range subShape {
+			stride *= d
+		}
+		start := idx * stride
+		end := start + stride
+		if end > len(params.Data()) {
+			end = len(params.Data())
+		}
+		if start >= len(params.Data()) {
+			start = len(params.Data()) - stride
+		}
+		result := params.Data()[start:end]
+		g.outputShape = subShape
+		return tensor.New(subShape, result)
+	}
+
+	// Embedding-style gather: 2D indices, 2D+ params.
+	if len(idxShape) < 2 {
+		// Reshape 1D indices to [1, N]
+		newShape := []int{1, idxShape[0]}
+		var err error
+		indices, err = tensor.New[int](newShape, indices.Data())
+		if err != nil {
+			return nil, fmt.Errorf("failed to reshape indices: %w", err)
+		}
+		idxShape = newShape
+	}
+
+	batchSize := idxShape[0]
+	numIndices := idxShape[1]
+	embeddingDim := paramShape[len(paramShape)-1]
 	outputShape := []int{batchSize, numIndices, embeddingDim}
 	g.outputShape = outputShape
 

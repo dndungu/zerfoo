@@ -1,7 +1,6 @@
 package gather
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -10,8 +9,9 @@ import (
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
-// BuildGather constructs a Gather layer. It attempts to resolve embedding weights
-// from common parameter naming patterns; otherwise a minimal dummy tensor is used.
+// BuildGather constructs a Gather layer. For embedding-style nodes (name contains
+// "embed_tokens" or matches known weight patterns), weights are embedded in the
+// layer. All other Gather nodes operate as general ONNX Gather (axis-0 indexing).
 func BuildGather[T tensor.Numeric](
 	engine compute.Engine[T],
 	_ numeric.Arithmetic[T],
@@ -19,48 +19,18 @@ func BuildGather[T tensor.Numeric](
 	params map[string]*graph.Parameter[T],
 	_ map[string]interface{},
 ) (graph.Node[T], error) {
-	// Try to find any weights parameter that could be used with this Gather layer
-	var embeddingWeights *graph.Parameter[T]
-
-	// Common patterns for weights parameters
+	// Only embed weights for nodes that are clearly embedding lookups.
 	weightPatterns := []string{
-		"model.embed_tokens.weight", // For embedding layers
+		"model.embed_tokens.weight",
 		name + ".weight",
 		strings.TrimSuffix(name, "/Gather") + ".weight",
-		name + "_weight",
 	}
-
-	// Also try to find any parameter that contains "weight" in the name
-	for paramName, param := range params {
-		if strings.Contains(paramName, "weight") {
-			weightPatterns = append(weightPatterns, paramName)
-			embeddingWeights = param
-
-			break
-		}
-	}
-
 	for _, pattern := range weightPatterns {
 		if param, exists := params[pattern]; exists {
-			embeddingWeights = param
-
-			break
+			return NewWithWeights[T](engine, param.Value), nil
 		}
 	}
 
-	if embeddingWeights != nil {
-		// Create Gather layer with embedded weights (expects only indices input)
-		return NewWithWeights[T](engine, embeddingWeights.Value), nil
-	}
-
-	// Create a dummy weight tensor - this is a workaround for Gemma's pattern
-	// In a real implementation, we'd need to handle this more elegantly
-	dummyShape := []int{1, 1} // Minimal shape
-
-	dummyTensor, err := tensor.New[T](dummyShape, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dummy tensor: %w", err)
-	}
-
-	return NewWithWeights[T](engine, dummyTensor), nil
+	// General-purpose Gather: no embedded weights, takes (data, indices) inputs.
+	return New[T](engine), nil
 }

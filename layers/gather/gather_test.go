@@ -217,18 +217,21 @@ func TestForward_WithoutWeights_WrongInputCount(t *testing.T) {
 	}
 }
 
-func TestForward_WithoutWeights_WrongIndicesType(t *testing.T) {
+func TestForward_WithoutWeights_Float32Indices(t *testing.T) {
 	engine := newEngine()
 	g := New[float32](engine)
 	ctx := context.Background()
 
-	// Both inputs are float32, but indices needs to be *tensor.TensorNumeric[int]
-	params, _ := tensor.New[float32]([]int{4, 3}, nil)
-	indices, _ := tensor.New[float32]([]int{1, 2}, nil)
+	// General Gather now accepts float32 indices (converts to int internally).
+	params, _ := tensor.New[float32]([]int{4, 3}, []float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
+	indices, _ := tensor.New[float32]([]int{}, []float32{1}) // scalar index
 
-	_, err := g.Forward(ctx, params, indices)
-	if err == nil {
-		t.Error("Forward with float32 indices should fail (expects int)")
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+	if out == nil {
+		t.Fatal("output is nil")
 	}
 }
 

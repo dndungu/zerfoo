@@ -91,7 +91,7 @@ func TestBuildGather_NoWeights(t *testing.T) {
 	eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
 	ops := numeric.Float32Ops{}
 
-	// No parameters at all -> creates dummy tensor
+	// No parameters at all -> general Gather (no embedded weights).
 	node, err := BuildGather(eng, ops, "layer/Gather", nil, nil)
 	if err != nil {
 		t.Fatalf("BuildGather failed: %v", err)
@@ -100,8 +100,8 @@ func TestBuildGather_NoWeights(t *testing.T) {
 	if !ok {
 		t.Fatal("expected *Gather[float32]")
 	}
-	if !g.HasEmbeddedWeights() {
-		t.Error("expected dummy embedded weights")
+	if g.HasEmbeddedWeights() {
+		t.Error("expected no embedded weights for general Gather")
 	}
 }
 
@@ -133,7 +133,7 @@ func TestBuildGather_WithGenericWeightKey(t *testing.T) {
 	wTensor, _ := tensor.New[float32]([]int{8, 3}, nil)
 	param, _ := graph.NewParameter("some_weight_param", wTensor, tensor.New[float32])
 
-	// Key contains "weight" -> matched by the generic contains check
+	// Generic "weight" key no longer triggers embedding — only specific patterns.
 	params := map[string]*graph.Parameter[float32]{
 		"some_weight_param": param,
 	}
@@ -143,7 +143,7 @@ func TestBuildGather_WithGenericWeightKey(t *testing.T) {
 		t.Fatalf("BuildGather failed: %v", err)
 	}
 	g := node.(*Gather[float32])
-	if !g.HasEmbeddedWeights() {
-		t.Error("expected embedded weights from generic weight key")
+	if g.HasEmbeddedWeights() {
+		t.Error("generic weight key should NOT trigger embedded weights")
 	}
 }
