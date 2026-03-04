@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -370,22 +369,6 @@ func BuildFromZMF[T tensor.Numeric](
 			}
 		}
 
-		// Materialize constant-promoted attributes as additional inputs.
-		// The zonnx converter promotes constant ONNX inputs to node
-		// attributes (keys look like "/Constant_output_0" or "onnx::...").
-		// Skip ops whose constants are already consumed by special-case
-		// handling above (Gather in BuildGather, Unsqueeze/Reshape in the
-		// switch above).
-		switch nodeProto.OpType {
-		case "Gather", "Unsqueeze", "Reshape", "Constant",
-			"SimplifiedLayerNormalization", "SkipSimplifiedLayerNormalization":
-			// Already handled.
-		default:
-			actualInputNames = materializeConstantAttrs(
-				nodeProto, actualInputNames, instantiatedNodes, ops,
-			)
-		}
-
 		// Connect inputs
 		inputNodes := make([]graph.Node[T], len(actualInputNames))
 		for i, inputName := range actualInputNames {
@@ -720,75 +703,6 @@ func isConstantPromotedAttr(key string) bool {
 		return true
 	}
 	return false
-}
-
-// materializeConstantAttrs scans a node's attributes for constant-promoted
-// values (int64 or float32 arrays with ONNX-style keys). Each constant is
-// converted to a parameterNode and appended to the input list so the layer's
-// Forward method receives the expected number of inputs.
-func materializeConstantAttrs[T tensor.Numeric](
-	nodeProto *zmf.Node,
-	inputNames []string,
-	nodes map[string]graph.Node[T],
-	ops numeric.Arithmetic[T],
-) []string {
-	// Collect constant-promoted attribute keys in sorted order for determinism.
-	var constKeys []string
-	for k, attr := range nodeProto.Attributes {
-		if !isConstantPromotedAttr(k) {
-			continue
-		}
-		// Only promote numeric array or scalar attributes.
-		switch attr.Value.(type) {
-		case *zmf.Attribute_Ints, *zmf.Attribute_Floats, *zmf.Attribute_I, *zmf.Attribute_F:
-			constKeys = append(constKeys, k)
-		}
-	}
-	if len(constKeys) == 0 {
-		return inputNames
-	}
-	sort.Strings(constKeys)
-
-	result := make([]string, len(inputNames), len(inputNames)+len(constKeys))
-	copy(result, inputNames)
-
-	for _, key := range constKeys {
-		// Skip if already materialized.
-		if _, exists := nodes[key]; exists {
-			result = append(result, key)
-			continue
-		}
-
-		attr := nodeProto.Attributes[key]
-		var t *tensor.TensorNumeric[T]
-
-		switch v := attr.Value.(type) {
-		case *zmf.Attribute_Ints:
-			vals := make([]T, len(v.Ints.Val))
-			for i, iv := range v.Ints.Val {
-				vals[i] = T(iv)
-			}
-			t, _ = tensor.New[T]([]int{len(vals)}, vals)
-		case *zmf.Attribute_Floats:
-			vals := make([]T, len(v.Floats.Val))
-			for i, fv := range v.Floats.Val {
-				vals[i] = T(fv)
-			}
-			t, _ = tensor.New[T]([]int{len(vals)}, vals)
-		case *zmf.Attribute_I:
-			t, _ = tensor.New[T]([]int{1}, []T{T(v.I)})
-		case *zmf.Attribute_F:
-			t, _ = tensor.New[T]([]int{1}, []T{T(v.F)})
-		}
-
-		if t != nil {
-			pNode := &parameterNode[T]{value: t}
-			nodes[key] = pNode
-			result = append(result, key)
-		}
-	}
-
-	return result
 }
 
 // convertAttributes converts ZMF attributes to a more usable map[string]interface{}.
