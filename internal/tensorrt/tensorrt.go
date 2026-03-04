@@ -455,3 +455,63 @@ func (c *ExecutionContext) EnqueueV3(stream unsafe.Pointer) error {
 	}
 	return nil
 }
+
+// SetInputShape sets the input shape for a named tensor on the execution context.
+// Required for dynamic shapes before calling EnqueueV3.
+func (c *ExecutionContext) SetInputShape(name string, dims []int32) error {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	if C.trt_context_set_input_shape(c.ptr, cname, C.int(len(dims)),
+		(*C.int32_t)(unsafe.Pointer(&dims[0]))) == 0 {
+		return fmt.Errorf("tensorrt: failed to set input shape for %q", name)
+	}
+	return nil
+}
+
+// SetOptimizationProfile sets the active optimization profile on the context.
+func (c *ExecutionContext) SetOptimizationProfile(index int) error {
+	if C.trt_context_set_optimization_profile(c.ptr, C.int(index)) == 0 {
+		return fmt.Errorf("tensorrt: failed to set optimization profile %d", index)
+	}
+	return nil
+}
+
+// OptimizationProfile wraps a TensorRT IOptimizationProfile.
+type OptimizationProfile struct {
+	ptr C.trt_optimization_profile_t
+}
+
+// CreateOptimizationProfile creates a new optimization profile from the builder.
+func (b *Builder) CreateOptimizationProfile() (*OptimizationProfile, error) {
+	ptr := C.trt_create_optimization_profile(b.ptr)
+	if ptr == nil {
+		return nil, fmt.Errorf("tensorrt: failed to create optimization profile")
+	}
+	return &OptimizationProfile{ptr: ptr}, nil
+}
+
+// SetDimensions sets the min/opt/max dimensions for a named input tensor.
+func (p *OptimizationProfile) SetDimensions(inputName string, minDims, optDims, maxDims []int32) error {
+	if len(minDims) != len(optDims) || len(minDims) != len(maxDims) {
+		return fmt.Errorf("tensorrt: min/opt/max dims must have equal length")
+	}
+	cname := C.CString(inputName)
+	defer C.free(unsafe.Pointer(cname))
+	if C.trt_profile_set_dimensions(p.ptr, cname, C.int(len(minDims)),
+		(*C.int32_t)(unsafe.Pointer(&minDims[0])),
+		(*C.int32_t)(unsafe.Pointer(&optDims[0])),
+		(*C.int32_t)(unsafe.Pointer(&maxDims[0]))) == 0 {
+		return fmt.Errorf("tensorrt: failed to set dimensions for %q", inputName)
+	}
+	return nil
+}
+
+// AddToConfig adds this optimization profile to a builder config.
+// Returns the profile index.
+func (p *OptimizationProfile) AddToConfig(config *BuilderConfig) (int, error) {
+	idx := int(C.trt_config_add_optimization_profile(config.ptr, p.ptr))
+	if idx < 0 {
+		return -1, fmt.Errorf("tensorrt: failed to add optimization profile")
+	}
+	return idx, nil
+}

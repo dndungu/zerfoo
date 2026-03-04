@@ -411,3 +411,46 @@ int trt_context_enqueue_v3(trt_context_t context, void* stream) {
     auto* ctx = static_cast<IExecutionContext*>(context);
     return ctx->enqueueV3(static_cast<cudaStream_t>(stream)) ? 1 : 0;
 }
+
+/* ---- Optimization Profiles (dynamic shapes) ---- */
+
+trt_optimization_profile_t trt_create_optimization_profile(trt_builder_t builder) {
+    auto* b = static_cast<IBuilder*>(builder);
+    IOptimizationProfile* profile = b->createOptimizationProfile();
+    return static_cast<void*>(profile);
+}
+
+int trt_profile_set_dimensions(trt_optimization_profile_t profile,
+                               const char* input_name,
+                               int nb_dims,
+                               const int32_t* min_dims,
+                               const int32_t* opt_dims,
+                               const int32_t* max_dims) {
+    auto* p = static_cast<IOptimizationProfile*>(profile);
+    bool ok = p->setDimensions(input_name, OptProfileSelector::kMIN,
+                               toDims(nb_dims, min_dims));
+    ok = ok && p->setDimensions(input_name, OptProfileSelector::kOPT,
+                                toDims(nb_dims, opt_dims));
+    ok = ok && p->setDimensions(input_name, OptProfileSelector::kMAX,
+                                toDims(nb_dims, max_dims));
+    return ok ? 1 : 0;
+}
+
+int trt_config_add_optimization_profile(trt_builder_config_t config,
+                                        trt_optimization_profile_t profile) {
+    auto* cfg = static_cast<IBuilderConfig*>(config);
+    auto* p = static_cast<IOptimizationProfile*>(profile);
+    return cfg->addOptimizationProfile(p);
+}
+
+int trt_context_set_input_shape(trt_context_t context, const char* name,
+                                int nb_dims, const int32_t* dims) {
+    auto* ctx = static_cast<IExecutionContext*>(context);
+    return ctx->setInputShape(name, toDims(nb_dims, dims)) ? 1 : 0;
+}
+
+int trt_context_set_optimization_profile(trt_context_t context,
+                                         int profile_index) {
+    auto* ctx = static_cast<IExecutionContext*>(context);
+    return ctx->setOptimizationProfileShared(profile_index) ? 1 : 0;
+}

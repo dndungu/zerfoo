@@ -176,12 +176,42 @@ void trt_destroy_engine(trt_engine_t engine);
 int trt_engine_num_io_tensors(trt_engine_t engine);
 const char* trt_engine_get_io_tensor_name(trt_engine_t engine, int index);
 
+/* ---- Optimization Profiles (dynamic shapes) ---- */
+typedef void* trt_optimization_profile_t;
+
+/* Creates a new optimization profile from a builder. */
+trt_optimization_profile_t trt_create_optimization_profile(trt_builder_t builder);
+
+/* Sets min/opt/max dimensions for a named input tensor in the profile.
+ * Returns 1 on success, 0 on failure. */
+int trt_profile_set_dimensions(trt_optimization_profile_t profile,
+                               const char* input_name,
+                               int nb_dims,
+                               const int32_t* min_dims,
+                               const int32_t* opt_dims,
+                               const int32_t* max_dims);
+
+/* Adds an optimization profile to the builder config. Returns profile index. */
+int trt_config_add_optimization_profile(trt_builder_config_t config,
+                                        trt_optimization_profile_t profile);
+
 /* ---- ExecutionContext ---- */
 trt_context_t trt_create_execution_context(trt_engine_t engine);
 void trt_destroy_execution_context(trt_context_t context);
 int trt_context_set_tensor_address(trt_context_t context, const char* name,
                                    void* data);
 int trt_context_enqueue_v3(trt_context_t context, void* stream);
+
+/* Sets the input shape for a named tensor on the execution context.
+ * Required for dynamic shapes before calling enqueueV3.
+ * Returns 1 on success, 0 on failure. */
+int trt_context_set_input_shape(trt_context_t context, const char* name,
+                                int nb_dims, const int32_t* dims);
+
+/* Sets the active optimization profile on the execution context.
+ * Returns 1 on success, 0 on failure. */
+int trt_context_set_optimization_profile(trt_context_t context,
+                                         int profile_index);
 
 #ifdef __cplusplus
 }
