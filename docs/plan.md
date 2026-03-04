@@ -94,7 +94,7 @@ Phase 21 metrics:
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| Model parity on GPU | 7 model families tested | 8 PASS, 13 SKIP (see ADR-018) |
+| Model parity on GPU | 7 model families tested | 11 PASS, 10 SKIP (see ADR-018) |
 | Multi-GPU gap documented | Prerequisites listed | ACHIEVED (ADR-017 updated, script created) |
 
 ---
@@ -161,8 +161,8 @@ See [ADR-016](adr/016-tensorrt-dynamic-shapes.md).
 ### Phase 20: DGX Spark Hardware Validation — COMPLETE 2026-03-03
 
 ARM64 build (10 fixes), GPU tests (66 pkgs pass), benchmarks (MatMul 46x,
-flash 147us), feature gaps (FP4 blocked, BF16 3-5d). Model parity: 8 PASS
-(Llama3, Qwen25, FlashAttentionGQA), 13 SKIP.
+flash 147us), feature gaps (FP4 blocked, BF16 3-5d). Model parity: 11 PASS
+(Llama3, Qwen25, Gemma3, FlashAttentionGQA), 10 SKIP.
 See [ADR-017](adr/017-dgx-spark-hardware-validation.md),
 [ADR-018](adr/018-model-parity-testing.md), design.md Section 15.
 
@@ -227,19 +227,13 @@ variants are preferred to fit within DGX Spark memory.
   - [ ] S114.1.2 Build zonnx binary  Est: 15m
   - [ ] S114.1.3 Verify CLI works  Est: 5m
 
-- [ ] T114.2 Download and convert Gemma 3 model  Owner: TBD  Est: 1h
-  - Dependencies: T114.1
-  - Steps:
-    1. Identify smallest Gemma 3 ONNX variant on HuggingFace
-    2. `zonnx download <repo>` to ~/models/gemma3/
-    3. `zonnx convert ~/models/gemma3/ ~/models/gemma3.zmf`
-    4. Verify ZMF file exists and is non-empty
-  - Acceptance: ~/models/gemma3.zmf exists; ~/models/gemma3/ has config.json and
-    tokenizer.json.
-  - [ ] S114.2.1 Find smallest Gemma 3 ONNX variant  Est: 10m
-  - [ ] S114.2.2 Download model  Est: 20m
-  - [ ] S114.2.3 Convert to ZMF  Est: 15m
-  - [ ] S114.2.4 Verify files  Est: 5m
+- [x] T114.2 Download and convert Gemma 3 model  2026-03-04
+  - Downloaded google/gemma-3-1b-it via optimum-cli ONNX export on DGX Spark.
+  - Converted with zonnx (after root-cause fix for integer initializer promotion).
+  - Fixed: tokenizer array-of-arrays merges format, Gather embedded-indices,
+    Slice hybrid mode and range clamping, zonnx integer initializer promotion.
+  - Acceptance: ~/models/gemma3/model.zmf exists (3.8 GB, 381 params).
+    TestGemma3ForwardPass PASS, TestGemma3GreedyDecode PASS, TestGemma3Generation PASS.
 
 - [x] T114.3 Download and convert Llama 3 model  2026-03-04
   - Used onnx-community/Llama-3.2-1B from HuggingFace (previously downloaded).
@@ -276,10 +270,10 @@ variants are preferred to fit within DGX Spark memory.
   - Acceptance: All model parity tests pass for converted models. Tests for
     models that could not be converted document the reason for skipping.
   - [x] S114.5.3 Investigate and fix any failures  2026-03-04
-    - Fixed 10 issues across zerfoo and zonnx repos. See ADR-018.
+    - Fixed 10+ issues across zerfoo and zonnx repos. See ADR-018.
   - [x] S114.5.4 Document results  2026-03-04
-    - 8 PASS: FlashAttentionGQA, Llama3 (FP/GD/Gen), Qwen25 (FP/GD/Gen)
-    - 13 SKIP: Mistral, Phi4, Gemma3, DeepSeek, SigLIP (no ZMF), MultiGPU (1 device)
+    - 11 PASS: FlashAttentionGQA, Llama3 (FP/GD/Gen), Qwen25 (FP/GD/Gen), Gemma3 (FP/GD/Gen)
+    - 10 SKIP: Mistral, Phi4, DeepSeek, SigLIP (no ZMF), MultiGPU (1 device)
 
 - [x] T114.6 Create test automation script  2026-03-04
   - File: scripts/dgx-spark-parity.sh (new)
@@ -404,6 +398,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-04 | 21 | Gemma 3 parity PASS (FP/GD/Gen). Fixes: tokenizer merges format, Gather embedded-indices, Slice hybrid mode, zonnx initializer promotion. Model parity now 11 PASS, 10 SKIP. |
 | 2026-03-04 | 21 | E115 COMPLETE. Multi-GPU test gap documented in ADR-017 (6 tests, hardware prereqs). Test runner script created (scripts/dgx-spark-multigpu.sh). Plan trimmed 1411->522 lines. ADR-018 written. |
 | 2026-03-03 | 20 | Phase 20 COMPLETE. ARM64 build (10 fixes), GPU tests (66 pkgs), benchmarks, feature gaps. ADR-017 written. |
 | 2026-03-03 | 14-19 | Phases 14-19 all COMPLETE. GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8 GEMM, TRT dynamic shapes. ADRs 011-016 written. |

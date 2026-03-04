@@ -38,6 +38,11 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 | 8 | Cos/Sin: elementwise layers missing for RoPE | Add Cos and Sin layers | e119caa |
 | 9 | zonnx: external data files not loaded | Load ONNX external data (model.onnx_data) | 8830eb5 |
 | 10 | Generator: 3D input shape incompatible with Gather | Use 2D [1, seqLen] input shape | 8f003ad |
+| 11 | Tokenizer: array-of-arrays merges format unsupported | Support both string and array merges formats | 830905e |
+| 12 | Gather: embedded constant indices not detected | Add NewWithIndices + attribute detection in BuildGather | acae458 |
+| 13 | Slice: hybrid mode (dynamic starts, attribute ends) unsupported | Add 2-input hybrid mode to Slice.Forward | 7cafb68 |
+| 14 | Slice: out-of-range start for zero-dim tensors | Clamp start to dim size, handle empty ranges | 0937e90 |
+| 15 | zonnx: integer initializer inputs promoted to attributes | Keep initializer inputs as graph references | a1dfa04 |
 
 ## Results
 
@@ -50,14 +55,16 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 | Qwen25 ForwardPass | PASS | Qwen/Qwen2.5-0.5B |
 | Qwen25 GreedyDecode | PASS | |
 | Qwen25 Generation | PASS | |
+| Gemma3 ForwardPass | PASS | google/gemma-3-1b-it (optimum export) |
+| Gemma3 GreedyDecode | PASS | |
+| Gemma3 Generation | PASS | |
 | MultiGPU DualDevice | SKIP | Single GPU device |
 | Mistral (3 tests) | SKIP | No ZMF: HF auth required |
 | Phi4 (3 tests) | SKIP | No ZMF: HF auth required |
-| Gemma3 (3 tests) | SKIP | No ZMF: HF auth required |
 | DeepSeek (3 tests) | SKIP | No ZMF: model too large |
 | SigLIP (1 test) | SKIP | No ZMF: HF auth required |
 
-**Summary:** 8 PASS, 13 SKIP (5 families blocked on HF auth/download size,
+**Summary:** 11 PASS, 10 SKIP (4 families blocked on HF auth/download size,
 1 test blocked on single-GPU hardware).
 
 ## Infrastructure
@@ -70,9 +77,11 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 
 ## Consequences
 
-- Remaining 5 model families (Mistral, Phi4, Gemma3, DeepSeek, SigLIP) are
-  blocked on HuggingFace authentication or download size constraints.
+- Remaining 4 model families (Mistral, Phi4, DeepSeek, SigLIP) are blocked on
+  HuggingFace authentication or download size constraints.
 - Multi-GPU parity test requires a second DGX Spark unit connected via
   ConnectX-7.
-- The 10 bug fixes improved ONNX compatibility for all models, not just the
-  two tested families.
+- The 15 bug fixes improved ONNX compatibility for all models, not just the
+  three tested families.
+- The zonnx root-cause fix (commit a1dfa04) eliminates the need for workaround
+  code in the builder; dead `materializeConstantAttrs` removed in 671495f.
