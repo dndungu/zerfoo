@@ -1,5 +1,6 @@
 CXX ?= g++
-CXXFLAGS ?= -O2 -std=c++17 -I/usr/include/x86_64-linux-gnu
+MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo x86_64-linux-gnu)
+CXXFLAGS ?= -O2 -std=c++17 -I/usr/include/$(MULTIARCH)
 
 SRCS = cshim/trt_capi.cpp
 OBJS = cshim/trt_capi.o
