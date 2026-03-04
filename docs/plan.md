@@ -670,29 +670,31 @@ Passwordless SSH key authentication configured from development machine.
   - [x] S109.2.2 Verify go build ./... passes  Completed: 2026 03 03
   - [x] S109.2.3 Run golangci-lint (0 issues)  Completed: 2026 03 03
 
-- [ ] T109.3 Verify CGo linkage on aarch64 CUDA 13.0  Owner: TBD  Est: 1h
+- [x] T109.3 Verify CGo linkage on aarch64 CUDA 13.0  Owner: TBD  Est: 1h  Completed: 2026 03 03
   - Dependencies: T109.0, T109.1, T109.2
   - Files: All files with `//go:build cuda` (29 production files)
   - Steps on DGX Spark (ndungu@192.168.86.250):
     1. Clone repo and run `go build -tags cuda ./...`
     3. Run `go build -tags cuda,cutlass ./...`
     4. Fix any compilation errors from CUDA 13 API changes
-  - Acceptance: Both builds succeed with 0 errors on DGX Spark.
-  - Risk: CUDA 13.0 may deprecate APIs we use. Check cudaGetDeviceProperties,
-    cudnnCreate, cublasCreate signatures.
-  - [ ] S109.3.1 Clone repo on DGX Spark  Est: 10m
-  - [ ] S109.3.2 Build static libraries (libkernels.a sm_121, libtrt_capi.a aarch64)  Est: 15m
-  - [ ] S109.3.3 Run go build -tags cuda ./...  Est: 10m
-  - [ ] S109.3.4 Fix any CUDA 13 API deprecation errors  Est: 20m
-  - [ ] S109.3.5 Run go build -tags cuda,cutlass ./...  Est: 10m
+  - Acceptance: Both builds succeed with 0 errors on DGX Spark. ACHIEVED.
+  - Fixes applied: flash_attention BLOCK_SIZE 64->32 (sm_121 shared mem limit),
+    TRT 10 API changes (setOptimizationProfileAsync, kEXPLICIT_BATCH removal),
+    missing stdlib.h in tensorrt CGo, tensor.New API, metrics/runtime import,
+    logger int->string conversions.
+  - [x] S109.3.1 Clone repo on DGX Spark  Completed: 2026 03 03
+  - [x] S109.3.2 Build static libraries (libkernels.a sm_121, libtrt_capi.a aarch64)  Completed: 2026 03 03
+  - [x] S109.3.3 Run go build -tags cuda ./...  Completed: 2026 03 03
+  - [x] S109.3.4 Fix CUDA 13/TRT 10 API changes (7 fixes)  Completed: 2026 03 03
+  - [x] S109.3.5 Run go build -tags cuda,cutlass ./...  Completed: 2026 03 03
 
-- [ ] T109.4 Verify non-GPU build on aarch64  Owner: TBD  Est: 15m
+- [x] T109.4 Verify non-GPU build on aarch64  Owner: TBD  Est: 15m  Completed: 2026 03 03
   - Dependencies: T109.0 (Go must be installed)
-  - Steps: Run `go build ./...` and `go test ./...` on DGX Spark (ndungu@192.168.86.250) without GPU tags.
-  - Acceptance: CPU-only build and all non-GPU tests pass on ARM64.
-  - Note: Gonum uses safe (non-SIMD) path on ARM64 automatically.
-  - [ ] S109.4.1 Run go build ./... and go test ./... on DGX Spark  Est: 10m
-  - [ ] S109.4.2 Document any ARM64-specific test failures  Est: 5m
+  - Acceptance: CPU-only build and all non-GPU tests pass on ARM64. ACHIEVED.
+  - Note: Found and fixed 1 ARM64 float precision failure in TanhGrad test
+    (1-ULP rounding difference). Commit: 8348a79.
+  - [x] S109.4.1 Run go build ./... and go test ./... on DGX Spark  Completed: 2026 03 03
+  - [x] S109.4.2 Fixed ARM64 TanhGrad test (8348a79)  Completed: 2026 03 03
 
 #### E110: GPU Test Validation on DGX Spark
 
