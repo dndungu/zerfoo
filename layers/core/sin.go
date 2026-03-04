@@ -1,0 +1,60 @@
+package core //nolint:dupl // Sin follows the same unary trig-op pattern as Cos
+
+import (
+	"context"
+	"fmt"
+	"math"
+
+	"github.com/zerfoo/zerfoo/compute"
+	"github.com/zerfoo/zerfoo/graph"
+	"github.com/zerfoo/zerfoo/numeric"
+	"github.com/zerfoo/zerfoo/tensor"
+	"github.com/zerfoo/zerfoo/types"
+)
+
+// Sin represents an element-wise sine node.
+type Sin[T tensor.Numeric] struct {
+	engine compute.Engine[T]
+}
+
+func (s *Sin[T]) OpType() string                    { return "Sin" }
+func (s *Sin[T]) Attributes() map[string]any         { return nil }
+func (s *Sin[T]) OutputShape() []int                 { return nil }
+func (s *Sin[T]) Parameters() []*graph.Parameter[T]  { return nil }
+
+func (s *Sin[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	if len(inputs) != 1 {
+		return nil, fmt.Errorf("Sin requires 1 input, got %d", len(inputs))
+	}
+	data := inputs[0].Data()
+	out := make([]T, len(data))
+	switch d := any(data).(type) {
+	case []float32:
+		o := any(out).([]float32)
+		for i, v := range d {
+			o[i] = float32(math.Sin(float64(v)))
+		}
+	case []float64:
+		o := any(out).([]float64)
+		for i, v := range d {
+			o[i] = math.Sin(v)
+		}
+	default:
+		return nil, fmt.Errorf("Sin: unsupported type %T", data)
+	}
+	return tensor.New(inputs[0].Shape(), out)
+}
+
+func (s *Sin[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, fmt.Errorf("Sin backward not implemented")
+}
+
+// BuildSin constructs a Sin node from attributes.
+func BuildSin[T tensor.Numeric](
+	engine compute.Engine[T], _ numeric.Arithmetic[T], _ string,
+	_ map[string]*graph.Parameter[T], _ map[string]any,
+) (graph.Node[T], error) {
+	return &Sin[T]{engine: engine}, nil
+}
+
+var _ graph.Node[float32] = (*Sin[float32])(nil)

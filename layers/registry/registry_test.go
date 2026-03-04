@@ -54,6 +54,8 @@ func TestRegisterAll(t *testing.T) {
 		"Div",
 		"Sqrt",
 		"Neg",
+		"Cos",
+		"Sin",
 		"ReduceMean",
 		"Equal",
 		"Greater",
