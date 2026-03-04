@@ -530,22 +530,42 @@ and `tensor/` from any specific GPU SDK. GPUEngine stores five GRAL interfaces
 handles. GPUStorage stores a `Runtime` for memory operations.
 
 CUDA adapters in the same package implement these interfaces by delegating to
-`internal/cuda`, `internal/cublas`, and `internal/cudnn`. Adding a new backend
-(ROCm, OpenCL) requires implementing the five interfaces -- no changes to
-compute/ or tensor/ are needed.
+`internal/cuda`, `internal/cublas`, and `internal/cudnn`. ROCm adapters delegate
+to `internal/hip`, `internal/rocblas`, and `internal/miopen`. Adding a new
+backend requires implementing the five interfaces -- no changes to compute/ or
+tensor/ are needed.
 
 The DNN interface abstracts at the operation level: callers pass shapes as
 `[4]int` arrays and the adapter manages vendor-specific descriptors internally.
 See [ADR-011](adr/011-gpu-runtime-abstraction-layer.md) for details.
 
-### 4.14 Parity Tolerances
+### 4.14 AMD ROCm Backend
+
+ROCmEngine mirrors GPUEngine's architecture using HIP/rocBLAS/MIOpen adapters.
+All 35 Engine[T] methods delegate to CPUEngine; the GRAL infrastructure is wired
+for GPU acceleration when AMD hardware is available.
+
+```
+internal/hip/runtime.go:           -lamdhip64
+internal/hip/mempool.go:           (pure Go, uses hip.Malloc/Free)
+internal/rocblas/rocblas.go:       -lrocblas
+internal/miopen/miopen.go:         -lMIOpen
+internal/hip/kernels/*.go:         -L${SRCDIR} -lhipkernels -lamdhip64 -lstdc++
+```
+
+Integration: `device/rocm_device.go` auto-registers AMD GPUs via init().
+`inference/engine_rocm.go` routes "rocm" / "rocm:N" to ROCmEngine.
+`layers/attention/flash_rocm.go` dispatches fused attention on AMD GPUs.
+See [ADR-012](adr/012-amd-rocm-backend.md) for details.
+
+### 4.15 Parity Tolerances
 
 - MatMul: 1e-5 relative error
 - Element-wise ops: 1e-6 relative error
 - Reductions (Sum, Mean): 1e-5 relative error
 - Flash attention: 1e-3 absolute error (online softmax reordering)
 
-### 4.15 Compatible Hardware
+### 4.16 Compatible Hardware
 
 | GPU | Arch | CUDA_ARCH | Memory | Platform |
 |-----|------|-----------|--------|----------|
@@ -1030,3 +1050,4 @@ ADR files in `docs/adr/`.
 | [009](adr/009-tensorrt-integration.md) | TensorRT Integration | 12 | C shim for C++ API, subgraph conversion, engine caching, FP16 precision, inference pipeline |
 | [010](adr/010-cutlass-flash-attention.md) | CUTLASS Flash Attention | 13 | Tiled flash attention kernel, CUTLASS templates, causal mask, build-tag-gated dispatch |
 | [011](adr/011-gpu-runtime-abstraction-layer.md) | GPU Runtime Abstraction Layer | 14 | GRAL interfaces decouple compute/tensor from vendor SDKs, CUDA adapters, operation-level DNN |
+| [012](adr/012-amd-rocm-backend.md) | AMD ROCm Backend | 15 | HIP runtime, rocBLAS, MIOpen adapters, HIP kernels, device registration, inference routing |
