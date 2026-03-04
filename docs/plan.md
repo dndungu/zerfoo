@@ -656,7 +656,7 @@ later.
 
 Write and compile the flash attention CUDA kernel using CUTLASS templates.
 
-- [ ] T84.1 Add flash attention CUDA kernel  Owner: TBD  Est: 3h
+- [x] T84.1 Add flash attention CUDA kernel  2026 03 03
   - Dependencies: None (CUTLASS is independent of cuDNN/TRT)
   - Files: internal/cuda/kernels/flash_attention.cu (new),
     internal/cuda/kernels/flash_attention.h (new)
