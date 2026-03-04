@@ -137,6 +137,12 @@ func BuildFromZMF[T tensor.Numeric](
 		}
 
 		instantiatedNodes[nodeProto.Name] = node
+		// Register output aliases so downstream nodes can reference them by output name.
+		for _, outName := range nodeProto.Outputs {
+			if outName != "" && outName != nodeProto.Name {
+				instantiatedNodes[outName] = node
+			}
+		}
 	}
 
 	// 3. Second pass: Connect the nodes
