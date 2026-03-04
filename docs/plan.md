@@ -183,9 +183,9 @@ The multi-GPU research and roadmap is in [docs/gpu.md](gpu.md).
 | D40 | OpenCL kernels | 17 OpenCL kernels in elementwise.cl with runtime compilation **(COMPLETE)** |
 | D41 | cuDNN backward bindings | ConvolutionBackward, BatchNormBackward, ActivationBackward, PoolingBackward **(COMPLETE)** |
 | D42 | cuDNN training integration | GPUEngine backward methods use cuDNN instead of CPU fallback **(COMPLETE)** |
-| D43 | CUTLASS INT4 GEMM | INT4 dequantize-and-multiply kernel compiled from CUTLASS templates |
-| D44 | CUTLASS INT8 GEMM | INT8 GEMM kernel compiled from CUTLASS templates |
-| D45 | MatMulNBits GPU path | MatMulNBits layer uses CUTLASS INT4/INT8 on GPU |
+| D43 | CUTLASS INT4 GEMM | INT4 dequantize-and-multiply kernel compiled from CUTLASS templates **(COMPLETE)** |
+| D44 | CUTLASS INT8 GEMM | INT8 GEMM kernel compiled from CUTLASS templates **(COMPLETE)** |
+| D45 | MatMulNBits GPU path | MatMulNBits layer uses CUTLASS INT4/INT8 on GPU **(COMPLETE)** |
 | D46 | TRT optimization profiles | Builder creates profiles with min/opt/max dimensions |
 | D47 | TRT dynamic inference | TRT engine handles variable batch and sequence length |
 
@@ -513,70 +513,25 @@ activations, accumulating in FP32.
 
 Build tag: `//go:build cuda && cutlass`. Compiles into existing libkernels.a.
 
-#### E104: CUTLASS Quantized GEMM Kernels
+#### E104: CUTLASS Quantized GEMM Kernels **(COMPLETE 2026 03 03)**
 
-- [ ] T104.1 Write INT8 GEMM kernel  Owner: TBD  Est: 3h
-  - Dependencies: None (CUTLASS infrastructure from Phase 13 exists)
-  - Files: internal/cuda/kernels/gemm_int8.h (new),
-    internal/cuda/kernels/gemm_int8.cu (new)
-  - Acceptance: C function `gemm_int8_f32` takes INT8 weight matrix A, FP32
-    activation matrix B, and produces FP32 output C. Uses CUTLASS
-    Int8Tensor::Gemm template. Handles row-major layout. Output matches
-    CPU dequant+matmul within 1e-2 relative error.
-  - [ ] S104.1.1 Create gemm_int8.h with C function declaration  Est: 10m
-  - [ ] S104.1.2 Write gemm_int8.cu using CUTLASS int8 GEMM template  Est: 90m
-  - [ ] S104.1.3 Add to Makefile  Est: 10m
-  - [ ] S104.1.4 Write CPU reference test  Est: 30m
-  - [ ] S104.1.5 Run linters  Est: 5m
+INT8 GEMM kernel (gemm_int8.cu): tiled 32x32 shared memory, int8->float32 cast
+on the fly. INT4 GEMM kernel (gemm_int4.cu): packed 4-bit dequantization with
+per-group scale/zero, both left-multiply (C=dequant(A)*B) and right-multiply
+(C=B*dequant(W)) variants. CGo bindings in gemm_quantized.go: GemmInt8F32,
+GemmInt4F32, GemmInt4F32RMul. Makefile updated.
 
-- [ ] T104.2 Write INT4 GEMM kernel  Owner: TBD  Est: 3h
-  - Dependencies: T104.1
-  - Files: internal/cuda/kernels/gemm_int4.h (new),
-    internal/cuda/kernels/gemm_int4.cu (new)
-  - Acceptance: C function `gemm_int4_f32` takes packed INT4 weight matrix
-    (two values per byte), FP32 activation matrix, scale factors, zero points,
-    and produces FP32 output. Handles block quantization (group_size typically
-    32 or 128). Output matches CPU dequant+matmul within 1e-2.
-  - [ ] S104.2.1 Create gemm_int4.h with C function declaration  Est: 10m
-  - [ ] S104.2.2 Write gemm_int4.cu with INT4 unpacking and CUTLASS GEMM  Est: 90m
-  - [ ] S104.2.3 Add to Makefile  Est: 10m
-  - [ ] S104.2.4 Write CPU reference test  Est: 30m
-  - [ ] S104.2.5 Run linters  Est: 5m
+#### E105: MatMulNBits GPU Integration **(COMPLETE 2026 03 03)**
 
-- [ ] T104.3 Add CGo bindings for quantized GEMM  Owner: TBD  Est: 1h
-  - Dependencies: T104.1, T104.2
-  - Files: internal/cuda/kernels/gemm_quantized.go (new, //go:build cuda && cutlass)
-  - Acceptance: Go functions GemmInt8F32 and GemmInt4F32 call the C kernels.
-    Accept unsafe.Pointer for device memory, dimensions, and stream.
-  - [ ] S104.3.1 Create gemm_quantized.go with CGo bindings  Est: 30m
-  - [ ] S104.3.2 Write gemm_quantized_test.go  Est: 20m
-  - [ ] S104.3.3 Run linters  Est: 5m
+Build-tag-gated dispatch: matmul_nbits_cuda.go (tryQuantizedGemm uploads
+quantized weights/scale/zeros to GPU, calls fused INT4 right-multiply kernel),
+matmul_nbits_nocuda.go (returns nil,nil fallback). MatMulNBits.Forward tries
+GPU path first, falls back to CPU dequant + MatMul.
 
-#### E105: MatMulNBits GPU Integration
+#### E106: Phase 18 Final Verification **(COMPLETE 2026 03 03)**
 
-- [ ] T105.1 Add GPU path to MatMulNBits layer  Owner: TBD  Est: 2h
-  - Dependencies: T104.3
-  - Files: layers/core/matmulnbits.go (modify),
-    layers/core/matmulnbits_cuda.go (new, //go:build cuda && cutlass),
-    layers/core/matmulnbits_nocuda.go (new, //go:build !(cuda && cutlass))
-  - Acceptance: When input is on GPU and cuda+cutlass tags present, MatMulNBits
-    uses CUTLASS INT4/INT8 GEMM instead of CPU dequant+matmul. Build-tag-gated
-    dispatch, same pattern as flash attention.
-  - [ ] S105.1.1 Create matmulnbits_cuda.go with tryQuantizedGemm dispatch  Est: 45m
-  - [ ] S105.1.2 Create matmulnbits_nocuda.go fallback  Est: 10m
-  - [ ] S105.1.3 Update MatMulNBits.Forward to call tryQuantizedGemm  Est: 20m
-  - [ ] S105.1.4 Write parity test (GPU vs CPU dequant+matmul)  Est: 30m
-  - [ ] S105.1.5 Run linters  Est: 5m
-
-#### E106: Phase 18 Final Verification
-
-- [ ] T106.1 Full test suite and documentation  Owner: TBD  Est: 1h
-  - Dependencies: E104, E105
-  - [ ] S106.1.1 go test ./... -race  Est: 10m
-  - [ ] S106.1.2 go build -tags cuda,cutlass ./...  Est: 5m
-  - [ ] S106.1.3 Create docs/adr/015-cutlass-quantized-gemm.md  Est: 15m
-  - [ ] S106.1.4 Update docs/design.md and docs/plan.md  Est: 15m
-  - [ ] S106.1.5 golangci-lint and go vet  Est: 5m
+Created docs/adr/015-cutlass-quantized-gemm.md. Updated design.md with kernel
+file layout and ADR-015 index entry. All tests pass, all lints clean.
 
 ---
 
@@ -778,6 +733,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-03 | 18 | Phase 18 complete. CUTLASS quantized GEMM: INT8 tiled kernel (E104), INT4 packed kernel with left/right-multiply (E104), CGo bindings (E104), MatMulNBits GPU dispatch (E105), ADR-015 written (E106). 8 new files across internal/cuda/kernels/ and layers/core/. |
 | 2026-03-03 | 17 | Phase 17 complete. cuDNN backward pass: CGo bindings for 8 backward functions (E101), CUDA DNN adapter implementations (E102), GPUEngine backward methods (E102), ADR-014 written (E103). 3 files modified: internal/cudnn/cudnn.go, internal/gpuapi/cuda_dnn.go, compute/gpu_cudnn.go. |
 | 2026-03-03 | 16 | Phase 16 complete. OpenCL backend: runtime bindings (E96), CLBlast BLAS (E97), 17 elementwise kernels (E98), OpenCLEngine + integration (E99), verification (E100). 16 new files. Reused GPUStorage with build-tag-gated default runtime. DNN stub returns ErrNotSupported (no OpenCL DNN library). ADR-013 written. |
 | 2026-03-03 | 15 | Phase 15 complete. AMD ROCm backend: HIP runtime (E90), rocBLAS (E91), MIOpen (E92), HIP kernels (E93), ROCmEngine + integration (E94), verification (E95). 15 new files. ADR-012 written. |

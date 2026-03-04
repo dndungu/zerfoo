@@ -491,6 +491,11 @@ internal/cuda/
     flash_attention.cu     Tiled flash attention kernel (online softmax)
     flash_attention.h      C function declaration
     flash_attention.go     CGO binding (//go:build cuda && cutlass)
+    gemm_int8.cu           INT8 mixed-precision GEMM kernel
+    gemm_int8.h            C function declaration
+    gemm_int4.cu           INT4 mixed-precision GEMM kernels (left-mul + right-mul)
+    gemm_int4.h            C function declarations
+    gemm_quantized.go      CGO bindings for quantized GEMM (//go:build cuda && cutlass)
     Makefile               nvcc compilation
 
 internal/cublas/
@@ -1080,3 +1085,4 @@ ADR files in `docs/adr/`.
 | [012](adr/012-amd-rocm-backend.md) | AMD ROCm Backend | 15 | HIP runtime, rocBLAS, MIOpen adapters, HIP kernels, device registration, inference routing |
 | [013](adr/013-opencl-backend.md) | OpenCL Backend | 16 | OpenCL runtime, CLBlast, runtime kernel compilation, DNN stub, cl_mem memory pool |
 | [014](adr/014-cudnn-backward-pass.md) | cuDNN Backward Pass | 17 | Backward CGo bindings, CUDA DNN adapter, GPUEngine backward methods for training |
+| [015](adr/015-cutlass-quantized-gemm.md) | CUTLASS Quantized GEMM | 18 | INT8/INT4 CUDA kernels, right-multiply variant, MatMulNBits GPU dispatch |
