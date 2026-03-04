@@ -1,7 +1,7 @@
 # ADR-010: CUTLASS Flash Attention
 
 **Phase:** 13
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-03
 
 ## Context
@@ -141,15 +141,16 @@ that resolves to the appropriate implementation at compile time.
 ### Files Added
 
 - `internal/cuda/kernels/flash_attention.h` -- C function declaration
-- `internal/cuda/kernels/flash_attention.cu` -- CUTLASS flash attention kernel
-- `layers/attention/flash_cuda.go` -- GPU flash attention dispatch
-- `layers/attention/flash_nocuda.go` -- naive attention fallback
-- `tests/parity/flash_attention_test.go` -- benchmark and parity test
+- `internal/cuda/kernels/flash_attention.cu` -- tiled flash attention kernel
+- `internal/cuda/kernels/flash_attention.go` -- CGo binding (`//go:build cuda && cutlass`)
+- `internal/cuda/kernels/flash_attention_test.go` -- kernel-level parity tests
+- `layers/attention/flash_cuda.go` -- GPU flash attention dispatch (`//go:build cuda && cutlass`)
+- `layers/attention/flash_nocuda.go` -- naive attention fallback (`//go:build !(cuda && cutlass)`)
+- `layers/attention/flash_nocuda_test.go` -- fallback dispatch and parity tests
+- `tests/parity/flash_attention_test.go` -- GPU parity test and benchmark
 
 ### Files Modified
 
-- `layers/attention/multi_head.go` -- call `computeAttention` dispatch
-- `layers/attention/multi_head_latent_attention.go` -- call `computeAttention`
-  dispatch (if MLA can use flash attention)
-- `internal/cuda/kernels.go` -- add CGo binding for flash_attention_forward_f32
-- Build script/Makefile -- add CUTLASS include path
+- `layers/attention/scaled_dot_product_attention.go` -- calls `tryFlashForward`
+  before naive path when mask is nil
+- `internal/cuda/kernels/Makefile` -- added `flash_attention.cu` to SRCS

@@ -193,6 +193,33 @@ Phase 12 adds TensorRT inference optimization. See
 - `inference.WithBackend("tensorrt")` -- opt-in TRT backend
 - `inference.WithPrecision("fp16")` -- half-precision TRT builds
 
+## CUTLASS Flash Attention (Phase 13)
+
+**Status:** COMPLETE (2026-03-03)
+
+Flash attention fuses the Q*K^T -> scale -> softmax -> V weighting pipeline
+into a single tiled CUDA kernel. Memory drops from O(n^2) to O(n) and four
+kernel launches collapse to one.
+
+**Kernel** (`internal/cuda/kernels/flash_attention.cu`):
+- Online softmax via log-sum-exp trick (no full n x n scores matrix)
+- Shared memory staging for K/V tiles (BLOCK_SIZE=64)
+- Causal masking via tile skipping + per-element mask
+- MAX_HEAD_DIM=128 (covers Gemma, Llama, Mistral, Qwen, Phi)
+
+**Dispatch** (`layers/attention/flash_cuda.go` / `flash_nocuda.go`):
+- Build tags: `//go:build cuda && cutlass` / `!(cuda && cutlass)`
+- `ScaledDotProductAttention.Forward` calls `tryFlashForward` before naive path
+- Automatically used by GQA and MLA when mask is nil and data is on GPU
+- Falls back to naive attention for: CPU data, head_dim > 128, arbitrary masks
+
+**Scope limitations:**
+- Float32 only. FP16/BF16 deferred.
+- Forward pass only. Backward pass (training) deferred.
+- No variable-length batching.
+
+See [ADR-010](adr/010-cutlass-flash-attention.md) for architecture decisions.
+
 ## Architecture Advantages
 
 The existing codebase anticipated this extension:

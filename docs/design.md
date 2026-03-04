@@ -427,7 +427,25 @@ FP16 precision via `WithPrecision("fp16")` sets the `FP16` builder flag.
 
 See [ADR-009](adr/009-tensorrt-integration.md) for architecture decisions.
 
-### 4.11 CUDA File Layout
+### 4.11 CUTLASS Flash Attention
+
+Flash attention fuses Q*K^T scaling, softmax, and V weighting into a single
+tiled CUDA kernel, reducing memory from O(n^2) to O(n) and eliminating three
+intermediate kernel launches.
+
+- **Kernel**: `internal/cuda/kernels/flash_attention.cu` -- online softmax
+  (log-sum-exp trick), shared memory for K/V tiles, causal masking. BLOCK_SIZE=64,
+  MAX_HEAD_DIM=128.
+- **Dispatch**: Build-tag-gated pair `layers/attention/flash_cuda.go` /
+  `flash_nocuda.go` (`//go:build cuda && cutlass` / `!(cuda && cutlass)`).
+  `ScaledDotProductAttention.Forward` calls `tryFlashForward` before the naive
+  path when no arbitrary mask is provided.
+- **Scope**: Float32 forward only. Backward pass deferred. Head dim > 128 or
+  arbitrary masks fall back to naive attention.
+
+See [ADR-010](adr/010-cutlass-flash-attention.md) for architecture decisions.
+
+### 4.12 CUDA File Layout
 
 ```
 compute/
@@ -450,6 +468,9 @@ internal/cuda/
   kernels/
     elementwise.cu         CUDA kernel source (17 kernels, stream-aware)
     elementwise.go         CGO bindings for kernels (//go:build cuda)
+    flash_attention.cu     Tiled flash attention kernel (online softmax)
+    flash_attention.h      C function declaration
+    flash_attention.go     CGO binding (//go:build cuda && cutlass)
     Makefile               nvcc compilation
 
 internal/cublas/
@@ -471,6 +492,10 @@ inference/
   tensorrt_convert.go      Graph-to-TRT converter (//go:build cuda)
   tensorrt_cache.go        TRT engine caching (//go:build cuda)
   tensorrt_pipeline.go     TRT inference engine wrapper (//go:build cuda)
+
+layers/attention/
+  flash_cuda.go            Flash attention GPU dispatch (//go:build cuda && cutlass)
+  flash_nocuda.go          Naive fallback (//go:build !(cuda && cutlass))
 ```
 
 CGO linker flags:
@@ -483,13 +508,14 @@ internal/tensorrt/tensorrt.go:  -L${SRCDIR} -ltrt_capi -lnvinfer -lstdc++
 internal/cuda/kernels/*.go:     -L${SRCDIR} -lkernels -lcudart -lstdc++
 ```
 
-### 4.12 Parity Tolerances
+### 4.13 Parity Tolerances
 
 - MatMul: 1e-5 relative error
 - Element-wise ops: 1e-6 relative error
 - Reductions (Sum, Mean): 1e-5 relative error
+- Flash attention: 1e-3 absolute error (online softmax reordering)
 
-### 4.11 Compatible Hardware
+### 4.14 Compatible Hardware
 
 | GPU | Arch | CUDA_ARCH | Memory | Platform |
 |-----|------|-----------|--------|----------|
