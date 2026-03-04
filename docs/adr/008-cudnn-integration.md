@@ -1,7 +1,7 @@
 # ADR-008: cuDNN Integration
 
 **Phase:** 11
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-03
 
 ## Context
@@ -100,11 +100,12 @@ add if profiling shows descriptor + algorithm selection overhead is significant.
 
 ### Files Added
 
-- `internal/cudnn/doc.go` -- package identity
-- `internal/cudnn/cudnn.go` -- CGo bindings
+- `internal/cudnn/doc.go` -- package identity (no build tag)
+- `internal/cudnn/cudnn.go` -- CGo bindings (~540 lines)
+- `internal/cudnn/cudnn_test.go` -- descriptor and forward operation tests
+- `compute/gpu_cudnn.go` -- cuDNN-accelerated GPUEngine methods (~555 lines)
 
 ### Files Modified
 
 - `compute/gpu_engine.go` -- add cudnnHandle field, create/destroy in
-  constructor/Close, use cuDNN in Conv2d/BatchNorm/activation/pooling methods
-- `compute/gpu_kernels.go` -- cuDNN dispatch for supported operations
+  constructor/Close
