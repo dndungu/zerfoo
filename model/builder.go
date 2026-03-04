@@ -75,7 +75,9 @@ func BuildFromZMF[T tensor.Numeric](
 
 	// 1. Handle Graph Inputs
 	// These are the entry points to the graph. We create special input nodes for them.
-	// Only create input nodes for actual model inputs, not parameters
+	// Only create input nodes for actual model inputs, not parameters.
+	// For KV-cache models, auto-supply attention_mask, position_ids, and past_key_values.
+	var primaryInputNode graph.Node[T]
 	for _, inputProto := range model.Graph.Inputs {
 		// Skip parameters - they should be embedded in layers, not treated as inputs
 		if _, isParam := params[inputProto.Name]; isParam {
@@ -84,10 +86,52 @@ func BuildFromZMF[T tensor.Numeric](
 
 		dims := make([]int, len(inputProto.Shape))
 		for i, dim := range inputProto.Shape {
-			dims[i] = int(dim) // Convert int64 to int
+			dims[i] = int(dim)
 		}
 
-		instantiatedNodes[inputProto.Name] = builder.Input(dims)
+		name := inputProto.Name
+		switch {
+		case strings.HasPrefix(name, "past_key_values"):
+			// KV cache inputs: create zero-cache nodes wired to the primary input.
+			numHeads, headDim := 1, 1
+			if len(dims) >= 4 {
+				numHeads = dims[1]
+				headDim = dims[3]
+			}
+			if numHeads == 0 {
+				numHeads = 1
+			}
+			if headDim == 0 {
+				headDim = 64
+			}
+			node := &zeroKVCacheNode[T]{numHeads: numHeads, headDim: headDim}
+			instantiatedNodes[name] = node
+			// Wire to primary input later (deferred).
+		case name == "attention_mask":
+			node := &maskFromInputNode[T]{}
+			instantiatedNodes[name] = node
+		case name == "position_ids":
+			node := &positionIdsNode[T]{}
+			instantiatedNodes[name] = node
+		default:
+			inputNode := builder.Input(dims)
+			instantiatedNodes[name] = inputNode
+			if primaryInputNode == nil {
+				primaryInputNode = inputNode
+			}
+		}
+	}
+
+	// Wire auto-input nodes to the primary input so they can derive batch/seq dims.
+	if primaryInputNode != nil {
+		for _, inputProto := range model.Graph.Inputs {
+			name := inputProto.Name
+			if name == "attention_mask" || name == "position_ids" || strings.HasPrefix(name, "past_key_values") {
+				if node, ok := instantiatedNodes[name]; ok {
+					builder.AddNode(node, primaryInputNode)
+				}
+			}
+		}
 	}
 
 	// 1.5. Handle Parameters as nodes (only add them if they don't conflict with layer nodes)
@@ -292,6 +336,74 @@ func BuildFromZMF[T tensor.Numeric](
 	}
 
 	return builder.Build(outputNode)
+}
+
+// maskFromInputNode generates an all-ones attention mask from input_ids shape.
+type maskFromInputNode[T tensor.Numeric] struct{}
+
+func (m *maskFromInputNode[T]) OpType() string                  { return "AutoAttentionMask" }
+func (m *maskFromInputNode[T]) Attributes() map[string]any       { return nil }
+func (m *maskFromInputNode[T]) OutputShape() []int               { return nil }
+func (m *maskFromInputNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (m *maskFromInputNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	shape := inputs[0].Shape()
+	data := make([]T, inputs[0].Size())
+	for i := range data {
+		data[i] = T(1)
+	}
+	return tensor.New(shape, data)
+}
+
+func (m *maskFromInputNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
+}
+
+// positionIdsNode generates sequential position IDs [0, 1, ..., seq_len-1] per batch.
+type positionIdsNode[T tensor.Numeric] struct{}
+
+func (p *positionIdsNode[T]) OpType() string                  { return "AutoPositionIds" }
+func (p *positionIdsNode[T]) Attributes() map[string]any       { return nil }
+func (p *positionIdsNode[T]) OutputShape() []int               { return nil }
+func (p *positionIdsNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (p *positionIdsNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	shape := inputs[0].Shape()
+	size := inputs[0].Size()
+	data := make([]T, size)
+	seqLen := shape[len(shape)-1]
+	for i := range data {
+		data[i] = T(i % seqLen)
+	}
+	return tensor.New(shape, data)
+}
+
+func (p *positionIdsNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
+}
+
+// zeroKVCacheNode generates a zero tensor with shape [batch, num_heads, 0, head_dim].
+type zeroKVCacheNode[T tensor.Numeric] struct {
+	numHeads int
+	headDim  int
+}
+
+func (z *zeroKVCacheNode[T]) OpType() string                  { return "AutoZeroKVCache" }
+func (z *zeroKVCacheNode[T]) Attributes() map[string]any       { return nil }
+func (z *zeroKVCacheNode[T]) OutputShape() []int               { return nil }
+func (z *zeroKVCacheNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (z *zeroKVCacheNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	batch := 1
+	if len(inputs) > 0 {
+		batch = inputs[0].Shape()[0]
+	}
+	shape := []int{batch, z.numHeads, 0, z.headDim}
+	return tensor.New(shape, []T{})
+}
+
+func (z *zeroKVCacheNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
 }
 
 // parameterNode is a special node type for parameters that are referenced as inputs.
