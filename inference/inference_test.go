@@ -954,6 +954,13 @@ func TestParseDevice(t *testing.T) {
 		{input: "rocm:3", wantType: "rocm", wantID: 3},
 		{input: "rocm:-1", wantErr: true},
 		{input: "rocm:abc", wantErr: true},
+		{input: "opencl", wantType: "opencl", wantID: 0},
+		{input: "OPENCL", wantType: "opencl", wantID: 0},
+		{input: "opencl:0", wantType: "opencl", wantID: 0},
+		{input: "opencl:1", wantType: "opencl", wantID: 1},
+		{input: "opencl:3", wantType: "opencl", wantID: 3},
+		{input: "opencl:-1", wantErr: true},
+		{input: "opencl:abc", wantErr: true},
 		{input: "tpu", wantErr: true},
 		{input: "metal:0", wantErr: true},
 	}

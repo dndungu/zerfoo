@@ -1,4 +1,4 @@
-//go:build !cuda && !rocm
+//go:build !cuda && !rocm && !opencl
 
 package inference
 
@@ -21,6 +21,9 @@ func createEngine(device string) (compute.Engine[float32], error) {
 	}
 	if devType == "rocm" {
 		return nil, fmt.Errorf("ROCm device requested but binary built without rocm build tag")
+	}
+	if devType == "opencl" {
+		return nil, fmt.Errorf("OpenCL device requested but binary built without opencl build tag")
 	}
 	return compute.NewCPUEngine[float32](numeric.Float32Ops{}), nil
 }
