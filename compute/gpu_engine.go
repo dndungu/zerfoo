@@ -86,7 +86,7 @@ func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T], deviceID ...int) 
 	}
 
 	l := log.Nop()
-	l.Info("gpu engine initialized", "device", dev, "pool", "enabled", "stream", "enabled")
+	l.Info("gpu engine initialized", "device", fmt.Sprintf("%d", dev), "pool", "enabled", "stream", "enabled")
 
 	return &GPUEngine[T]{
 		cpu:      NewCPUEngine(ops),
