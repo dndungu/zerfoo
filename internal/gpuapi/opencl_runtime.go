@@ -97,5 +97,14 @@ func openclMemcpyKind(kind MemcpyKind) opencl.MemcpyKind {
 	}
 }
 
+// CLContext returns the underlying cl_context pointer.
+func (r *OpenCLRuntime) CLContext() unsafe.Pointer { return r.ctx.CLContext() }
+
+// CLDevice returns the underlying cl_device_id pointer.
+func (r *OpenCLRuntime) CLDevice() unsafe.Pointer { return r.ctx.CLDevice() }
+
+// CLQueue returns the default command queue pointer.
+func (r *OpenCLRuntime) CLQueue() unsafe.Pointer { return r.ctx.CLQueue() }
+
 // Compile-time interface assertion.
 var _ Runtime = (*OpenCLRuntime)(nil)
