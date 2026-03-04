@@ -8,38 +8,40 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/zerfoo/zerfoo/internal/cublas"
-	"github.com/zerfoo/zerfoo/internal/cuda"
-	"github.com/zerfoo/zerfoo/internal/cudnn"
+	"github.com/zerfoo/zerfoo/internal/gpuapi"
 	"github.com/zerfoo/zerfoo/log"
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
-// GPUEngine is a CUDA-accelerated implementation of the Engine interface.
-// MatMul uses cuBLAS for maximum performance. Elementwise, scalar, activation,
-// and math operations use native CUDA kernels for float32 types.
+// GPUEngine is a GPU-accelerated implementation of the Engine interface.
+// MatMul uses BLAS for maximum performance. Elementwise, scalar, activation,
+// and math operations use native GPU kernels for float32 types.
 // Operations without GPU kernels delegate to CPUEngine.
 //
 // GPUEngine uses a device-resident pipeline: output tensors have GPUStorage
 // so data stays on GPU between chained operations. A memory pool avoids
-// per-operation cudaMalloc/cudaFree, and a dedicated CUDA stream enables
-// async kernel execution.
+// per-operation malloc/free, and a dedicated stream enables async kernel execution.
+//
+// GPUEngine is backend-agnostic via the GRAL interfaces (internal/gpuapi/).
+// The CUDA, ROCm, and OpenCL adapters implement these interfaces.
 type GPUEngine[T tensor.Numeric] struct {
-	cpu         *CPUEngine[T]
-	handle      *cublas.Handle
-	cudnnHandle *cudnn.Handle
-	pool        *cuda.MemPool
-	stream      *cuda.Stream
-	logger      log.Logger
-	deviceID    int
+	cpu      *CPUEngine[T]
+	runtime  gpuapi.Runtime
+	blas     gpuapi.BLAS
+	dnn      gpuapi.DNN
+	kernels  gpuapi.KernelRunner
+	pool     gpuapi.MemPool
+	stream   gpuapi.Stream
+	logger   log.Logger
+	deviceID int
 
 	// oomFallbackCount tracks how many times an OOM triggered CPU fallback.
 	oomFallbackCount atomic.Int64
 }
 
-// NewGPUEngine creates a new GPUEngine backed by a cuBLAS handle, memory pool,
-// and CUDA stream. An optional deviceID selects the GPU (default 0).
+// NewGPUEngine creates a new GPUEngine backed by CUDA via the GRAL abstraction.
+// An optional deviceID selects the GPU (default 0).
 // Call Close() when done to release all resources.
 func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T], deviceID ...int) (*GPUEngine[T], error) {
 	dev := 0
@@ -47,67 +49,64 @@ func NewGPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T], deviceID ...int) 
 		dev = deviceID[0]
 	}
 
-	if err := cuda.SetDevice(dev); err != nil {
-		return nil, fmt.Errorf("failed to set CUDA device %d: %w", dev, err)
+	rt := gpuapi.NewCUDARuntime()
+	if err := rt.SetDevice(dev); err != nil {
+		return nil, fmt.Errorf("failed to set GPU device %d: %w", dev, err)
 	}
 
-	h, err := cublas.CreateHandle()
+	blas, err := gpuapi.NewCUDABlas()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create cuBLAS handle: %w", err)
+		return nil, fmt.Errorf("failed to create BLAS handle: %w", err)
 	}
 
-	stream, err := cuda.CreateStream()
+	stream, err := rt.CreateStream()
 	if err != nil {
-		_ = h.Destroy()
-
-		return nil, fmt.Errorf("failed to create CUDA stream: %w", err)
+		_ = blas.Destroy()
+		return nil, fmt.Errorf("failed to create GPU stream: %w", err)
 	}
 
-	if err := h.SetStream(stream.Ptr()); err != nil {
+	if err := blas.SetStream(stream); err != nil {
 		_ = stream.Destroy()
-		_ = h.Destroy()
-
-		return nil, fmt.Errorf("failed to set cuBLAS stream: %w", err)
+		_ = blas.Destroy()
+		return nil, fmt.Errorf("failed to set BLAS stream: %w", err)
 	}
 
-	dh, err := cudnn.CreateHandle()
+	dnn, err := gpuapi.NewCUDADNN()
 	if err != nil {
 		_ = stream.Destroy()
-		_ = h.Destroy()
-
-		return nil, fmt.Errorf("failed to create cuDNN handle: %w", err)
+		_ = blas.Destroy()
+		return nil, fmt.Errorf("failed to create DNN handle: %w", err)
 	}
 
-	if err := dh.SetStream(stream.Ptr()); err != nil {
-		_ = dh.Destroy()
+	if err := dnn.SetStream(stream); err != nil {
+		_ = dnn.Destroy()
 		_ = stream.Destroy()
-		_ = h.Destroy()
-
-		return nil, fmt.Errorf("failed to set cuDNN stream: %w", err)
+		_ = blas.Destroy()
+		return nil, fmt.Errorf("failed to set DNN stream: %w", err)
 	}
 
 	l := log.Nop()
 	l.Info("gpu engine initialized", "device", dev, "pool", "enabled", "stream", "enabled")
 
 	return &GPUEngine[T]{
-		cpu:         NewCPUEngine(ops),
-		handle:      h,
-		cudnnHandle: dh,
-		pool:        cuda.NewMemPool(),
-		stream:      stream,
-		logger:      l,
-		deviceID:    dev,
+		cpu:      NewCPUEngine(ops),
+		runtime:  rt,
+		blas:     blas,
+		dnn:      dnn,
+		kernels:  gpuapi.NewCUDAKernels(),
+		pool:     gpuapi.NewCUDAMemPool(),
+		stream:   stream,
+		logger:   l,
+		deviceID: dev,
 	}, nil
 }
 
-// DeviceID returns the CUDA device ID this engine is bound to.
+// DeviceID returns the GPU device ID this engine is bound to.
 func (e *GPUEngine[T]) DeviceID() int { return e.deviceID }
 
-// setDevice calls cuda.SetDevice with this engine's device ID.
-// This must be called at the top of every method that dispatches CUDA
-// kernels or cuBLAS calls to ensure correct device context.
+// setDevice ensures the correct GPU device context for the calling goroutine.
 func (e *GPUEngine[T]) setDevice() {
-	_ = cuda.SetDevice(e.deviceID)
+	_ = e.runtime.SetDevice(e.deviceID)
 }
 
 // SetLogger replaces the engine's logger.
@@ -119,7 +118,7 @@ func (e *GPUEngine[T]) SetLogger(l log.Logger) {
 	e.cpu.SetLogger(l)
 }
 
-// Close releases the cuBLAS handle, CUDA stream, and drains the memory pool.
+// Close releases the BLAS handle, DNN handle, GPU stream, and drains the memory pool.
 // The engine must not be used after Close.
 func (e *GPUEngine[T]) Close() error {
 	var firstErr error
@@ -136,14 +135,14 @@ func (e *GPUEngine[T]) Close() error {
 		}
 	}
 
-	if e.cudnnHandle != nil {
-		if err := e.cudnnHandle.Destroy(); err != nil && firstErr == nil {
+	if e.dnn != nil {
+		if err := e.dnn.Destroy(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 
-	if e.handle != nil {
-		if err := e.handle.Destroy(); err != nil && firstErr == nil {
+	if e.blas != nil {
+		if err := e.blas.Destroy(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -159,20 +158,11 @@ func (e *GPUEngine[T]) OOMFallbackCount() int64 {
 // Ops returns the arithmetic ops for this engine.
 func (e *GPUEngine[T]) Ops() numeric.Arithmetic[T] { return e.cpu.Ops() }
 
-// streamPtr returns the raw stream pointer for kernel calls.
-func (e *GPUEngine[T]) streamPtr() unsafe.Pointer {
-	if e.stream != nil {
-		return e.stream.Ptr()
-	}
-
-	return nil
-}
-
-// MatMul performs matrix multiplication using cuBLAS for float32 tensors.
+// MatMul performs matrix multiplication using GPU BLAS for float32 tensors.
 // For non-float32 types, it falls back to the CPU implementation.
 // Supports 2D matrices and batched matmul (3D+ tensors).
 func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	// Only float32 has a cuBLAS path; fall back for other types.
+	// Only float32 has a BLAS path; fall back for other types.
 	var zero T
 	if _, ok := any(zero).(float32); !ok {
 		return e.cpu.MatMul(ctx, a, b, dst...)
@@ -267,8 +257,6 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 		return e.cpu.MatMul(ctx, a, b, dst...)
 	}
 
-	s := e.streamPtr()
-
 	for batch := range batchSize {
 		aOff := batch * aMatSize * elemSize
 		bOff := 0
@@ -282,11 +270,10 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 		batchDevB := unsafe.Add(devB, bOff)
 		batchDevC := unsafe.Add(devCTotal, cOff)
 
-		// cuBLAS Sgemm
-		if err := cublas.Sgemm(e.handle, m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC); err != nil {
+		if err := e.blas.Sgemm(m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC); err != nil {
 			e.pool.Free(e.deviceID, devCTotal, batchSize*cMatSize*elemSize)
 
-			return nil, fmt.Errorf("MatMul: cublasSgemm batch %d: %w", batch, err)
+			return nil, fmt.Errorf("MatMul: BLAS Sgemm batch %d: %w", batch, err)
 		}
 	}
 
@@ -298,8 +285,6 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 			return nil, fmt.Errorf("MatMul: stream sync: %w", err)
 		}
 	}
-
-	_ = s // stream used via cuBLAS handle
 
 	return makeGPUResult[T](e, outShape, devCTotal, batchSize*cMatSize, dst...)
 }
