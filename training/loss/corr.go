@@ -3,7 +3,6 @@ package loss
 import (
 	"context"
 	"fmt"
-	"math"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -21,7 +20,10 @@ import (
 //
 //	where p_c = p - mean(p), t_c = t - mean(t)
 //
-// Backward: grad_i = -(1/N) * (t_c_i / denom - corr * p_c_i / sum_pp) * dOut
+// Backward: grad_i = -(t_c_i / denom - corr * p_c_i / sum_pp) * dOut
+//
+// All tensor operations use the engine, keeping data on GPU when available.
+// Only scalar intermediate values (means, sums) are read back to CPU.
 type CorrLoss[T tensor.Numeric] struct {
 	engine compute.Engine[T]
 	ops    numeric.Arithmetic[T]
@@ -40,44 +42,81 @@ func (c *CorrLoss[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumer
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("CorrLoss expects 2 inputs, got %d", len(inputs))
 	}
-	predictions := inputs[0]
-	targets := inputs[1]
+
+	predictions, targets := inputs[0], inputs[1]
 	c.predictions = predictions
 	c.targets = targets
 
-	pData := predictions.Data()
-	tData := targets.Data()
-	n := float64(len(pData))
+	eng := c.engine
+	ops := c.ops
+	zero := ops.FromFloat64(0)
+	eps := ops.FromFloat64(1e-8)
 
-	// Compute means
-	var sumP, sumT float64
-	for i := range pData {
-		sumP += float64(pData[i])
-		sumT += float64(tData[i])
-	}
-	meanP := sumP / n
-	meanT := sumT / n
-
-	// Compute centered dot products
-	var sumPT, sumPP, sumTT float64
-	for i := range pData {
-		pc := float64(pData[i]) - meanP
-		tc := float64(tData[i]) - meanT
-		sumPT += pc * tc
-		sumPP += pc * pc
-		sumTT += tc * tc
-	}
-
-	eps := 1e-8
-	denom := math.Sqrt(sumPP*sumTT) + eps
-	corr := sumPT / denom
-	loss := T(-corr)
-
-	result, err := tensor.New[T]([]int{1}, []T{loss})
+	// Compute means via engine (GPU-accelerated reduction).
+	meanP, err := eng.ReduceMean(ctx, predictions, 0, false)
 	if err != nil {
 		return nil, err
 	}
-	return result, nil
+
+	meanT, err := eng.ReduceMean(ctx, targets, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Center predictions and targets via engine.
+	// Only scalar mean values are read back (1 float D2H each).
+	pc, err := eng.AddScalar(ctx, predictions, ops.Sub(zero, meanP.Data()[0]), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	tc, err := eng.AddScalar(ctx, targets, ops.Sub(zero, meanT.Data()[0]), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Element-wise products via engine.
+	pcTc, err := eng.Mul(ctx, pc, tc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	pcPc, err := eng.Mul(ctx, pc, pc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	tcTc, err := eng.Mul(ctx, tc, tc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sum reductions via engine.
+	sumPT, err := eng.Sum(ctx, pcTc, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	sumPP, err := eng.Sum(ctx, pcPc, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	sumTT, err := eng.Sum(ctx, tcTc, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Read scalar sums and compute correlation.
+	sumPTVal := sumPT.Data()[0]
+	sumPPVal := sumPP.Data()[0]
+	sumTTVal := sumTT.Data()[0]
+
+	denom := ops.Add(ops.Sqrt(ops.Mul(sumPPVal, sumTTVal)), eps)
+	corr := ops.Div(sumPTVal, denom)
+	loss := ops.Sub(zero, corr)
+
+	return tensor.New[T]([]int{1}, []T{loss})
 }
 
 // Backward computes the gradient of -PearsonCorrelation with respect to predictions.
@@ -91,54 +130,107 @@ func (c *CorrLoss[T]) Backward(ctx context.Context, _ types.BackwardMode, dOut *
 			targs = inputs[1]
 		}
 	}
+
 	if preds == nil || targs == nil {
 		return nil, graph.ErrInvalidInputCount
 	}
 
-	pData := preds.Data()
-	tData := targs.Data()
-	scale := float64(dOut.Data()[0])
+	eng := c.engine
+	ops := c.ops
+	zero := ops.FromFloat64(0)
+	eps := ops.FromFloat64(1e-8)
+	scale := dOut.Data()[0]
 
-	// Compute means
-	n := float64(len(pData))
-	var sumP, sumT float64
-	for i := range pData {
-		sumP += float64(pData[i])
-		sumT += float64(tData[i])
-	}
-	meanP := sumP / n
-	meanT := sumT / n
-
-	// Compute centered values and sums
-	var sumPT, sumPP, sumTT float64
-	pc := make([]float64, len(pData))
-	tc := make([]float64, len(pData))
-	for i := range pData {
-		pc[i] = float64(pData[i]) - meanP
-		tc[i] = float64(tData[i]) - meanT
-		sumPT += pc[i] * tc[i]
-		sumPP += pc[i] * pc[i]
-		sumTT += tc[i] * tc[i]
-	}
-
-	eps := 1e-8
-	denom := math.Sqrt(sumPP*sumTT) + eps
-	corr := sumPT / denom
-
-	// d(-corr)/d(p_i) = -(t_c_i / denom - corr * p_c_i / sumPP) * dOut
-	gradData := make([]T, len(pData))
-	sumPPEps := sumPP + eps
-	for i := range pData {
-		g := -(tc[i]/denom - corr*pc[i]/sumPPEps) * scale
-		gradData[i] = T(g)
-	}
-
-	gradPred, err := tensor.New[T](preds.Shape(), gradData)
+	// Compute centered values via engine.
+	meanP, err := eng.ReduceMean(ctx, preds, 0, false)
 	if err != nil {
 		return nil, err
 	}
 
-	zeroGrad, err := tensor.New[T](targs.Shape(), make([]T, len(tData)))
+	meanT, err := eng.ReduceMean(ctx, targs, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	pc, err := eng.AddScalar(ctx, preds, ops.Sub(zero, meanP.Data()[0]), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	tc, err := eng.AddScalar(ctx, targs, ops.Sub(zero, meanT.Data()[0]), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Element-wise products.
+	pcTc, err := eng.Mul(ctx, pc, tc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	pcPc, err := eng.Mul(ctx, pc, pc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	tcTc, err := eng.Mul(ctx, tc, tc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sum reductions.
+	sumPT, err := eng.Sum(ctx, pcTc, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	sumPP, err := eng.Sum(ctx, pcPc, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	sumTT, err := eng.Sum(ctx, tcTc, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Scalar correlation components.
+	sumPTVal := sumPT.Data()[0]
+	sumPPVal := sumPP.Data()[0]
+	sumTTVal := sumTT.Data()[0]
+
+	denom := ops.Add(ops.Sqrt(ops.Mul(sumPPVal, sumTTVal)), eps)
+	corr := ops.Div(sumPTVal, denom)
+	sumPPEps := ops.Add(sumPPVal, eps)
+
+	// grad_i = -(tc_i/denom - corr * pc_i / sumPPEps) * scale
+	//        = (-scale/denom) * tc_i + (scale * corr / sumPPEps) * pc_i
+	negScale := ops.Sub(zero, scale)
+	coeff1 := ops.Div(negScale, denom)
+	coeff2 := ops.Div(ops.Mul(scale, corr), sumPPEps)
+
+	term1, err := eng.MulScalar(ctx, tc, coeff1, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	term2, err := eng.MulScalar(ctx, pc, coeff2, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	gradPred, err := eng.Add(ctx, term1, term2, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Zero gradient for targets.
+	numElems := 1
+	for _, d := range targs.Shape() {
+		numElems *= d
+	}
+
+	zeroGrad, err := tensor.New[T](targs.Shape(), make([]T, numElems))
 	if err != nil {
 		return nil, err
 	}
