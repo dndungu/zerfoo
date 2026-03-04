@@ -1010,7 +1010,7 @@ variants are preferred to fit within DGX Spark memory.
   - [ ] S114.5.1 Set environment variables for all models  Est: 10m
   - [ ] S114.5.2 Run parity tests with GPU tags  Est: 30m
   - [x] S114.5.3 Investigate and fix any failures  Est: 1h  2026-03-04
-    - Fixed 8 issues across zerfoo and zonnx repos:
+    - Fixed 10 issues across zerfoo and zonnx repos:
       1. Reshape: support ONNX dynamic 2-input mode [2a520c4]
       2. Builder: keep dynamic shape input for Reshape [f757b29]
       3. Builder: promote ZMF proto fields (Perm, Epsilon, Axis) [b12847a]
@@ -1020,17 +1020,20 @@ variants are preferred to fit within DGX Spark memory.
       7. tensor_decoder: return error for empty data [da82e78]
       8. Cos/Sin elementwise layers for RoPE [e119caa]
       9. zonnx: load ONNX external data files [8830eb5 in zonnx]
-  - [ ] S114.5.4 Document results  Est: 15m
+      10. Generator: use 2D input shape [1, seqLen] for Gather compatibility [8f003ad]
+  - [x] S114.5.4 Document results  Est: 15m  2026-03-04
+    - 8 PASS: FlashAttentionGQA, Llama3 (FP/GD/Gen), Qwen25 (FP/GD/Gen)
+    - 13 SKIP: Mistral, Phi4, Gemma3, DeepSeek, SigLIP (no ZMF), MultiGPU (1 device)
 
-- [ ] T114.6 Create test automation script  Owner: TBD  Est: 30m
+- [x] T114.6 Create test automation script  Owner: TBD  Est: 30m  2026-03-04
   - Dependencies: T114.5
   - File: scripts/dgx-spark-parity.sh (new)
   - Purpose: Shell script that sets all ZMF env vars and runs the full parity
     test suite. Makes it easy to re-run after code changes.
   - Acceptance: `./scripts/dgx-spark-parity.sh` runs all model parity tests.
-  - [ ] S114.6.1 Write script with env vars and test command  Est: 15m
-  - [ ] S114.6.2 Test script on DGX Spark  Est: 10m
-  - [ ] S114.6.3 Run golangci-lint  Est: 5m
+  - [x] S114.6.1 Write script with env vars and test command  Est: 15m  2026-03-04
+  - [x] S114.6.2 Test script on DGX Spark  Est: 10m  2026-03-04
+  - [x] S114.6.3 Run golangci-lint  Est: 5m  2026-03-04
 
 #### E115: Multi-GPU Test Coverage Assessment
 
@@ -1228,7 +1231,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
-| 2026-03-04 | 21 | E114 in progress: TestQwen25ForwardPass and TestLlama3ForwardPass PASS on DGX Spark. Fixed 9 ONNX compatibility issues: dynamic Reshape 2-input, builder Reshape rebuild, ZMF proto field promotion, Where broadcasting, batched MatMul, empty tensor guard, Cos/Sin ops, zonnx external data loading. Remaining models (Mistral, Phi4, Gemma3, DeepSeek, SigLIP) blocked on HF auth or large download times. |
+| 2026-03-04 | 21 | E114 T114.5+T114.6 complete. All 8 available parity tests PASS on DGX Spark (Llama3 FP/GD/Gen, Qwen25 FP/GD/Gen, FlashAttentionGQA). Fixed 10 issues total including Generator 2D input shape [8f003ad] and graph.go debug trace cleanup [ff439b1]. Remaining models (Mistral, Phi4, Gemma3, DeepSeek, SigLIP) blocked on HF auth or download size. T114.1-T114.4 still need model downloads. |
 | 2026-03-03 | 21 | Planned Phase 21 (Skipped Test Coverage). Added E114 (model parity on GPU: install zonnx, download/convert 7 model families, run parity tests), E115 (multi-GPU gap documentation), E116 (final verification). 3 epics, 9 tasks, ~25 subtasks. Added objectives O32-O33, deliverables D54-D55, milestones M94-M96, risks R32-R35. Addresses 25+ skipped tests from Phase 20 validation. |
 | 2026-03-03 | 20 | Phase 20 COMPLETE. E109: ARM64 build compatibility -- 10 code fixes, all builds pass. E110: GPU test validation -- 66 packages pass, 0 failures. E111: Benchmarks -- MatMul up to 45.9x GPU speedup, flash attention 147us-8924us, INT4/INT8 GEMM profiled. E112: Feature gaps assessed (FP4 blocked upstream, BF16 3-5 days, unified memory 1-2 days, ConnectX-7 1 week). E113: ADR-017 written, design.md Section 15 added. |
 | 2026-03-03 | 20 | SSH validated: ndungu@192.168.86.250 (aitopatom-bfc8). Environment probed: CUDA 13.0.2/driver 580.126.09 installed; Go, cuDNN, TensorRT, NCCL, CUTLASS all missing. Added T109.0 (software installation, 6 subtasks). Updated E109 dependencies. Updated Phase 20 context with verified hardware specs, network access, and software inventory. |
