@@ -254,9 +254,28 @@ func BuildFromZMF[T tensor.Numeric](
 						intsAttr := &zmf.Ints{Val: shapeValues}
 						attr := &zmf.Attribute{Value: &zmf.Attribute_Ints{Ints: intsAttr}}
 						nodeProto.Attributes["shape"] = attr
-					}
 
-					actualInputNames = actualInputNames[:1]
+						// Static shape extracted; only data input needed.
+						actualInputNames = actualInputNames[:1]
+					} else if resolved := resolveParam(shapeInputName, params, instantiatedNodes); resolved != nil {
+						shapeValues := make([]int64, resolved.Size())
+						for i := 0; i < resolved.Size(); i++ { //nolint:intrange // classic loop for generic tensor access
+							val, _ := resolved.At(i)
+							shapeValues[i] = int64(val)
+						}
+
+						if nodeProto.Attributes == nil {
+							nodeProto.Attributes = make(map[string]*zmf.Attribute)
+						}
+
+						intsAttr := &zmf.Ints{Val: shapeValues}
+						attr := &zmf.Attribute{Value: &zmf.Attribute_Ints{Ints: intsAttr}}
+						nodeProto.Attributes["shape"] = attr
+
+						actualInputNames = actualInputNames[:1]
+					}
+					// else: shape is dynamic (from another node) — keep both
+					// inputs so Reshape.Forward receives the shape tensor.
 				}
 			case "Unsqueeze":
 				// ONNX opset 13+: axes come as a second input tensor.
