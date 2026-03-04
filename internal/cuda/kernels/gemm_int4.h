@@ -39,6 +39,28 @@ cudaError_t gemm_int4_f32(
     int M, int K, int N, int group_size,
     cudaStream_t stream);
 
+/* gemm_int4_f32_rmul performs right-multiply: C = B * dequant(W)
+ *   C[i,j] = sum_k( B[i,k] * dequant(W[k,j]) )
+ * This is the standard neural network forward pass pattern where W is the
+ * weight matrix in [in_features, out_features] layout.
+ *
+ * W:          device pointer to [in_features * out_features/2] uint8 (packed INT4).
+ * B:          device pointer to [batch * in_features] float (row-major input).
+ * C:          device pointer to [batch * out_features] float (row-major output).
+ * scales:     device pointer to [in_features * num_groups] float (per-group).
+ * zeros:      device pointer to [in_features * num_groups] uint8 (per-group).
+ * batch:      number of input rows.
+ * in_features:  weight matrix rows (= K, must be even for packed INT4 along cols).
+ * out_features: weight matrix cols after unpacking (= K * 2 from packed).
+ * group_size: quantization group size along out_features dimension.
+ * stream:     CUDA stream.
+ */
+cudaError_t gemm_int4_f32_rmul(
+    const void* W, const float* B, float* C,
+    const float* scales, const void* zeros,
+    int batch, int in_features, int out_features, int group_size,
+    cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

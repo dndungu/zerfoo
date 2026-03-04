@@ -60,3 +60,30 @@ func GemmInt4F32(
 	}
 	return nil
 }
+
+// GemmInt4F32RMul performs right-multiply: out = input * dequant(W).
+// This is the standard neural network forward pass operation.
+// W is [inFeatures, outFeatures/2] packed INT4 weights.
+// input is [batch, inFeatures] row-major FP32 activations.
+// out is [batch, outFeatures] row-major FP32 output.
+// scales is [inFeatures, numGroups] FP32 per-group scale factors.
+// zeros is [inFeatures, numGroups] uint8 per-group zero points.
+// outFeatures must be even. groupSize is typically 32 or 128.
+func GemmInt4F32RMul(
+	W, input, out unsafe.Pointer,
+	scales, zeros unsafe.Pointer,
+	batch, inFeatures, outFeatures, groupSize int,
+	stream unsafe.Pointer,
+) error {
+	err := C.gemm_int4_f32_rmul(
+		W, (*C.float)(input), (*C.float)(out),
+		(*C.float)(scales), zeros,
+		C.int(batch), C.int(inFeatures), C.int(outFeatures), C.int(groupSize),
+		C.cudaStream_t(stream),
+	)
+	if err != C.cudaSuccess {
+		return fmt.Errorf("gemm_int4_f32_rmul: %s",
+			C.GoString(C.cudaGetErrorString(err)))
+	}
+	return nil
+}
