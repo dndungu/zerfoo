@@ -49,7 +49,14 @@ func (g *Graph[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[
 
 		output, err := n.Forward(ctx, nodeInputs...)
 		if err != nil {
-			return nil, err
+			// Include node op type and input shapes for debugging.
+			var inputShapes [][]int
+			for _, inp := range nodeInputs {
+				if inp != nil {
+					inputShapes = append(inputShapes, inp.Shape())
+				}
+			}
+			return nil, fmt.Errorf("%s: %w (input shapes: %v)", n.OpType(), err, inputShapes)
 		}
 
 		g.memo[n] = output
