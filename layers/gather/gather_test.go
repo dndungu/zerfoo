@@ -447,3 +447,76 @@ func TestBuildGather_WithEmbeddedIndices(t *testing.T) {
 func TestGraphNodeInterface(t *testing.T) {
 	var _ graph.Node[float32] = (*Gather[float32])(nil)
 }
+
+func TestForward_ScalarGather_OutOfBoundsClamping(t *testing.T) {
+	engine := newEngine()
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		pShape    []int
+		pData     []float32
+		idx       float32
+		wantFirst float32
+	}{
+		{
+			// start >= len(data): idx=3 on [3,2] -> start=6, len=6 -> clamp
+			name:      "start_at_end",
+			pShape:    []int{3, 2},
+			pData:     []float32{10, 20, 30, 40, 50, 60},
+			idx:       3,
+			wantFirst: 50, // clamped to last row [50, 60]
+		},
+		{
+			// end > len(data): idx=2 on [3] with 1D data -> stride=1, end=3
+			// but start=2, end=3 -> end <= len(3), no clamp needed; try larger
+			// idx=5 on [3,2] -> start=10, end=12 > len=6 -> clamp
+			name:      "end_past_data",
+			pShape:    []int{3, 2},
+			pData:     []float32{10, 20, 30, 40, 50, 60},
+			idx:       5,
+			wantFirst: 50, // clamped
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := New[float32](engine)
+			params, _ := tensor.New[float32](tc.pShape, tc.pData)
+			indices, _ := tensor.New[float32]([]int{}, []float32{tc.idx})
+
+			out, err := g.Forward(ctx, params, indices)
+			if err != nil {
+				t.Fatalf("Forward failed: %v", err)
+			}
+			if out.Data()[0] != tc.wantFirst {
+				t.Errorf("output[0] = %v, want %v", out.Data()[0], tc.wantFirst)
+			}
+		})
+	}
+}
+
+func TestForward_GeneralGather_1DIndicesReshape(t *testing.T) {
+	engine := newEngine()
+	g := New[float32](engine)
+	ctx := context.Background()
+
+	// 2D params, 1D indices (not scalar) -> triggers reshape to [1, N]
+	params, _ := tensor.New[float32]([]int{4, 3}, []float32{
+		1, 2, 3,
+		4, 5, 6,
+		7, 8, 9,
+		10, 11, 12,
+	})
+	// 1D indices with >1 element -> hits the reshape path at line 172-181
+	indices, _ := tensor.New[float32]([]int{2}, []float32{0, 2})
+
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+	// After reshape: indices [1,2], params [4,3] -> output [1,2,3]
+	if len(out.Shape()) != 3 || out.Shape()[0] != 1 || out.Shape()[1] != 2 || out.Shape()[2] != 3 {
+		t.Errorf("output shape = %v, want [1, 2, 3]", out.Shape())
+	}
+}
