@@ -132,6 +132,12 @@ func TestGemmQ4F32_Correctness(t *testing.T) {
 	// K=32 so each row of A is exactly 1 Q4 block.
 	M, K, N := 2, 32, 4
 
+	stream, err := cuda.CreateStream()
+	if err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	defer func() { _ = stream.Destroy() }()
+
 	// Create float32 source data for A.
 	aF32 := make([]float32, M*K)
 	for i := range aF32 {
@@ -164,19 +170,19 @@ func TestGemmQ4F32_Correctness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cuda.Malloc A: %v", err)
 	}
-	defer cuda.Free(devA)
+	defer func() { _ = cuda.Free(devA) }()
 
 	devB, err := cuda.Malloc(K * N * 4)
 	if err != nil {
 		t.Fatalf("cuda.Malloc B: %v", err)
 	}
-	defer cuda.Free(devB)
+	defer func() { _ = cuda.Free(devB) }()
 
 	devC, err := cuda.Malloc(M * N * 4)
 	if err != nil {
 		t.Fatalf("cuda.Malloc C: %v", err)
 	}
-	defer cuda.Free(devC)
+	defer func() { _ = cuda.Free(devC) }()
 
 	// Copy H2D.
 	if err := cuda.Memcpy(devA, unsafe.Pointer(&aBytes[0]), len(aBytes), cuda.MemcpyHostToDevice); err != nil {
@@ -187,13 +193,13 @@ func TestGemmQ4F32_Correctness(t *testing.T) {
 	}
 
 	// Run kernel.
-	if err := GemmQ4F32(devA, devB, devC, M, K, N, nil); err != nil {
+	if err := GemmQ4F32(devA, devB, devC, M, K, N, stream.Ptr()); err != nil {
 		t.Fatalf("GemmQ4F32: %v", err)
 	}
 
 	// Sync.
-	if err := cuda.DeviceSynchronize(); err != nil {
-		t.Fatalf("DeviceSynchronize: %v", err)
+	if err := stream.Synchronize(); err != nil {
+		t.Fatalf("Synchronize: %v", err)
 	}
 
 	// Copy D2H.
@@ -213,6 +219,12 @@ func TestGemmQ4F32_Correctness(t *testing.T) {
 
 func TestGemmQ4F32_LargerMatrix(t *testing.T) {
 	M, K, N := 64, 128, 64
+
+	stream, err := cuda.CreateStream()
+	if err != nil {
+		t.Fatalf("CreateStream: %v", err)
+	}
+	defer func() { _ = stream.Destroy() }()
 
 	aF32 := make([]float32, M*K)
 	for i := range aF32 {
@@ -241,19 +253,19 @@ func TestGemmQ4F32_LargerMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cuda.Malloc A: %v", err)
 	}
-	defer cuda.Free(devA)
+	defer func() { _ = cuda.Free(devA) }()
 
 	devB, err := cuda.Malloc(K * N * 4)
 	if err != nil {
 		t.Fatalf("cuda.Malloc B: %v", err)
 	}
-	defer cuda.Free(devB)
+	defer func() { _ = cuda.Free(devB) }()
 
 	devC, err := cuda.Malloc(M * N * 4)
 	if err != nil {
 		t.Fatalf("cuda.Malloc C: %v", err)
 	}
-	defer cuda.Free(devC)
+	defer func() { _ = cuda.Free(devC) }()
 
 	if err := cuda.Memcpy(devA, unsafe.Pointer(&aBytes[0]), len(aBytes), cuda.MemcpyHostToDevice); err != nil {
 		t.Fatalf("Memcpy A: %v", err)
@@ -262,11 +274,11 @@ func TestGemmQ4F32_LargerMatrix(t *testing.T) {
 		t.Fatalf("Memcpy B: %v", err)
 	}
 
-	if err := GemmQ4F32(devA, devB, devC, M, K, N, nil); err != nil {
+	if err := GemmQ4F32(devA, devB, devC, M, K, N, stream.Ptr()); err != nil {
 		t.Fatalf("GemmQ4F32: %v", err)
 	}
-	if err := cuda.DeviceSynchronize(); err != nil {
-		t.Fatalf("DeviceSynchronize: %v", err)
+	if err := stream.Synchronize(); err != nil {
+		t.Fatalf("Synchronize: %v", err)
 	}
 
 	got := make([]float32, M*N)
@@ -294,6 +306,12 @@ func TestGemmQ4F32_LargerMatrix(t *testing.T) {
 func BenchmarkGemmQ4F32_1024(b *testing.B) {
 	M, K, N := 1024, 1024, 1024
 
+	stream, err := cuda.CreateStream()
+	if err != nil {
+		b.Fatalf("CreateStream: %v", err)
+	}
+	defer func() { _ = stream.Destroy() }()
+
 	aF32 := make([]float32, M*K)
 	for i := range aF32 {
 		aF32[i] = float32(i%7-3) * 0.01
@@ -306,20 +324,20 @@ func BenchmarkGemmQ4F32_1024(b *testing.B) {
 	}
 
 	devA, _ := cuda.Malloc(len(aBytes))
-	defer cuda.Free(devA)
+	defer func() { _ = cuda.Free(devA) }()
 	devB, _ := cuda.Malloc(K * N * 4)
-	defer cuda.Free(devB)
+	defer func() { _ = cuda.Free(devB) }()
 	devC, _ := cuda.Malloc(M * N * 4)
-	defer cuda.Free(devC)
+	defer func() { _ = cuda.Free(devC) }()
 
 	_ = cuda.Memcpy(devA, unsafe.Pointer(&aBytes[0]), len(aBytes), cuda.MemcpyHostToDevice)
 	_ = cuda.Memcpy(devB, unsafe.Pointer(&bF32[0]), K*N*4, cuda.MemcpyHostToDevice)
 
 	b.ResetTimer()
 	for b.Loop() {
-		_ = GemmQ4F32(devA, devB, devC, M, K, N, nil)
+		_ = GemmQ4F32(devA, devB, devC, M, K, N, stream.Ptr())
 	}
-	_ = cuda.DeviceSynchronize()
+	_ = stream.Synchronize()
 
 	elapsed := b.Elapsed()
 	// Q4 GEMM effective FLOPS: 2*M*K*N per iteration.
