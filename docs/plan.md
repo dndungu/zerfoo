@@ -49,6 +49,24 @@ are `layers/core` (76.0%), `cmd/bench-compare` (52.6%), and
 `cmd/coverage-gate` (53.5%). The `layers/core` package has ~15 ONNX operator
 implementations with zero test coverage.
 
+Phase 24 fixes remaining TODOs and code quality issues that do not require
+DGX Spark hardware:
+1. FFN bias disable: `layers/core/registry.go:61` has a TODO to pass
+   `WithFFNNoBias` when `withBias` is false. The current `WithFFNNoBias`
+   option in `layers/core/ffn.go` uses a broken heuristic (creates a test FFN
+   with a marker name, applies the option, checks if name is unchanged, and
+   only disables bias when `len(opts)==1`). This fails when `WithSwiGLU` and
+   `WithFFNNoBias` are combined.
+2. Embedding layer loading: `model/zmf_loader.go:54` has a TODO to handle
+   embedding layer loading. `LoadModelFromZMF` builds the graph but leaves
+   `model.Embedding` nil, causing a nil pointer dereference if `Forward` is
+   called. The `embed_tokens` parameter already exists in ZMF models and
+   `embeddings.NewTokenEmbeddingFromParam` can construct the embedding from it.
+3. cmd/zerfoo-predict: 349 lines at 0% coverage. `parsePredictFlags` uses
+   `flag.Parse` and `log.Fatal` (untestable). `runPrediction` is placeholder
+   code. The `min` function shadows the builtin. Extract testable logic
+   following the same pattern used for `cmd/zerfoo-tokenize` in Phase 23.
+
 Architecture, design, GPU details, operations, and troubleshooting are
 documented in docs/design.md (the single reference document). Stable design
 decisions are extracted into docs/adr/ (see [ADR index](design.md#14-architectural-decision-records)).
@@ -67,6 +85,9 @@ O32-O33: COMPLETE (Phase 21). See ADR-018.
 - O37: Raise test coverage to 100% where possible across all packages, with a
   floor of 95% for packages that have hard-to-test paths (main functions, GPU
   build tags, external dependencies). **(NOT STARTED)**
+- O38: Fix remaining TODOs (FFN bias disable, embedding loading), fix broken
+  FFN bias detection heuristic, and refactor cmd/zerfoo-predict for testability.
+  **(NOT STARTED)**
 
 ### Non-Goals
 
@@ -160,6 +181,9 @@ D11-D55: COMPLETE. See ADRs 007-018.
 | D60 | model 95%+ coverage | Tests for BuildFromZMF paths, builder helpers, adapters |
 | D61 | CLI tools 95%+ coverage | Extract testable logic from cmd/bench-compare and cmd/coverage-gate |
 | D62 | All packages 95%+ floor | Every testable package at >= 95% statement coverage |
+| D63 | FFN bias disable fix | WithFFNNoBias uses noBias field; BuildFFN passes it when withBias=false |
+| D64 | Embedding layer loading | LoadModelFromZMF populates model.Embedding from embed_tokens param |
+| D65 | cmd/zerfoo-predict testable | Extract run(), validate(); coverage >= 70% |
 
 ---
 
@@ -589,6 +613,149 @@ and verify outputs against hand-computed expected values.
   - 2 packages below 90% (cmd/coverage-gate, cmd/zerfoo-tokenize -- both cmd main() paths)
   - Remaining gaps documented as untestable (tensor.New error paths, concrete types)
 
+### Phase 24: Fix TODOs, FFN Bias Heuristic, Predict Refactor
+
+#### Phase 24 Context
+
+Three local improvements that do not require DGX Spark hardware:
+
+1. **FFN bias disable (E126):** `layers/core/ffn.go` lines 62-77 use a fragile
+   heuristic to detect `WithFFNNoBias`: it creates a temporary FFN, applies
+   the option, and checks if the name is unchanged. This only works when
+   `len(opts)==1`, so combining `WithSwiGLU` and `WithFFNNoBias` silently
+   ignores the bias disable. `layers/core/registry.go:61` has a TODO to pass
+   `WithFFNNoBias` when `withBias=false`, but never does. Fix: add a `noBias`
+   bool field to `FFN`, have `WithFFNNoBias` set it, replace the heuristic
+   with a field check, and have `BuildFFN` pass `WithFFNNoBias` when
+   `withBias=false`.
+
+2. **Embedding layer loading (E127):** `model/zmf_loader.go:54` has a TODO.
+   `LoadModelFromZMF` builds the graph but leaves `model.Embedding` nil.
+   `BuildFromZMF` already has access to the `embed_tokens` parameter (used for
+   `lm_head` transpose at builder.go:233). Fix: after building the graph,
+   search the parameter map for a key containing `embed_tokens`, and if found,
+   call `embeddings.NewTokenEmbeddingFromParam` to create the embedding layer.
+
+3. **cmd/zerfoo-predict refactor (E128):** 349 lines at 0% coverage.
+   `parsePredictFlags` calls `flag.Parse` and `log.Fatal` (untestable from
+   tests). `runPrediction` is placeholder code. The custom `min` function
+   shadows the Go builtin. Fix: extract a `run()` function that accepts
+   `io.Writer`, `[]string`, and returns error; extract `validateConfig()`;
+   remove the custom `min`; write table-driven tests.
+
+#### E126: Fix FFN Bias Detection and Registry TODO
+
+- [x] T126.1 Add noBias field to FFN and fix WithFFNNoBias  2026-03-05
+  - Dependencies: None
+  - Files: layers/core/ffn.go
+  - Acceptance: `WithFFNNoBias` sets `FFN.noBias = true`. The heuristic at
+    lines 62-77 is replaced with `if f.noBias { biasEnabled = false }` after
+    applying all options to a temporary FFN. `NewFFN` first creates the FFN
+    struct, applies options to read `noBias`, then creates Dense layers based
+    on `biasEnabled`. Combining `WithSwiGLU()` and `WithFFNNoBias()` must work.
+  - [x] S126.1.1 Add `noBias bool` field to FFN struct  Est: 5m
+  - [x] S126.1.2 Update WithFFNNoBias to set `f.noBias = true`  Est: 5m
+  - [x] S126.1.3 Refactor NewFFN: apply opts to detect noBias before creating Dense layers  Est: 25m
+  - [x] S126.1.4 Write tests: NewFFN with WithFFNNoBias alone, with WithSwiGLU+WithFFNNoBias  Est: 10m
+  - [x] S126.1.5 Run golangci-lint and go test -cover ./layers/core/  Est: 5m
+
+- [x] T126.2 Fix BuildFFN to pass WithFFNNoBias when withBias is false  2026-03-05
+  - Dependencies: T126.1
+  - Files: layers/core/registry.go
+  - Acceptance: When `attributes["with_bias"]` is false, `BuildFFN` appends
+    `WithFFNNoBias[T]()` to opts. The TODO comment at line 61 is removed.
+    When withBias is false, the FFN's Dense layers have no bias. When withBias
+    is true (default), behavior is unchanged. The code at lines 73-92 that
+    manually sets bias parameters must skip when withBias is false.
+  - [x] S126.2.1 Append WithFFNNoBias to opts when withBias is false  Est: 10m
+  - [x] S126.2.2 Guard bias parameter assignment with withBias check  Est: 5m
+  - [x] S126.2.3 Remove the TODO comment  Est: 2m
+  - [x] S126.2.4 Write tests: BuildFFN with withBias=false, withBias=true  Est: 10m
+  - [x] S126.2.5 Run golangci-lint and go test -cover ./layers/core/  Est: 5m
+
+- [x] T126.3 Verify FFN bias fix end-to-end  2026-03-05
+  - Dependencies: T126.1, T126.2
+  - Acceptance: All existing layers/core tests pass. NewFFN with
+    WithFFNNoBias creates Dense layers with WithoutBias. BuildFFN with
+    withBias=false creates an FFN where w1, w2, w3 have no bias parameters.
+  - [x] S126.3.1 Run full test suite: go test ./... -race -count=1  Est: 10m
+  - [x] S126.3.2 Run golangci-lint run ./layers/core/  Est: 5m
+
+#### E127: Fix Embedding Layer Loading TODO
+
+- [x] T127.1 Populate model.Embedding in LoadModelFromZMF  2026-03-05
+  - Dependencies: None
+  - Files: model/zmf_loader.go
+  - Acceptance: After building the graph, `LoadModelFromZMF` searches the
+    parameter map for a key containing `embed_tokens`. If found, it calls
+    `embeddings.NewTokenEmbeddingFromParam(engine, param)` and assigns the
+    result to `model.Embedding`. If no embed_tokens parameter exists, the
+    model is returned with `Embedding = nil` (backward compatible). The TODO
+    comment at line 54 is removed.
+  - Note: `BuildFromZMF` returns a `*graph.Graph[T]` but does not expose the
+    parameter map. We need to either (a) add a method to Graph to retrieve
+    parameters, (b) call `convertParameters` separately in LoadModelFromZMF,
+    or (c) add a BuildOption that captures the embed_tokens param. Option (c)
+    is cleanest -- add a callback BuildOption.
+  - [x] S127.1.1 Determine how to access embed_tokens from LoadModelFromZMF  Est: 15m
+  - [x] S127.1.2 Implement embedding extraction and assignment  Est: 15m
+  - [x] S127.1.3 Remove the TODO comment  Est: 2m
+  - [x] S127.1.4 Write tests: LoadModelFromZMF with embed_tokens, without  Est: 10m
+  - [x] S127.1.5 Run golangci-lint and go test -cover ./model/  Est: 5m
+
+- [x] T127.2 Verify embedding loading end-to-end  2026-03-05
+  - Dependencies: T127.1
+  - Acceptance: All existing model tests pass. LoadModelFromZMF with a ZMF
+    containing embed_tokens returns a Model with non-nil Embedding.
+  - [x] S127.2.1 Run full test suite: go test ./... -race -count=1  Est: 10m
+  - [x] S127.2.2 Run golangci-lint run ./model/  Est: 5m
+
+#### E128: Refactor cmd/zerfoo-predict for Testability
+
+- [x] T128.1 Extract testable logic from cmd/zerfoo-predict  2026-03-05
+  - Dependencies: None
+  - Files: cmd/zerfoo-predict/main.go
+  - Acceptance: A new `run(args []string, stdout io.Writer) error` function
+    contains the core logic. `parsePredictFlags` is replaced with
+    `parseFlags(args []string) (*PredictConfig, error)` that uses a custom
+    `flag.FlagSet` (no global state, no log.Fatal). `main()` calls `run()` and
+    handles os.Exit. The custom `min` function is removed (use builtin).
+    `runPrediction` and output generators accept `io.Writer` instead of
+    writing to hardcoded paths.
+  - [x] S128.1.1 Replace custom min with builtin  Est: 5m
+  - [x] S128.1.2 Convert parsePredictFlags to parseFlags(args) (*PredictConfig, error)  Est: 20m
+  - [x] S128.1.3 Extract run(args, stdout) error function  Est: 20m
+  - [x] S128.1.4 Update main() to call run() and os.Exit on error  Est: 5m
+  - [x] S128.1.5 Run golangci-lint and go build ./cmd/zerfoo-predict/  Est: 5m
+
+- [x] T128.2 Write tests for cmd/zerfoo-predict  2026-03-05
+  - Dependencies: T128.1
+  - Files: cmd/zerfoo-predict/main_test.go
+  - Acceptance: Table-driven tests for parseFlags (valid args, missing required,
+    invalid format), run() (CSV output, JSON output, unsupported format,
+    verbose mode, overwrite check), and savePredictionResult. Coverage >= 70%.
+  - [x] S128.2.1 Write parseFlags tests: valid, missing data/model/output, feature columns  Est: 15m
+  - [x] S128.2.2 Write run() tests: CSV output, JSON output, unsupported format  Est: 20m
+  - [x] S128.2.3 Write savePredictionResult tests  Est: 10m
+  - [x] S128.2.4 Run golangci-lint and go test -cover ./cmd/zerfoo-predict/  Est: 10m
+
+- [x] T128.3 Verify cmd/zerfoo-predict coverage  2026-03-05
+  - Dependencies: T128.2
+  - Acceptance: Coverage >= 70%. All tests pass with -race. golangci-lint clean.
+  - [x] S128.3.1 Run go test -cover -race ./cmd/zerfoo-predict/  Est: 10m
+  - [x] S128.3.2 Run golangci-lint run ./cmd/zerfoo-predict/  Est: 5m
+
+#### E129: Phase 24 Final Verification
+
+- [x] T129.1 Update documentation and plan  2026-03-05
+  - Dependencies: E126, E127, E128
+  - Files: docs/plan.md, docs/QUALITY.md, .claude-checkpoint.md
+  - Acceptance: All Phase 24 tasks marked complete. QUALITY.md updated with
+    new coverage numbers. Checkpoint updated.
+  - [x] S129.1.1 Mark all tasks complete in docs/plan.md  Est: 5m
+  - [x] S129.1.2 Update docs/QUALITY.md coverage numbers  Est: 5m
+  - [x] S129.1.3 Update .claude-checkpoint.md  Est: 5m
+
 ---
 
 ## 4. Timeline and Milestones
@@ -605,6 +772,10 @@ M72-M96: All ACHIEVED (Phases 10-21). See ADRs 007-018.
 | M102 | All packages >= 95% | E122, E123 | No package below 95% coverage |
 | M103 | Maximum coverage achieved | E124 | >= 20 packages at 100% coverage |
 | M104 | Phase 23 complete | E125 | Full coverage report, QUALITY.md updated |
+| M105 | FFN bias fix | E126 | WithFFNNoBias works with multiple opts; BuildFFN passes it |
+| M106 | Embedding loading | E127 | LoadModelFromZMF populates Embedding from embed_tokens |
+| M107 | cmd/zerfoo-predict testable | E128 | Coverage >= 70%, extracted run() and parseFlags() |
+| M108 | Phase 24 complete | E129 | All TODOs resolved, docs updated |
 
 Sequencing:
 - E117, E118, and E119 are independent and can proceed in parallel.
@@ -617,6 +788,10 @@ Sequencing:
 - Within Phase 23, E121-E124 are all independent and can proceed in parallel.
 - E125 depends on E121-E124 completing.
 - All Phase 23 tasks can run locally on macOS (no GPU required).
+- Phase 24 (E126-E129) is independent of Phases 22 and 23.
+- Within Phase 24, E126, E127, and E128 are independent and can proceed in parallel.
+- E129 depends on E126, E127, and E128 completing.
+- All Phase 24 tasks can run locally on macOS (no GPU required).
 
 ---
 
@@ -698,6 +873,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-05 | 24 | Change Summary: Added Phase 24 (E126-E129) to fix remaining TODOs and code quality issues. E126: FFN bias detection heuristic fix + registry TODO. E127: embedding layer loading TODO. E128: cmd/zerfoo-predict testability refactor. Added O38, D63-D65, M105-M108. 4 epics, 10 tasks. All tasks local (no DGX Spark required). |
 | 2026-03-04 | 23 | Change Summary: Added Phase 23 (E121-E125) to raise test coverage to 100% where possible. Coverage baseline: 8 packages at 100%, 6 below 90%. Added O37, D59-D62, M101-M104, R39-R40. 5 epics, 20 tasks covering all 42 packages below 100%. |
 | 2026-03-04 | 22 | Change Summary: Created Phase 22 plan with 3 epics (E117-E119) and final verification (E120). Added BF16 cuBLAS GEMM (5 tasks), unified memory allocator (6 tasks), SigLIP Concat fix (4 tasks). Added risks R36-R38. New deliverables D56-D58, milestones M97-M100. |
 | 2026-03-04 | 21 | Phase 21 COMPLETE. T116.1 docs updated (27a94c8). All tasks marked complete. O32 COMPLETE. |
@@ -720,9 +896,11 @@ A task is done when:
 - **Phase 22 (Current):** BF16 GEMM + unified memory + SigLIP fix. Three
   independent epics (E117, E118, E119) that can proceed in parallel.
   T117.1-T117.3 and T118.1-T118.4 are complete. Remaining tasks require DGX Spark.
-- **Phase 23 (Current):** Test coverage push to 100%. All tasks can run locally.
-  Start with E121 (critical gaps) as it has the highest impact per test written.
-  The layers/core package alone has 15 untested ONNX operators.
+- **Phase 23 (Complete):** Test coverage push. 9 packages at 100%, 42 of 50
+  packages >= 95%. See docs/QUALITY.md for full report.
+- **Phase 24 (Current):** Fix TODOs + code quality. Three independent epics:
+  E126 (FFN bias fix), E127 (embedding loading), E128 (predict refactor).
+  All tasks run locally on macOS.
 - **BF16 context:** The `float16` package (../float16) has a complete BFloat16
   type. `tensor.Numeric` includes it. `model/tensor_decoder.go` decodes it from
   ZMF files. What is missing: GPU compute dispatch in `compute/gpu_engine.go`
