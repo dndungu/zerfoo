@@ -283,6 +283,14 @@ func TestOptions(t *testing.T) {
 			t.Errorf("precision = %q, want %q", o.precision, "fp16")
 		}
 	})
+
+	t.Run("WithMmap", func(t *testing.T) {
+		o := &loadOptions{}
+		WithMmap(true)(o)
+		if !o.mmap {
+			t.Error("mmap not set")
+		}
+	})
 }
 
 // --- GenerateOption tests ---
@@ -1183,5 +1191,60 @@ func TestLoad_InvalidDevice(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "create engine") {
 		t.Errorf("error = %q, want 'create engine' prefix", err.Error())
+	}
+}
+
+func TestLoad_MmapMissingZMF(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ModelMetadata{VocabSize: 100, NumLayers: 1, MaxPositionEmbeddings: 128}
+	cfgData, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfgData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokJSON := `{"model":{"type":"BPE","vocab":{"hello":0},"merges":[]},"added_tokens":[]}`
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(tokJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"test": {ID: "test", Path: dir},
+		},
+	}
+	_, err := Load("test", WithRegistry(reg), WithMmap(true))
+	if err == nil {
+		t.Error("expected error for missing model.zmf with mmap")
+	}
+	if !strings.Contains(err.Error(), "mmap") {
+		t.Errorf("error = %q, want mmap-related error", err.Error())
+	}
+}
+
+func TestLoad_MmapInvalidZMF(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ModelMetadata{VocabSize: 100, NumLayers: 1, MaxPositionEmbeddings: 128}
+	cfgData, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfgData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokJSON := `{"model":{"type":"BPE","vocab":{"hello":0},"merges":[]},"added_tokens":[]}`
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte(tokJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.zmf"), []byte("not a protobuf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"test": {ID: "test", Path: dir},
+		},
+	}
+	_, err := Load("test", WithRegistry(reg), WithMmap(true))
+	if err == nil {
+		t.Error("expected error for invalid model.zmf with mmap")
+	}
+	if !strings.Contains(err.Error(), "mmap") {
+		t.Errorf("error = %q, want mmap-related error", err.Error())
 	}
 }

@@ -1,4 +1,4 @@
-# Zerfoo Enterprise Production Readiness Plan
+# Zerfoo Performance Optimization Plan -- Phase 25
 
 ## 1. Context
 
@@ -7,87 +7,63 @@
 Zerfoo is a Go-based ML framework with 40+ packages, a 34-method compute
 Engine[T] interface, CPU and CUDA GPU backends, gRPC-based distributed
 training, and comprehensive test coverage (95%+ across testable packages).
+Phases 1-24 are complete (see docs/adr/001-019, docs/design.md).
 
-Phases 1-9 brought the framework to production grade: observability, security,
-reliability, configuration, CI/CD enforcement, open-weights model import (6
-model families), embeddable inference library with BPE tokenizer, KV cache,
-generation loop, streaming, model registry, high-level API, CLI commands, and
-OpenAI-compatible HTTP server.
+The framework is functionally complete: 6 model families pass parity tests,
+BF16 GEMM runs on GPU, flash attention is implemented, and KV caching exists
+in the generate package. However, inference throughput lags behind production
+frameworks like ollama/llama.cpp because of several architectural gaps:
 
-Phases 10-13 added multi-GPU and NVIDIA library integrations: device affinity,
-NCCL, cuDNN, TensorRT, CUTLASS flash attention. See ADRs 007-010.
+1. **Model loading uses os.ReadFile**: The ZMF loader reads entire model files
+   into memory via `os.ReadFile` + protobuf unmarshal. A 7B model (14GB) requires
+   14GB of heap allocation before any tensor is created. Ollama uses mmap to
+   memory-map model files, enabling instant "loading" with demand paging.
 
-Phases 14-19 added GPU portability and advanced features: GRAL abstraction,
-AMD ROCm backend, OpenCL backend, cuDNN backward pass, CUTLASS INT4/INT8 GEMM,
-TensorRT dynamic shapes. See ADRs 011-016.
+2. **KV cache allocates on every concat**: `generate/kvcache.go:ConcatAxis1`
+   allocates a new slice and copies all previous KV data on every token. For a
+   2048-token sequence with 32 layers, this is 32 * 2048 growing allocations.
+   Ollama pre-allocates the KV cache to max sequence length.
 
-Phase 20 validated the full GPU stack on DGX Spark GB10 (Blackwell sm_121,
-ARM64, CUDA 13.0): 66 packages pass, benchmarks captured, feature gaps
-documented. See ADR-017.
+3. **No quantized inference kernels**: While INT4/INT8 GEMM kernels exist via
+   CUTLASS (Phase 15), the inference pipeline only runs float32. Ollama uses
+   Q4_0/Q4_K_M/Q8_0 quantized weights with optimized dequant-multiply kernels.
 
-Phase 21 resolved model parity test gaps (17 PASS, 5 SKIP across 7 model
-families) and documented the multi-GPU test coverage gap. See ADR-018.
+4. **Graph execution is fully sequential**: `graph.Forward` holds a mutex and
+   executes nodes one at a time (graph/graph.go:27-68). Independent branches
+   (e.g., Q/K/V projections in attention) are not parallelized.
 
-Phase 22 addresses three gaps identified during Phase 20-21 validation:
-1. BF16 GPU compute: cuBLAS supports BF16 GEMM via `cublasGemmEx`, but
-   zerfoo only wraps `cublasSgemm` (float32). The `float16.BFloat16` type
-   exists in the `float16` package with full arithmetic, and `tensor.Numeric`
-   already includes `float16.BFloat16`, but GPUEngine falls back to CPU for
-   all non-float32 types.
-2. Unified memory: The DGX Spark GB10 has NVLink-C2C hardware-coherent access
-   to 128 GB shared LPDDR5X. `cudaMallocManaged` avoids explicit H2D copies.
-   Currently, MemPool only uses `cudaMalloc` (discrete device memory).
-3. SigLIP Concat: The SigLIP vision model fails at node 1462 with
-   "Concat shape mismatch [1] vs [1 1]" -- a rank mismatch between 1D and 2D
-   tensors at a Concat input. Root cause is likely a missing Unsqueeze or
-   incorrect shape propagation in a preceding node.
+5. **CPU MatMul uses gonum BLAS only**: `internal/xblas/gemm.go` delegates to
+   gonum's BLAS which is a pure Go implementation. No SIMD, no AVX2/NEON
+   optimizations. Ollama uses hand-tuned SIMD kernels via ggml.
 
-Phase 23 raises test coverage across all packages toward 100%. Coverage
-baseline measured on 2026-03-04 shows 8 packages at 100%, 24 packages at
-95-99%, 12 packages at 90-94%, and 6 packages below 90%. The worst offenders
-are `layers/core` (76.0%), `cmd/bench-compare` (52.6%), and
-`cmd/coverage-gate` (53.5%). The `layers/core` package has ~15 ONNX operator
-implementations with zero test coverage.
+6. **No continuous batching**: The server handles one request at a time.
+   Ollama batches multiple requests and shares prefill computation.
 
-Phase 24 fixes remaining TODOs and code quality issues that do not require
-DGX Spark hardware:
-1. FFN bias disable: `layers/core/registry.go:61` has a TODO to pass
-   `WithFFNNoBias` when `withBias` is false. The current `WithFFNNoBias`
-   option in `layers/core/ffn.go` uses a broken heuristic (creates a test FFN
-   with a marker name, applies the option, checks if name is unchanged, and
-   only disables bias when `len(opts)==1`). This fails when `WithSwiGLU` and
-   `WithFFNNoBias` are combined.
-2. Embedding layer loading: `model/zmf_loader.go:54` has a TODO to handle
-   embedding layer loading. `LoadModelFromZMF` builds the graph but leaves
-   `model.Embedding` nil, causing a nil pointer dereference if `Forward` is
-   called. The `embed_tokens` parameter already exists in ZMF models and
-   `embeddings.NewTokenEmbeddingFromParam` can construct the embedding from it.
-3. cmd/zerfoo-predict: 349 lines at 0% coverage. `parsePredictFlags` uses
-   `flag.Parse` and `log.Fatal` (untestable). `runPrediction` is placeholder
-   code. The `min` function shadows the builtin. Extract testable logic
-   following the same pattern used for `cmd/zerfoo-tokenize` in Phase 23.
+7. **Tokenizer is pure Go BPE**: No performance issues at small scale but no
+   pre-compiled vocabulary trie or parallel tokenization.
 
-Architecture, design, GPU details, operations, and troubleshooting are
-documented in docs/design.md (the single reference document). Stable design
-decisions are extracted into docs/adr/ (see [ADR index](design.md#14-architectural-decision-records)).
+### Phase Summary (Previous Work)
+
+| Phase | Description | ADRs |
+|-------|-------------|------|
+| 1-9 | Production readiness, distributed training, model import, inference library, multi-arch | 001-006 |
+| 10-13 | Multi-GPU, cuDNN, TensorRT, CUTLASS flash attention | 007-010 |
+| 14-19 | GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8 GEMM, TRT dynamic shapes | 011-016 |
+| 20 | DGX Spark GB10 validation (66 packages, ARM64, sm_121, CUDA 13.0) | 017 |
+| 21 | Model parity (18 PASS across 6 families, 18 ONNX fixes) | 018 |
+| 22 | BF16 cuBLAS GEMM (1.5x faster), unified memory (200-5000x alloc speedup), SigLIP fix | 019 |
+| 23 | Test coverage push (9 packages at 100%, 42 of 50 at >= 95%) | -- |
+| 24 | FFN bias fix, embedding loading, cmd/zerfoo-predict refactor | -- |
 
 ### Objectives
 
-O12-O31: COMPLETE (Phases 10-20). See ADRs 007-017.
-O32-O33: COMPLETE (Phase 21). See ADR-018.
-
-- O34: Add BF16 cuBLAS GEMM support so `GPUEngine[float16.BFloat16].MatMul`
-  runs on GPU instead of falling back to CPU. **(IN PROGRESS)**
-- O35: Add `cudaMallocManaged` allocator option in MemPool for zero-copy model
-  loading on DGX Spark GB10 unified memory. **(IN PROGRESS)**
-- O36: Fix SigLIP vision model Concat shape mismatch so the SigLIP parity test
-  passes. **(IN PROGRESS)**
-- O37: Raise test coverage to 100% where possible across all packages, with a
-  floor of 95% for packages that have hard-to-test paths (main functions, GPU
-  build tags, external dependencies). **(NOT STARTED)**
-- O38: Fix remaining TODOs (FFN bias disable, embedding loading), fix broken
-  FFN bias detection heuristic, and refactor cmd/zerfoo-predict for testability.
-  **(NOT STARTED)**
+O39: Mmap-based model loading. Eliminate heap allocation for model weights.
+O40: Pre-allocated KV cache. Zero allocation during autoregressive decode.
+O41: Quantized inference pipeline (Q4_0, Q8_0). Run 4-bit models end-to-end.
+O42: Parallel graph execution. Execute independent graph branches concurrently.
+O43: Optimized CPU GEMM. Use NEON (ARM64) and AVX2 (x86-64) SIMD intrinsics.
+O44: Continuous batching in the serve package.
+O45: Benchmark suite with tok/s metric. Measure and track performance parity.
 
 ### Non-Goals
 
@@ -100,18 +76,12 @@ O32-O33: COMPLETE (Phase 21). See ADR-018.
 - Tensor parallelism within a single operation.
 - Vulkan compute backend.
 - SYCL/oneAPI backend (use OpenCL for Intel GPUs instead).
-- FP16 training loop (FP16 inference via TensorRT is in scope).
-- ROCm TensorRT equivalent (MIGraphX integration deferred).
-- OpenCL multi-GPU collective communications (no NCCL equivalent).
-- OpenCL flash attention (too complex for OpenCL kernel model).
 - FP4 kernel implementation (blocked on upstream CUTLASS SM121 FP4 fixes).
-- BF16 training loop (only inference GEMM is in scope for Phase 22).
 - ConnectX-7 multi-node inference (requires second DGX Spark unit).
-- ROCm or OpenCL BF16 GEMM (CUDA only for Phase 22).
-- Unified memory for ROCm or OpenCL (CUDA only for Phase 22).
-- Full FP16 GPU kernel support (only MatMul via cuBLAS for Phase 22).
-- Testing GPU-tagged code on macOS (no CUDA/ROCm/OpenCL available locally).
-- Refactoring code solely to improve testability (test the code as-is).
+- Speculative decoding (future phase).
+- PagedAttention (future phase, after continuous batching).
+- GGUF format support (use ZMF with quantized tensors instead).
+- Training performance (focus is inference throughput).
 
 ### Constraints and Assumptions
 
@@ -119,709 +89,455 @@ O32-O33: COMPLETE (Phase 21). See ADR-018.
 - All CUDA code behind `//go:build cuda` build tags.
 - All ROCm code behind `//go:build rocm` build tags.
 - All OpenCL code behind `//go:build opencl` build tags.
-- NCCL code behind `//go:build cuda` (requires libnccl2).
-- cuDNN code behind `//go:build cuda` (requires libcudnn8 or libcudnn9).
-- TensorRT code behind `//go:build cuda` (requires libnvinfer).
-- CUTLASS requires nvcc and CUTLASS headers at build time; kernels compile into
-  the existing `libkernels.a` static library. CUTLASS >= 4.2 required for sm_121.
-- ROCm requires HIP SDK >= 5.0, rocBLAS, and MIOpen.
-- OpenCL requires OpenCL 2.0+ headers and ICD loader (libOpenCL.so).
-  CLBlast required for BLAS operations.
 - Pre-commit hook rejects commits spanning multiple directories.
 - All changes must pass golangci-lint, go vet, and gofmt.
 - Tests must pass with -race flag.
 - Table-driven tests using the standard testing package.
-- No breaking changes to the Engine[T] interface. All GPU backends implement
-  the same interface; the GRAL abstraction is internal.
-- DGX Spark GB10 is ARM64 (aarch64), not x86_64. CUDA 13.0 pre-installed.
-  Compute capability sm_121 (Blackwell). 128GB unified LPDDR5X memory.
-  Single GPU -- multi-GPU tests require two units linked via ConnectX-7.
-- The `float16` package (../float16) already provides a complete `BFloat16`
-  type with IEEE 754 compliance, conversions, arithmetic, and rounding modes.
-- `tensor.Numeric` already includes `float16.BFloat16` in its type constraint.
-- `model/tensor_decoder.go` already decodes BFloat16 from ZMF model files.
-- `cublasGemmEx` supports `CUDA_R_16BF` data type for BF16 GEMM on Blackwell.
+- DGX Spark GB10 is ARM64 (aarch64), CUDA 13.0, sm_121 (Blackwell), 128GB
+  unified LPDDR5X. Single GPU -- multi-GPU tests require two units via ConnectX-7.
+- Assembly (NEON/AVX2) files use Go's plan9 assembler syntax with build tags.
+- Benchmark target: >= 30 tok/s for Llama 3.2 1B on CPU (Apple M-series),
+  >= 100 tok/s on DGX Spark GPU. Ollama achieves ~40 tok/s CPU, ~120 tok/s GPU
+  for similar model sizes.
 
 ### Success Metrics
 
-All metrics for Phases 10-21 ACHIEVED. See ADRs 007-018 and design.md Section 15.
-
-Phase 22 metrics:
-
-| Metric | Target | Status |
-|--------|--------|--------|
-| BF16 MatMul on GPU | GPUEngine[BFloat16].MatMul dispatches to cublasGemmEx | NOT STARTED |
-| BF16 benchmark | BF16 GEMM benchmark on DGX Spark vs CPU baseline | NOT STARTED |
-| Unified memory allocator | MemPool.AllocManaged returns cudaMallocManaged pointer | NOT STARTED |
-| Unified memory model load | Model loaded via managed memory skips explicit H2D copy | NOT STARTED |
-| SigLIP parity test | TestSigLIPForwardPass PASS on DGX Spark | NOT STARTED |
-
-Phase 23 metrics:
-
-| Metric | Target | Status |
-|--------|--------|--------|
-| Packages at 100% coverage | >= 20 (up from 8) | 9 at 100% (config, data, device, xblas, components, registry, tokenizers, metrics, shutdown) |
-| Packages below 90% coverage | 0 (down from 6) | 2 remain (coverage-gate 84.9%, zerfoo-tokenize 74.1%) |
-| Overall minimum coverage | >= 95% for every testable package | 42 of 50 packages >= 95% |
-| layers/core coverage | >= 95% (up from 76.0%) | PASSED (95.9%) |
-| model coverage | >= 95% (up from 81.4%) | PASSED (95.1%) |
+| Metric | Current | Target | How Measured |
+|--------|---------|--------|-------------|
+| Model load time (7B) | ~10s (full read + unmarshal) | < 0.5s (mmap) | Benchmark in model/ |
+| Decode tok/s CPU (1B) | ~5 tok/s (est.) | >= 30 tok/s | Benchmark in generate/ |
+| Decode tok/s GPU (1B) | ~20 tok/s (est.) | >= 100 tok/s | Benchmark in generate/ |
+| KV cache allocs/token | O(seq_len) per token | 0 per token | Go benchmark -benchmem |
+| Memory for 7B Q4_0 | 14GB (float32) | ~4GB (4-bit) | Runtime MemStats |
+| Concurrent requests | 1 (sequential) | 8+ (batched) | Load test on serve/ |
 
 ---
 
 ## 2. Scope and Deliverables
 
-D11-D55: COMPLETE. See ADRs 007-018.
+### In Scope
 
-| ID | Description | Status |
-|----|-------------|--------|
-| D56 | BF16 cuBLAS GEMM | cublasGemmEx binding + GPUEngine BF16 MatMul dispatch |
-| D57 | Unified memory allocator | cudaMallocManaged in MemPool + GPUStorage integration |
-| D58 | SigLIP Concat fix | Concat handles rank-mismatched inputs; SigLIP parity PASS |
-| D59 | layers/core 100% coverage | Tests for all 15+ untested ONNX operators |
-| D60 | model 95%+ coverage | Tests for BuildFromZMF paths, builder helpers, adapters |
-| D61 | CLI tools 95%+ coverage | Extract testable logic from cmd/bench-compare and cmd/coverage-gate |
-| D62 | All packages 95%+ floor | Every testable package at >= 95% statement coverage |
-| D63 | FFN bias disable fix | WithFFNNoBias uses noBias field; BuildFFN passes it when withBias=false |
-| D64 | Embedding layer loading | LoadModelFromZMF populates model.Embedding from embed_tokens param |
-| D65 | cmd/zerfoo-predict testable | Extract run(), validate(); coverage >= 70% |
+| ID | Deliverable | Rationale |
+|----|-------------|-----------|
+| D66 | Mmap ZMF loader | Eliminate model load heap allocation |
+| D67 | Pre-allocated KV cache with ring buffer | Zero-alloc decode loop |
+| D68 | Q4_0 and Q8_0 tensor storage and dequant | Run quantized models |
+| D69 | Quantized MatMul kernel (CPU Q4_0 * FP32) | Core quantized inference op |
+| D70 | NEON SGEMM kernel (ARM64) | Fast CPU MatMul on Apple Silicon and DGX Spark |
+| D71 | AVX2 SGEMM kernel (x86-64) | Fast CPU MatMul on Intel/AMD |
+| D72 | Parallel graph executor | Concurrent independent branch execution |
+| D73 | Continuous batching in serve/ | Multi-request throughput |
+| D74 | tok/s benchmark suite | Performance regression tracking |
+| D75 | Quantized CUDA dequant-GEMM kernel | GPU quantized inference |
+
+### Out of Scope
+
+- GGUF format parser (use ZMF with quantized tensor protos).
+- Speculative decoding.
+- PagedAttention.
+- Training loop optimization.
+- Multi-node inference.
 
 ---
 
-## 3. Work Breakdown
-
-### Completed Phases (1-21)
-
-Phase 1 (Test Coverage), Phase 2 (GPU Engine), Phase 3 (GPU Production
-Readiness), Phase 4 (Enterprise Production Readiness), Phase 5 (Distributed
-Training Protocol), Phase 6 (Open Weights Model Import), Phase 7 (Architecture
-Cleanup), Phase 8 (Embeddable Inference Library), Phase 9 (Multi-Architecture
-Support), Phase 10 (Multi-GPU), Phase 11 (cuDNN), Phase 12 (TensorRT),
-Phase 13 (CUTLASS Flash Attention), Phase 14 (GRAL), Phase 15 (ROCm),
-Phase 16 (OpenCL), Phase 17 (cuDNN Backward), Phase 18 (CUTLASS INT4/INT8),
-Phase 19 (TensorRT Dynamic Shapes), Phase 20 (DGX Spark Validation),
-Phase 21 (Model Parity + Multi-GPU Gap) are all complete.
-See docs/adr/ for design decisions.
-
-### Phase 22: BF16 GEMM, Unified Memory, SigLIP Fix
-
-#### Phase 22 Context
-
-Phase 20 identified BF16 GEMM and unified memory as low-effort improvements for
-DGX Spark (ADR-017 Sections "BF16 Tensor Operations" and "Unified Memory").
-Phase 21 identified SigLIP Concat shape mismatch as a bug to fix (ADR-018).
-
-Key codebase facts for implementers:
-- `internal/cublas/cublas.go`: Only wraps `cublasSgemm`. Needs `cublasGemmEx`.
-- `internal/gpuapi/blas.go`: BLAS interface has only `Sgemm`. Needs `GemmEx` or
-  `BFloat16Gemm` method.
-- `compute/gpu_engine.go` line 166-169: MatMul type-checks for float32 and falls
-  back to CPU for everything else. Needs BFloat16 dispatch path.
-- `compute/gpu_engine.go` line 246: `elemSize` is hardcoded to `float32(0)`.
-  Must use `unsafe.Sizeof(zero)` for the actual type T.
-- `internal/cuda/mempool.go`: Cache key is `(deviceID, byteSize)`. Alloc calls
-  `cudaMalloc` on cache miss. Needs `AllocManaged` variant using
-  `cudaMallocManaged`.
-- `internal/gpuapi/mempool.go`: MemPool interface has `Alloc`, `Free`, `Drain`,
-  `Stats`. Needs `AllocManaged` method.
-- `layers/core/concat.go`: Delegates to `engine.Concat()`.
-- `compute/cpu_engine.go` lines 1250-1267: Concat validates all non-axis
-  dimensions are equal. Fails when inputs have different ranks.
-- SigLIP error: "node[1462] Concat shape mismatch [1] vs [1 1]" -- one input is
-  1D shape [1], another is 2D shape [1,1]. A preceding Unsqueeze or Reshape is
-  likely not producing the expected rank.
-
-#### E117: BF16 cuBLAS GEMM
-
-Bind cublasGemmEx for BFloat16 GEMM and wire it into GPUEngine.MatMul.
-
-- [x] T117.1 Add cublasGemmEx CGo binding  2026-03-04
-  - Dependencies: None
-  - Files: internal/cublas/cublas.go
-  - Commits: 33a97e5 (binding), 251c336 (tests)
-  - [x] S117.1.1 Define CudaDataType enum (CUDA_R_32F=0, CUDA_R_16BF=14, CUDA_R_16F=2)  Est: 10m
-  - [x] S117.1.2 Add GemmEx method with CGo call to cublasGemmEx  Est: 30m
-  - [x] S117.1.3 Add CublasComputeType enum (CUBLAS_COMPUTE_32F)  Est: 10m
-  - [x] S117.1.4 Write table-driven tests: FP32 via GemmEx (BF16 validated on DGX Spark)  Est: 30m
-  - [x] S117.1.5 Run golangci-lint and go test -cover  Est: 10m
-
-- [x] T117.2 Add BFloat16Gemm to BLAS interface and CUDA adapter  2026-03-04
-  - Dependencies: T117.1
-  - Files: internal/gpuapi/blas.go, internal/gpuapi/cuda_blas.go,
-    internal/gpuapi/rocm_blas.go, internal/gpuapi/opencl_blas.go,
-    internal/gpuapi/gpuapi_test.go
-  - Commit: 51facd7
-  - [x] S117.2.1 Add BFloat16Gemm to BLAS interface  Est: 10m
-  - [x] S117.2.2 Implement BFloat16Gemm in CUDABlas  Est: 15m
-  - [x] S117.2.3 Add stub returning error in RocmBlas and OpenCLBlas  Est: 10m
-  - [x] S117.2.4 Run golangci-lint on internal/gpuapi/  Est: 5m
-
-- [x] T117.3 Add BFloat16 dispatch to GPUEngine.MatMul  2026-03-04
-  - Dependencies: T117.2
-  - Files: compute/gpu_engine.go, compute/gpu_kernels.go
-  - Commit: fc15197
-  - Note: BFloat16 MatMul tests require CUDA hardware; will be validated on DGX
-    Spark during T117.4.
-  - [x] S117.3.1 Fix elemSize to use unsafe.Sizeof(zero) for generic T  Est: 15m
-  - [x] S117.3.2 Fix getDevicePtr to use unsafe.Sizeof(zero) and direct pointer  Est: 15m
-  - [x] S117.3.3 Add BFloat16 type check and dispatch in MatMul  Est: 30m
-  - [ ] S117.3.4 Write tests: BFloat16 MatMul 2x2, 4x4, batched  Est: 20m  (DGX Spark)
-  - [x] S117.3.5 Run golangci-lint and go test -cover  Est: 10m
-
-- [ ] T117.4 Benchmark BF16 GEMM on DGX Spark  Owner: TBD  Est: 30m
-  - Dependencies: T117.3
-  - Files: compute/gpu_engine_test.go (benchmark function)
-  - Acceptance: BenchmarkBF16MatMul runs 128x128, 512x512, 1024x1024 BF16 GEMM
-    on GPU. Results recorded in ADR-019. Compare with float32 Sgemm latency.
-  - [ ] S117.4.1 Write BenchmarkBF16MatMul table-driven benchmark  Est: 15m
-  - [ ] S117.4.2 Run on DGX Spark and record results  Est: 15m
-
-- [ ] T117.5 Run linters and verify coverage for E117  Owner: TBD  Est: 15m
-  - Dependencies: T117.4
-  - Acceptance: golangci-lint 0 issues. go test -tags cuda -cover -race passes.
-    Coverage >= 95% on internal/cublas/ and compute/ BF16 paths.
-  - [ ] S117.5.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [ ] S117.5.2 Fix any remaining issues  Est: 5m
-
-#### E118: Unified Memory Allocator
-
-Add cudaMallocManaged support to MemPool for zero-copy model loading on the
-DGX Spark GB10 unified memory architecture.
-
-- [x] T118.1 Add MallocManaged CGo binding  2026-03-04
-  - Dependencies: None
-  - Files: internal/cuda/runtime.go
-  - Commit: 52a2500
-  - [x] S118.1.1 Add MallocManaged CGo binding  Est: 20m
-  - [x] S118.1.2 Write test: MallocManaged, write from host, read from host  Est: 15m
-  - [x] S118.1.3 Run golangci-lint and go test -tags cuda -cover  Est: 10m
-
-- [x] T118.2 Add AllocManaged to MemPool  2026-03-04
-  - Dependencies: T118.1
-  - Files: internal/cuda/mempool.go
-  - Commit: 52c4660
-  - [x] S118.2.1 Add managedCache field to MemPool  Est: 10m
-  - [x] S118.2.2 Implement AllocManaged with cache lookup and MallocManaged fallback  Est: 20m
-  - [x] S118.2.3 Add FreeManaged method to return to managed cache  Est: 10m
-  - [x] S118.2.4 Update Drain to free managed cache entries  Est: 10m
-  - [x] S118.2.5 Write tests: AllocManaged/FreeManaged round-trip, Drain clears both caches  Est: 15m
-  - [x] S118.2.6 Run golangci-lint and go test -tags cuda -cover -race  Est: 5m
-
-- [x] T118.3 Add AllocManaged to gpuapi.MemPool interface and CUDAMemPool  2026-03-04
-  - Dependencies: T118.2
-  - Files: internal/gpuapi/mempool.go, internal/gpuapi/cuda_mempool.go,
-    internal/gpuapi/rocm_mempool.go, internal/gpuapi/opencl_mempool.go,
-    internal/gpuapi/gpuapi_test.go
-  - Commit: b15bf8c
-  - [x] S118.3.1 Add AllocManaged and FreeManaged to MemPool interface  Est: 10m
-  - [x] S118.3.2 Implement in CUDAMemPool  Est: 10m
-  - [x] S118.3.3 Add stubs in ROCm and OpenCL pool implementations  Est: 10m
-
-- [x] T118.4 Add ManagedGPUStorage option to GPUStorage  2026-03-04
-  - Dependencies: T118.3
-  - Files: tensor/gpu_storage.go, tensor/gpu_storage_test.go
-  - Commit: 5a6350a
-  - Note: NewManagedGPUStorage accepts gpuapi.MemPool (not runtime) since
-    AllocManaged lives on the MemPool interface. Tests require CUDA hardware.
-  - [x] S118.4.1 Add managed bool field to GPUStorage  Est: 5m
-  - [x] S118.4.2 Add NewManagedGPUStorage constructor  Est: 15m
-  - [x] S118.4.3 Update TrySlice to skip Memcpy for managed storage  Est: 15m
-  - [x] S118.4.4 Update TrySet to skip Memcpy for managed storage  Est: 10m
-  - [x] S118.4.5 Write tests: create managed storage, write, read, verify  Est: 15m
-  - [x] S118.4.6 Run golangci-lint and go test -tags cuda -cover -race  Est: 5m
-
-- [ ] T118.5 Benchmark managed vs discrete allocation on DGX Spark  Owner: TBD  Est: 30m
-  - Dependencies: T118.4
-  - Files: tensor/gpu_storage_test.go (benchmark function)
-  - Acceptance: BenchmarkManagedVsDiscrete compares allocation+H2D copy time for
-    discrete vs managed memory at sizes 1MB, 10MB, 100MB. Results in ADR-019.
-  - [ ] S118.5.1 Write benchmark function  Est: 15m
-  - [ ] S118.5.2 Run on DGX Spark and record results  Est: 15m
-
-- [ ] T118.6 Run linters and verify coverage for E118  Owner: TBD  Est: 15m
-  - Dependencies: T118.5
-  - Acceptance: golangci-lint 0 issues. go test -tags cuda -cover -race passes.
-    Coverage >= 95% on unified memory paths.
-  - [ ] S118.6.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [ ] S118.6.2 Fix any remaining issues  Est: 5m
-
-#### E119: SigLIP Concat Shape Mismatch Fix
-
-Fix the Concat layer to handle rank-mismatched inputs by broadcasting or
-erroring clearly, and fix the SigLIP model's shape propagation so the parity
-test passes.
-
-- [ ] T119.1 Reproduce and diagnose SigLIP Concat failure  Owner: TBD  Est: 1.5h
-  - Dependencies: None
-  - Files: tests/parity/siglip_test.go, graph/graph.go
-  - Steps:
-    1. Run TestSigLIPForwardPass on DGX Spark to confirm the exact error
-    2. Add temporary debug logging at graph.go line 61 to print node 1462
-       input shapes and dependency ops
-    3. Trace backward from node 1462 to find which node produces the [1]
-       shape and which produces [1 1]
-    4. Identify the root cause: missing Unsqueeze, incorrect Reshape target
-       shape, or Concat not handling rank broadcast
-  - Acceptance: Root cause documented with the specific ONNX node type and
-    index that produces the wrong shape. Fix strategy identified.
-  - [ ] S119.1.1 Run SigLIP test on DGX Spark and capture full error  Est: 15m
-  - [ ] S119.1.2 Add debug logging to trace node 1462 inputs  Est: 15m
-  - [ ] S119.1.3 Identify root cause node and shape mismatch origin  Est: 30m
-  - [ ] S119.1.4 Document fix strategy  Est: 15m
-
-- [ ] T119.2 Fix shape propagation or Concat rank handling  Owner: TBD  Est: 1.5h
-  - Dependencies: T119.1
-  - Files: TBD based on diagnosis (likely one of: layers/core/concat.go,
-    compute/cpu_engine.go, model/builder.go, or a specific layer's Forward)
-  - Acceptance: The fix addresses the root cause identified in T119.1. If the
-    issue is in Concat itself, add rank broadcasting (Unsqueeze lower-rank
-    inputs to match the highest rank). If the issue is in a preceding node,
-    fix that node's output shape. The fix must not break existing Concat tests.
-  - [ ] S119.2.1 Write a failing test that reproduces the shape mismatch  Est: 20m
-  - [ ] S119.2.2 Implement the fix  Est: 30m
-  - [ ] S119.2.3 Verify the failing test now passes  Est: 10m
-  - [ ] S119.2.4 Run existing Concat tests to verify no regressions  Est: 10m
-  - [ ] S119.2.5 Run golangci-lint  Est: 5m
-
-- [ ] T119.3 Run SigLIP parity test on DGX Spark  Owner: TBD  Est: 30m
-  - Dependencies: T119.2
-  - Files: tests/parity/siglip_test.go
-  - Acceptance: TestSigLIPForwardPass PASS on DGX Spark with the SigLIP ZMF
-    model at ~/models/siglip/model.zmf. Update ADR-018 results table.
-  - [ ] S119.3.1 Deploy fix to DGX Spark  Est: 10m
-  - [ ] S119.3.2 Run SigLIP parity test  Est: 10m
-  - [ ] S119.3.3 Update ADR-018 results (SKIP -> PASS)  Est: 10m
-
-- [ ] T119.4 Run linters and verify coverage for E119  Owner: TBD  Est: 15m
-  - Dependencies: T119.3
-  - Acceptance: golangci-lint 0 issues. All existing tests pass. SigLIP parity
-    PASS.
-  - [ ] S119.4.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
-  - [ ] S119.4.2 Fix any remaining issues  Est: 5m
-
-#### E120: Phase 22 Final Verification
-
-- [ ] T120.1 Update documentation  Owner: TBD  Est: 30m
-  - Dependencies: E117, E118, E119
-  - Files: docs/plan.md, docs/design.md, docs/adr/019-phase22-bf16-unified-siglip.md
-  - Steps:
-    1. Mark all Phase 22 tasks complete with results
-    2. Create ADR-019 with BF16 benchmark results, unified memory benchmark,
-       and SigLIP fix details
-    3. Update design.md Section 15 with BF16 and unified memory results
-    4. Update ADR-018 results table (SigLIP SKIP -> PASS)
-  - Acceptance: All docs reflect actual results. ADR-019 written.
-
-### Phase 23: Test Coverage to 100%
-
-#### Phase 23 Context
-
-Coverage baseline measured 2026-03-04 (no GPU build tags, macOS):
-
-**Already at 100% (8 packages):**
-data, device, internal/xblas, layers/components, layers/registry,
-layers/tokenizers, metrics, shutdown.
-
-**95-99% (24 packages):**
-config (95.8%), distributed (96.0%), distributed/coordinator (98.3%),
-features (99.0%), generate (95.0%), graph (97.3%), layers/activations (97.4%),
-layers/hrm (95.5%), layers/normalization (95.7%), layers/recurrent (97.0%),
-layers/reducesum (95.9%), layers/regularization (97.6%),
-layers/transformer (96.4%), layers/transpose (97.6%), log (97.7%),
-metrics/runtime (96.5%), model/hrm (98.1%), numeric (98.5%), serve (96.4%),
-tensor (97.9%), training (95.9%), training/optimizer (96.6%),
-tests/internal/testutil (98.5%), testing/testutils (94.5%).
-
-**90-94% (12 packages):**
-cmd/cli (92.5%), compute (93.7%), health (90.0%), inference (91.8%),
-layers/attention (91.8%), layers/embeddings (92.5%), layers/features (93.8%),
-layers/gather (91.6%), layers/sequence (94.0%), pkg/tokenizer (90.3%),
-registry (91.2%), testing/testutils (94.5%).
-
-**Below 90% (6 packages):**
-cmd/bench-compare (52.6%), cmd/coverage-gate (53.5%), layers/core (76.0%),
-model (81.4%), training/loss (87.3%), cmd/zerfoo-tokenize (0.0%).
-
-Key coverage gaps identified by per-function analysis:
-- `layers/core`: 15 ONNX operators at 0% (ConstantOfShape, Div, Equal, Expand,
-  Greater, Neg, Pow, Range, ReduceMean, ScatterND, Sqrt, Trilu, Where,
-  LessOrEqual, Mod, Or). Several more operators partially tested.
-- `model/builder.go`: `BuildFromZMF` at 60.7%; `resolveParam`,
-  `rebuildWithPromotedAxes`, `isConstantPromotedAttr`, `getNodeNames` at 0%.
-- `cmd/bench-compare`: `main()` at 0%; `parseBenchmarks` at 92.6%.
-- `cmd/coverage-gate`: `main()` at 0%; `isExcluded` at 0%.
-- `training/loss/corr.go`: Forward at 78.3%, Backward at 79.4%.
-- `layers/attention`: MLA Backward at 0%, MLA Forward at 70.3%.
-- `health`: EngineCheck at 75%, EngineCheckGeneric at 72.7%.
-- `inference`: WithBackend/WithPrecision/NewTestModel at 0%, Close at 66.7%.
-
-#### E121: Critical Coverage Gaps (below 80%)
-
-##### T121.1 layers/core ONNX operators -- zero-coverage batch 1  Owner: TBD  Est: 2h
-
-Write table-driven tests for the first batch of untested ONNX operators in
-`layers/core`. Each test must create a node, call Forward with known inputs,
-and verify outputs against hand-computed expected values.
-
-- [x] T121.1 layers/core zero-coverage operators batch 1  2026-03-04
-  - Dependencies: None
-  - Files: layers/core/batch1_coverage_test.go
-  - Commit: 21634bf
-  - Operators: ConstantOfShape, Div, Equal, Expand, Greater, Neg, Pow, Sqrt
-  - Coverage: 76.0% -> 84.1%
-  - [x] S121.1.1 Write tests for ConstantOfShape: scalar fill, multi-dim shape  Est: 15m
-  - [x] S121.1.2 Write tests for Div: element-wise, broadcast, divide-by-zero  Est: 15m
-  - [x] S121.1.3 Write tests for Equal: matching, non-matching, different shapes  Est: 10m
-  - [x] S121.1.4 Write tests for Expand: broadcast to larger shape  Est: 10m
-  - [x] S121.1.5 Write tests for Greater: element-wise comparison  Est: 10m
-  - [x] S121.1.6 Write tests for Neg: negate positive, negative, zero  Est: 10m
-  - [x] S121.1.7 Write tests for Pow: integer exponent, fractional exponent  Est: 10m
-  - [x] S121.1.8 Write tests for Sqrt: positive values, zero  Est: 10m
-  - [x] S121.1.9 Run golangci-lint and go test -cover ./layers/core/  Est: 10m
-
-- [x] T121.2 layers/core zero-coverage operators batch 2  2026-03-04
-  - Dependencies: None
-  - Files: layers/core/batch2_coverage_test.go
-  - Commit: 0465d46
-  - Operators: Range, ReduceMean, ScatterND, Trilu, Where, LessOrEqual, Mod, Or
-  - Coverage: 84.1% -> 90.9%
-  - [x] S121.2.1-S121.2.9 All subtasks complete
-
-- [x] T121.3 layers/core partially-tested operators  2026-03-04
-  - Dependencies: None
-  - Files: layers/core/batch3_coverage_test.go
-  - Commit: 7d0111b
-  - Coverage: 90.9% -> 94.7%
-  - [x] S121.3.1-S121.3.10 All subtasks complete
-
-- [x] T121.4 cmd/bench-compare coverage  2026-03-04
-  - Dependencies: None
-  - Files: cmd/bench-compare/main.go, cmd/bench-compare/main_test.go
-  - Commit: 8d2a174
-  - Coverage: 52.6% -> 87.2%
-  - [x] S121.4.1-S121.4.3 All subtasks complete
-
-- [x] T121.5 cmd/coverage-gate coverage  2026-03-04
-  - Dependencies: None
-  - Files: cmd/coverage-gate/main.go, cmd/coverage-gate/main_test.go
-  - Commit: 1fc4600
-  - Coverage: 53.5% -> 80.8%
-  - [x] S121.5.1-S121.5.3 All subtasks complete
-
-- [x] T121.6 layers/core coverage verification  2026-03-04
-  - Dependencies: T121.1, T121.2, T121.3
-  - Result: 94.7% (just under 95% target; remaining gaps are in complex
-    BuildFromZMF paths and GPU-only code paths)
-  - [x] S121.6.1 Verified coverage at 94.7%, lint clean
-
-#### E122: Below-90% Packages
-
-- [x] T122.1 model package coverage  2026-03-05
-  - Dependencies: None
-  - Files: model/builder_coverage_test.go
-  - Coverage: 86.1% -> 95.1%. Commit: a58c56c
-  - Tested: auto-input nodes, perm/epsilon/axis promotion, global attributes,
-    output aliases, Reshape with constant node, Unsqueeze axes, transposed param
-    resolution, logits output fallback, rebuildWithPromotedAxes, getNodeNames.
-  - Acceptance: model package coverage >= 95%. PASSED.
-  - [x] S122.1.1 Write test for WithGlobalAttributes + SetLogger  Est: 10m
-  - [x] S122.1.2 Write test for resolveParam with various param types  Est: 15m
-  - [x] S122.1.3 Write test for isConstantPromotedAttr  Est: 15m
-  - [x] S122.1.4 Write test for rebuildWithPromotedAxes  2026-03-05
-  - [x] S122.1.5 Add test cases to BuildFromZMF: error paths, missing fields  2026-03-05
-  - [x] S122.1.6 Add test cases for ExportToPath, marshalModel, ValidateArchitecture error branches  2026-03-05 (partial -- adapters not targeted, model at 95.1%)
-  - [x] S122.1.7 Run golangci-lint and go test -cover ./model/  2026-03-05
-
-- [x] T122.2 training/loss coverage  2026-03-05
-  - Dependencies: None
-  - Files: training/loss/engine_mock_test.go, training/loss/coverage_gaps_test.go
-  - Coverage: 87.3% -> 97.4%. Commit: f4837d7
-  - Tested: CorrLoss Forward/Backward engine error paths (ReduceMean, AddScalar,
-    Mul, Sum, MulScalar, Add), MSE Forward/Backward engine error paths (Sub, Mul).
-  - Acceptance: training/loss coverage >= 95%. PASSED.
-  - [x] S122.2.1 Identify uncovered branches in corr.go Forward/Backward  2026-03-05
-  - [x] S122.2.2 Write failing engine mock + error path tests  2026-03-05
-  - [x] S122.2.3 Run golangci-lint and go test -cover ./training/loss/  2026-03-05
-
-- [x] T122.3 cmd/zerfoo-tokenize coverage  2026-03-04
-  - Dependencies: None
-  - Files: cmd/zerfoo-tokenize/main.go, cmd/zerfoo-tokenize/main_test.go
-  - Commit: 1f7e7e5
-  - Coverage: 0% -> 74.1% (run 90.9%, loadVocab 100%, main 0%)
-  - [x] S122.3.1-S122.3.3 All subtasks complete
-
-#### E123: 90-94% Packages (push to 98%+)
-
-- [x] T123.1 health package coverage  2026-03-05
-  - Dependencies: None
-  - Files: health/*_test.go
-  - Current: 90.0%. BLOCKED: EngineCheck takes concrete *CPUEngine type.
-  - Acceptance: health coverage >= 98%. NOT MET (90.0%) -- blocked by architecture.
-  - [x] S123.1.1 Analyzed: EngineCheck/EngineCheckGeneric error paths untestable
-  - [x] S123.1.2 Documented in QUALITY.md as known untestable gap
-
-- [x] T123.2 inference package coverage  2026-03-05
-  - Coverage: 91.8% -> 96.3% [84b5e5f]
-  - Remaining gaps are tensor.New unreachable error paths.
-
-- [x] T123.3 layers/attention coverage  2026-03-05
-  - Coverage: 91.5% -> 96.5% [fd95423]
-  - Remaining gap: dupl linter blocks MLA Forward engine error test.
-
-- [x] T123.4 layers/embeddings coverage  2026-03-05
-  - Coverage: 92.5% -> 92.9% [1814fdf]
-  - Remaining gaps are tensor.New unreachable error paths.
-
-- [x] T123.5 layers/gather coverage  2026-03-05
-  - Coverage: 90.7% -> 93.5% [bde3123]
-  - Remaining gaps are tensor.New unreachable error paths.
-
-- [x] T123.6 pkg/tokenizer coverage  2026-03-05
-  - Coverage: 90.3% -> 96.2% [030327f]
-
-- [x] T123.7 registry coverage  2026-03-05
-  - Coverage: 91.2% -> 93.2% [9d80490]
-  - Remaining gaps are filesystem error paths.
-
-- [x] T123.8 compute coverage  2026-03-05
-  - Coverage: 93.1% -> 98.0% [8745d37]
-
-- [x] T123.9 layers/sequence and layers/features coverage  2026-03-05
-  - sequence: 94.0% (remaining gaps are tensor.New error paths in NewS4)
-  - features: 93.8% [5753dcf] (remaining gaps are tensor.New error paths)
-
-- [x] T123.10 cmd/cli and testing/testutils coverage  2026-03-05
-  - cmd/cli: 92.5% -> 93.6% [e45c837]
-  - testing/testutils: 94.5% -> 99.3% [9a3fb76]
-
-#### E124: 95-99% Packages (push to 100%)
-
-- [x] T124.1-T124.3 Push packages toward 100%  2026-03-05
-  - config: 95.8% -> 100% [999e455]
-  - testing/testutils: 94.5% -> 99.3% [9a3fb76]
-  - cmd/bench-compare: 87.2% -> 89.7% [f5120f6]
-  - Most remaining gaps across all packages are tensor.New unreachable error
-    paths, engine error paths requiring mock infrastructure, or defensive
-    fallbacks (e.g., sampleFromDistribution rounding guard). Documented in
-    docs/QUALITY.md.
-
-#### E125: Phase 23 Final Verification
-
-- [x] T125.1 Full coverage report and documentation  2026-03-05
-  - Created docs/QUALITY.md with full coverage report [b44a0da]
-  - Updated docs/plan.md with all task completions
-  - 9 packages at 100%, 42 of 50 packages >= 95%
-  - 2 packages below 90% (cmd/coverage-gate, cmd/zerfoo-tokenize -- both cmd main() paths)
-  - Remaining gaps documented as untestable (tensor.New error paths, concrete types)
-
-### Phase 24: Fix TODOs, FFN Bias Heuristic, Predict Refactor
-
-#### Phase 24 Context
-
-Three local improvements that do not require DGX Spark hardware:
-
-1. **FFN bias disable (E126):** `layers/core/ffn.go` lines 62-77 use a fragile
-   heuristic to detect `WithFFNNoBias`: it creates a temporary FFN, applies
-   the option, and checks if the name is unchanged. This only works when
-   `len(opts)==1`, so combining `WithSwiGLU` and `WithFFNNoBias` silently
-   ignores the bias disable. `layers/core/registry.go:61` has a TODO to pass
-   `WithFFNNoBias` when `withBias=false`, but never does. Fix: add a `noBias`
-   bool field to `FFN`, have `WithFFNNoBias` set it, replace the heuristic
-   with a field check, and have `BuildFFN` pass `WithFFNNoBias` when
-   `withBias=false`.
-
-2. **Embedding layer loading (E127):** `model/zmf_loader.go:54` has a TODO.
-   `LoadModelFromZMF` builds the graph but leaves `model.Embedding` nil.
-   `BuildFromZMF` already has access to the `embed_tokens` parameter (used for
-   `lm_head` transpose at builder.go:233). Fix: after building the graph,
-   search the parameter map for a key containing `embed_tokens`, and if found,
-   call `embeddings.NewTokenEmbeddingFromParam` to create the embedding layer.
-
-3. **cmd/zerfoo-predict refactor (E128):** 349 lines at 0% coverage.
-   `parsePredictFlags` calls `flag.Parse` and `log.Fatal` (untestable from
-   tests). `runPrediction` is placeholder code. The custom `min` function
-   shadows the Go builtin. Fix: extract a `run()` function that accepts
-   `io.Writer`, `[]string`, and returns error; extract `validateConfig()`;
-   remove the custom `min`; write table-driven tests.
-
-#### E126: Fix FFN Bias Detection and Registry TODO
-
-- [x] T126.1 Add noBias field to FFN and fix WithFFNNoBias  2026-03-05
-  - Dependencies: None
-  - Files: layers/core/ffn.go
-  - Acceptance: `WithFFNNoBias` sets `FFN.noBias = true`. The heuristic at
-    lines 62-77 is replaced with `if f.noBias { biasEnabled = false }` after
-    applying all options to a temporary FFN. `NewFFN` first creates the FFN
-    struct, applies options to read `noBias`, then creates Dense layers based
-    on `biasEnabled`. Combining `WithSwiGLU()` and `WithFFNNoBias()` must work.
-  - [x] S126.1.1 Add `noBias bool` field to FFN struct  Est: 5m
-  - [x] S126.1.2 Update WithFFNNoBias to set `f.noBias = true`  Est: 5m
-  - [x] S126.1.3 Refactor NewFFN: apply opts to detect noBias before creating Dense layers  Est: 25m
-  - [x] S126.1.4 Write tests: NewFFN with WithFFNNoBias alone, with WithSwiGLU+WithFFNNoBias  Est: 10m
-  - [x] S126.1.5 Run golangci-lint and go test -cover ./layers/core/  Est: 5m
-
-- [x] T126.2 Fix BuildFFN to pass WithFFNNoBias when withBias is false  2026-03-05
-  - Dependencies: T126.1
-  - Files: layers/core/registry.go
-  - Acceptance: When `attributes["with_bias"]` is false, `BuildFFN` appends
-    `WithFFNNoBias[T]()` to opts. The TODO comment at line 61 is removed.
-    When withBias is false, the FFN's Dense layers have no bias. When withBias
-    is true (default), behavior is unchanged. The code at lines 73-92 that
-    manually sets bias parameters must skip when withBias is false.
-  - [x] S126.2.1 Append WithFFNNoBias to opts when withBias is false  Est: 10m
-  - [x] S126.2.2 Guard bias parameter assignment with withBias check  Est: 5m
-  - [x] S126.2.3 Remove the TODO comment  Est: 2m
-  - [x] S126.2.4 Write tests: BuildFFN with withBias=false, withBias=true  Est: 10m
-  - [x] S126.2.5 Run golangci-lint and go test -cover ./layers/core/  Est: 5m
-
-- [x] T126.3 Verify FFN bias fix end-to-end  2026-03-05
-  - Dependencies: T126.1, T126.2
-  - Acceptance: All existing layers/core tests pass. NewFFN with
-    WithFFNNoBias creates Dense layers with WithoutBias. BuildFFN with
-    withBias=false creates an FFN where w1, w2, w3 have no bias parameters.
-  - [x] S126.3.1 Run full test suite: go test ./... -race -count=1  Est: 10m
-  - [x] S126.3.2 Run golangci-lint run ./layers/core/  Est: 5m
-
-#### E127: Fix Embedding Layer Loading TODO
-
-- [x] T127.1 Populate model.Embedding in LoadModelFromZMF  2026-03-05
-  - Dependencies: None
-  - Files: model/zmf_loader.go
-  - Acceptance: After building the graph, `LoadModelFromZMF` searches the
-    parameter map for a key containing `embed_tokens`. If found, it calls
-    `embeddings.NewTokenEmbeddingFromParam(engine, param)` and assigns the
-    result to `model.Embedding`. If no embed_tokens parameter exists, the
-    model is returned with `Embedding = nil` (backward compatible). The TODO
-    comment at line 54 is removed.
-  - Note: `BuildFromZMF` returns a `*graph.Graph[T]` but does not expose the
-    parameter map. We need to either (a) add a method to Graph to retrieve
-    parameters, (b) call `convertParameters` separately in LoadModelFromZMF,
-    or (c) add a BuildOption that captures the embed_tokens param. Option (c)
-    is cleanest -- add a callback BuildOption.
-  - [x] S127.1.1 Determine how to access embed_tokens from LoadModelFromZMF  Est: 15m
-  - [x] S127.1.2 Implement embedding extraction and assignment  Est: 15m
-  - [x] S127.1.3 Remove the TODO comment  Est: 2m
-  - [x] S127.1.4 Write tests: LoadModelFromZMF with embed_tokens, without  Est: 10m
-  - [x] S127.1.5 Run golangci-lint and go test -cover ./model/  Est: 5m
-
-- [x] T127.2 Verify embedding loading end-to-end  2026-03-05
-  - Dependencies: T127.1
-  - Acceptance: All existing model tests pass. LoadModelFromZMF with a ZMF
-    containing embed_tokens returns a Model with non-nil Embedding.
-  - [x] S127.2.1 Run full test suite: go test ./... -race -count=1  Est: 10m
-  - [x] S127.2.2 Run golangci-lint run ./model/  Est: 5m
-
-#### E128: Refactor cmd/zerfoo-predict for Testability
-
-- [x] T128.1 Extract testable logic from cmd/zerfoo-predict  2026-03-05
-  - Dependencies: None
-  - Files: cmd/zerfoo-predict/main.go
-  - Acceptance: A new `run(args []string, stdout io.Writer) error` function
-    contains the core logic. `parsePredictFlags` is replaced with
-    `parseFlags(args []string) (*PredictConfig, error)` that uses a custom
-    `flag.FlagSet` (no global state, no log.Fatal). `main()` calls `run()` and
-    handles os.Exit. The custom `min` function is removed (use builtin).
-    `runPrediction` and output generators accept `io.Writer` instead of
-    writing to hardcoded paths.
-  - [x] S128.1.1 Replace custom min with builtin  Est: 5m
-  - [x] S128.1.2 Convert parsePredictFlags to parseFlags(args) (*PredictConfig, error)  Est: 20m
-  - [x] S128.1.3 Extract run(args, stdout) error function  Est: 20m
-  - [x] S128.1.4 Update main() to call run() and os.Exit on error  Est: 5m
-  - [x] S128.1.5 Run golangci-lint and go build ./cmd/zerfoo-predict/  Est: 5m
-
-- [x] T128.2 Write tests for cmd/zerfoo-predict  2026-03-05
-  - Dependencies: T128.1
-  - Files: cmd/zerfoo-predict/main_test.go
-  - Acceptance: Table-driven tests for parseFlags (valid args, missing required,
-    invalid format), run() (CSV output, JSON output, unsupported format,
-    verbose mode, overwrite check), and savePredictionResult. Coverage >= 70%.
-  - [x] S128.2.1 Write parseFlags tests: valid, missing data/model/output, feature columns  Est: 15m
-  - [x] S128.2.2 Write run() tests: CSV output, JSON output, unsupported format  Est: 20m
-  - [x] S128.2.3 Write savePredictionResult tests  Est: 10m
-  - [x] S128.2.4 Run golangci-lint and go test -cover ./cmd/zerfoo-predict/  Est: 10m
-
-- [x] T128.3 Verify cmd/zerfoo-predict coverage  2026-03-05
-  - Dependencies: T128.2
-  - Acceptance: Coverage >= 70%. All tests pass with -race. golangci-lint clean.
-  - [x] S128.3.1 Run go test -cover -race ./cmd/zerfoo-predict/  Est: 10m
-  - [x] S128.3.2 Run golangci-lint run ./cmd/zerfoo-predict/  Est: 5m
-
-#### E129: Phase 24 Final Verification
-
-- [x] T129.1 Update documentation and plan  2026-03-05
-  - Dependencies: E126, E127, E128
-  - Files: docs/plan.md, docs/QUALITY.md, .claude-checkpoint.md
-  - Acceptance: All Phase 24 tasks marked complete. QUALITY.md updated with
-    new coverage numbers. Checkpoint updated.
-  - [x] S129.1.1 Mark all tasks complete in docs/plan.md  Est: 5m
-  - [x] S129.1.2 Update docs/QUALITY.md coverage numbers  Est: 5m
-  - [x] S129.1.3 Update .claude-checkpoint.md  Est: 5m
+## 3. Checkable Work Breakdown
+
+### E25: Mmap-Based Model Loading (O39)
+
+- [x] T25.1 Add mmap file reader to model/ package  Owner: TBD  Est: 2h
+  - Create `model/mmap.go` with `MmapReader` that memory-maps a file via `syscall.Mmap`
+    (unix) and `syscall.CreateFileMapping` (windows, behind build tag).
+  - Returns `[]byte` slice backed by mmap. `Close()` calls `syscall.Munmap`.
+  - Acceptance: `MmapReader` opens a file, returns byte slice, Close unmaps.
+  - Dependencies: none.
+
+- [x] S25.1.1 Unit tests for MmapReader  Owner: TBD  Est: 1h
+  - Write temp file, mmap it, verify contents match, close, verify no leak.
+  - Test error cases: missing file, empty file.
+
+- [x] T25.2 Add streaming protobuf decoder for ZMF  Owner: TBD  Est: 3h
+  - Create `model/zmf_stream.go` with `LoadZMFMmap(path string) (*zmf.Model, error)`
+    that mmaps the file and passes the mmap slice to `proto.Unmarshal`.
+  - This avoids the `os.ReadFile` copy -- protobuf unmarshals from the mmap
+    slice directly. The mmap slice stays mapped until the model is closed.
+  - For tensor data: instead of copying tensor bytes into Go slices, store
+    the mmap byte range reference and decode lazily on first access.
+  - Acceptance: `LoadZMFMmap` loads a model with zero `os.ReadFile` calls.
+    Memory usage delta is < 1MB for metadata (tensor data stays in mmap pages).
+  - Dependencies: T25.1.
+
+- [x] S25.2.1 Unit tests for LoadZMFMmap  Owner: TBD  Est: 1h
+  - Round-trip test: save a small ZMF model, load via mmap, verify graph.
+  - Benchmark: compare LoadZMF vs LoadZMFMmap for a 100MB test file.
+
+- [x] T25.3 Integrate mmap loader into inference.Load  Owner: TBD  Est: 1h
+  - Add `WithMmap(bool)` option to inference.Load. Default to true on unix.
+  - When mmap is enabled, use `LoadZMFMmap` instead of `LoadModelFromZMF`.
+  - Acceptance: `inference.Load("model-id", WithMmap(true))` uses mmap path.
+  - Dependencies: T25.2.
+
+- [x] S25.3.1 Tests for inference.Load with mmap  Owner: TBD  Est: 30m
+
+- [x] T25.4 Run golangci-lint on model/  Owner: TBD  Est: 15m
+  - Dependencies: T25.3.
+
+### E26: Pre-Allocated KV Cache (O40)
+
+- [x] T26.1 Implement ring-buffer KV cache  Owner: TBD  Est: 3h
+  - Rewrite `generate/kvcache.go`: pre-allocate `[batch, maxSeqLen, dim]` tensors
+    for each layer's K and V at construction time.
+  - `Update(layer, newK, newV)` writes into the next position via `copy()` on the
+    backing slice. No allocation. Track write position with an integer cursor.
+  - `Get(layer)` returns a view (sub-slice) of the pre-allocated tensor covering
+    `[0:cursor]` on the sequence axis.
+  - `ConcatAxis1` is no longer needed -- remove it.
+  - Acceptance: `go test -bench=. -benchmem` shows 0 allocs/op in Update.
+  - Dependencies: none.
+  - Risk: Changing KV cache shape semantics may break GQA attention layer's
+    cache integration. Verify in S26.1.1.
+
+- [x] S26.1.1 Unit tests for ring-buffer KV cache  Owner: TBD  Est: 1.5h
+  - Test: create cache, update 100 times, verify data integrity at each step.
+  - Test: cursor wraps correctly (if implementing ring buffer with overwrite).
+  - Test: zero allocations via testing.B benchmark.
+  - Test: concurrent reads during update (if applicable).
+
+- [x] T26.2 Update generate.Generator to use pre-allocated cache  Owner: TBD  Est: 1.5h
+  - Generator.Generate already creates KVCache with maxSeqLen from ModelConfig.
+  - HeadDim/NumKVHeads not needed: cache detects batch/dim lazily on first Update.
+  - Existing generator tests pass with pre-allocated cache.
+
+- [x] S26.2.1 Tests for generator with pre-allocated cache  Owner: TBD  Est: 1h
+  - All existing generator tests pass unchanged.
+
+- [x] T26.3 Update GQA attention to use view-based cache  Owner: TBD  Est: 2h
+  - GQA cache.Update/Get API unchanged. View tensors have correct shapes.
+  - GQA cache tests (TestGQA_CachedForward, CacheLayerIndex) pass.
+
+- [x] S26.3.1 Tests for GQA with view cache  Owner: TBD  Est: 1h
+
+- [x] T26.4 Run golangci-lint on generate/ and layers/attention/  Owner: TBD  Est: 15m
+  - 0 issues.
+
+### E27: Quantized Tensor Storage (O41)
+
+- [x] T27.1 Add Q4_0 block format to tensor/  Owner: TBD  Est: 3h
+  - Create `tensor/quantized.go` with `Q4Storage` type.
+  - Q4_0 format: 32 values per block. Each block = 2 bytes scale (float16) +
+    16 bytes data (32 x 4-bit packed). Total = 18 bytes per 32 values.
+  - Implement `Dequantize(dst []float32)` that unpacks blocks to float32.
+  - Implement `QuantizeQ4(src []float32) *Q4Storage` that quantizes float32 to Q4_0.
+  - Q4Storage implements a read-only subset of Storage[T] (Len, DeviceType).
+  - Slice() returns dequantized float32 (copies). No Set() -- quantized tensors
+    are immutable weights.
+  - Acceptance: round-trip quantize-dequantize has max error < 0.1 for values
+    in [-1, 1] range. Compression ratio is 8x vs float32.
+  - Dependencies: none.
+
+- [x] S27.1.1 Unit tests for Q4_0 quantization  Owner: TBD  Est: 1.5h
+  - Test: quantize known values, dequantize, verify within tolerance.
+  - Test: block boundary handling (not multiple of 32).
+  - Test: extreme values (0, max float32, negative).
+  - Benchmark: dequantize throughput (GB/s).
+
+- [x] T27.2 Add Q8_0 block format to tensor/  Owner: TBD  Est: 2h
+  - Q8_0 format: 32 values per block. Each block = 4 bytes scale (float32) +
+    32 bytes data (32 x int8). Total = 36 bytes per 32 values.
+  - Same interface as Q4Storage.
+  - Acceptance: round-trip error < 0.01 for values in [-1, 1].
+    Compression ratio is ~4.5x vs float32.
+  - Dependencies: none.
+
+- [x] S27.2.1 Unit tests for Q8_0 quantization  Owner: TBD  Est: 1h
+
+- [x] T27.3 Add quantized tensor loading to ZMF loader  Owner: TBD  Est: 2h
+  - Extend `model/zmf_loader.go:DecodeTensor` to detect quantized tensor data
+    in the ZMF proto and construct Q4Storage or Q8Storage instead of
+    regular Storage[float32].
+  - Add `QuantType` field to ZMF tensor proto (or use existing dtype field).
+  - Acceptance: A ZMF model with quantized weights loads correctly and
+    returns dequantized values when accessed.
+  - Dependencies: T27.1, T27.2.
+
+- [x] S27.3.1 Tests for quantized ZMF loading  Owner: TBD  Est: 1h
+
+- [x] T27.4 Add zonnx quantization pass  Owner: TBD  Est: 2h
+  - In the zonnx CLI, add `--quantize q4_0` and `--quantize q8_0` flags
+    to the convert command that quantize weights during ONNX-to-ZMF conversion.
+  - Acceptance: `zonnx convert --quantize q4_0 model.onnx model-q4.zmf` produces
+    a ZMF file ~4x smaller than float32.
+  - Dependencies: T27.3.
+  - Risk: This touches the zonnx repo, not zerfoo. Coordinate changes.
+
+- [x] S27.4.1 Tests for zonnx quantization  Owner: TBD  Est: 1h
+
+- [x] T27.5 Run golangci-lint on tensor/ and model/  Owner: TBD  Est: 15m
+  - Dependencies: T27.3.
+
+### E28: Quantized CPU MatMul Kernel (O41, O43)
+
+- [x] T28.1 Implement Q4_0 x FP32 MatMul in Go  Owner: TBD  Est: 3h
+  - Create `internal/xblas/gemm_quant.go`.
+  - `GemmQ4F32(m, n, k int, a *Q4Storage, b []float32, c []float32)`:
+    For each output row, dequantize the Q4 row into a local float32 buffer,
+    then dot-product with the float32 column.
+  - Optimize: dequantize one block (32 values) at a time into a stack buffer
+    to minimize allocation and maximize cache locality.
+  - Acceptance: correct output vs reference (dequant-then-GEMM). At least
+    2x faster than dequant-all-then-GEMM for 4096x4096 matrices.
+  - Dependencies: T27.1.
+
+- [x] S28.1.1 Unit and benchmark tests  Owner: TBD  Est: 1.5h
+  - Correctness: compare against reference float32 GEMM within Q4 tolerance.
+  - Benchmark: measure GFLOPS for 512, 1024, 2048, 4096 sizes.
+
+- [x] T28.2 Implement Q8_0 x FP32 MatMul in Go  Owner: TBD  Est: 2h
+  - Same pattern as T28.1 but for Q8_0 blocks.
+  - Acceptance: correct within Q8 tolerance, faster than dequant-all.
+  - Dependencies: T27.2.
+
+- [x] S28.2.1 Unit and benchmark tests  Owner: TBD  Est: 1h
+
+- [x] T28.3 Wire quantized MatMul into CPUEngine  Owner: TBD  Est: 2h
+  - Modify `compute/cpu_engine.go:MatMul` to detect when input A has quantized
+    storage (via type assertion or interface check) and dispatch to GemmQ4F32
+    or GemmQ8F32 instead of xblas.GemmF32.
+  - Acceptance: `CPUEngine.MatMul` with a Q4 weight tensor produces correct
+    output and is faster than the float32 path for same logical dimensions.
+  - Dependencies: T28.1, T28.2.
+
+- [x] S28.3.1 Integration tests for quantized MatMul via Engine  Owner: TBD  Est: 1h
+
+- [x] T28.4 Run golangci-lint on internal/xblas/ and compute/  Owner: TBD  Est: 15m
+  - Dependencies: T28.3.
+
+### E29: SIMD-Optimized CPU GEMM (O43)
+
+- [ ] T29.1 NEON SGEMM kernel for ARM64  Owner: TBD  Est: 4h
+  - Create `internal/xblas/gemm_neon_arm64.s` in Go plan9 assembly.
+  - Implement a 4x4 micro-kernel using NEON FMLA (fused multiply-add).
+  - Outer loop tiles M and N in 4x4 blocks; inner loop iterates K.
+  - Build-tagged with `//go:build arm64`.
+  - Pure Go fallback in `gemm_neon_generic.go` with `//go:build !arm64`.
+  - Acceptance: >= 2x faster than gonum BLAS for 1024x1024 SGEMM on
+    Apple M1/M2 or DGX Spark ARM64.
+  - Dependencies: none.
+  - Risk: Plan9 assembly for ARM64 NEON is less documented than x86. Use
+    Go's NEON instruction mnemonics (VFMLA, VLD1, VST1).
+
+- [ ] S29.1.1 Tests for NEON SGEMM  Owner: TBD  Est: 1.5h
+  - Correctness: compare against gonum BLAS for various sizes.
+  - Benchmark: measure GFLOPS on ARM64.
+
+- [ ] T29.2 AVX2 SGEMM kernel for x86-64  Owner: TBD  Est: 4h
+  - Create `internal/xblas/gemm_avx2_amd64.s` in Go plan9 assembly.
+  - Implement a 8x1 micro-kernel using AVX2 VFMADD231PS (8-wide FMA).
+  - Build-tagged with `//go:build amd64`.
+  - Pure Go fallback already exists (gonum BLAS).
+  - Acceptance: >= 2x faster than gonum BLAS for 1024x1024 SGEMM on
+    modern x86-64 (Intel 10th gen+, AMD Zen3+).
+  - Dependencies: none.
+
+- [ ] S29.2.1 Tests for AVX2 SGEMM  Owner: TBD  Est: 1.5h
+
+- [ ] T29.3 Wire SIMD GEMM into xblas.GemmF32  Owner: TBD  Est: 1h
+  - Modify `internal/xblas/gemm.go:GemmF32` to dispatch to the SIMD kernel
+    when available (arm64 or amd64) and fall back to gonum for other archs.
+  - Acceptance: all existing MatMul tests pass. Benchmark shows SIMD speedup.
+  - Dependencies: T29.1 or T29.2.
+
+- [ ] S29.3.1 Integration tests  Owner: TBD  Est: 30m
+
+- [ ] T29.4 NEON Q4 dot product kernel  Owner: TBD  Est: 3h
+  - Create `internal/xblas/qdot_neon_arm64.s` with a NEON-accelerated
+    Q4_0 dequant-and-dot-product kernel.
+  - Dequantize 32 values (one Q4 block) into 4 NEON registers, then FMLA
+    with 4 registers from the float32 vector.
+  - Acceptance: >= 3x faster than scalar Q4 dequant-dot for 4096-dim vectors.
+  - Dependencies: T28.1, T29.1.
+
+- [ ] S29.4.1 Tests for NEON Q4 dot product  Owner: TBD  Est: 1h
+
+- [ ] T29.5 Run golangci-lint on internal/xblas/  Owner: TBD  Est: 15m
+  - Dependencies: T29.3.
+
+### E30: Parallel Graph Execution (O42)
+
+- [ ] T30.1 Build dependency-aware parallel executor  Owner: TBD  Est: 4h
+  - Create `graph/parallel.go` with `ParallelForward(ctx, inputs)`.
+  - Compute in-degree for each node. Use a channel-based work queue.
+  - Nodes with zero remaining in-degree are dispatched to a goroutine pool.
+  - When a node completes, decrement in-degree of its dependents and enqueue
+    newly-ready nodes.
+  - Goroutine pool size = `runtime.GOMAXPROCS(0)` (CPU) or 1 (GPU, since
+    CUDA ops are serialized on a single stream anyway).
+  - Mutex on the memo map is replaced by per-node atomic or channel signaling.
+  - Acceptance: identical output to sequential Forward. At least 1.3x faster
+    on a 4-branch attention model on CPU.
+  - Dependencies: none.
+  - Risk: Non-deterministic execution order may cause subtle bugs if any node
+    has hidden mutable state. All current layers are stateless in Forward
+    (parameters are read-only). KV cache is per-context, not per-graph.
+
+- [ ] S30.1.1 Unit tests for parallel executor  Owner: TBD  Est: 2h
+  - Test: diamond graph (A -> B,C -> D). B and C must run in parallel.
+  - Test: linear graph (no parallelism). Output matches sequential.
+  - Test: context cancellation mid-execution.
+  - Benchmark: 4-branch graph, sequential vs parallel.
+
+- [ ] T30.2 Add ForwardMode option to Graph  Owner: TBD  Est: 1h
+  - Add `WithParallel(bool)` option. Default false for backward compatibility.
+  - When true, `Graph.Forward` delegates to `ParallelForward`.
+  - Acceptance: existing tests pass with both modes.
+  - Dependencies: T30.1.
+
+- [ ] S30.2.1 Tests for ForwardMode  Owner: TBD  Est: 30m
+
+- [ ] T30.3 Run golangci-lint on graph/  Owner: TBD  Est: 15m
+  - Dependencies: T30.2.
+
+### E31: Continuous Batching (O44)
+
+- [ ] T31.1 Implement batch scheduler in serve/  Owner: TBD  Est: 4h
+  - Create `serve/batch.go` with `BatchScheduler` that collects incoming
+    requests into batches.
+  - Requests wait up to `batchTimeoutMs` (default 10ms) for the batch to fill.
+  - Maximum batch size is configurable (default 8).
+  - The scheduler groups requests by phase: prefill vs decode.
+  - Prefill requests with different prompt lengths are padded to max length
+    in the batch (left-pad with pad token).
+  - Decode requests all have input length 1 (single token).
+  - Acceptance: multiple concurrent requests are served in fewer forward passes
+    than sequential processing.
+  - Dependencies: none.
+  - Risk: Padding introduces wasted compute. For very different prompt lengths,
+    the overhead may exceed the batching benefit.
+
+- [ ] S31.1.1 Unit tests for batch scheduler  Owner: TBD  Est: 2h
+  - Test: 4 requests arrive within timeout, batched into 1 forward pass.
+  - Test: timeout expires with 2 requests, batch of 2 fires.
+  - Test: max batch size enforced.
+
+- [ ] T31.2 Implement batched forward pass in generate/  Owner: TBD  Est: 3h
+  - Modify `Generator` to support batch dimension > 1 in input tensors.
+  - KV cache must be per-request (not per-batch). Each request in the batch
+    has its own KV cache and cursor position.
+  - After the batched forward pass, split output logits by batch index and
+    sample independently per request.
+  - Acceptance: batched generation produces identical output per-request
+    as sequential generation.
+  - Dependencies: T26.1, T31.1.
+
+- [ ] S31.2.1 Tests for batched generation  Owner: TBD  Est: 1.5h
+
+- [ ] T31.3 Wire batch scheduler into serve HTTP handler  Owner: TBD  Est: 2h
+  - Modify `serve/server.go` chat completions handler to submit requests
+    to the batch scheduler instead of calling Generator directly.
+  - SSE streaming must still work: each request gets its own stream channel.
+  - Acceptance: `ab -n 100 -c 8` against the server shows > 2x throughput
+    compared to sequential.
+  - Dependencies: T31.2.
+
+- [ ] S31.3.1 Integration tests  Owner: TBD  Est: 1h
+
+- [ ] T31.4 Run golangci-lint on serve/ and generate/  Owner: TBD  Est: 15m
+  - Dependencies: T31.3.
+
+### E32: Quantized CUDA Kernel (O41)
+
+- [ ] T32.1 CUDA Q4_0 dequant-GEMM kernel  Owner: TBD  Est: 4h
+  - Create `internal/cuda/kernels/gemm_quant.cu` with a kernel that:
+    1. Loads Q4_0 blocks from global memory into shared memory.
+    2. Dequantizes 32 values per thread block.
+    3. Performs tiled GEMM with the dequantized values.
+  - Use the cuBLAS mixed-precision GEMM API if available, or custom kernel.
+  - Acceptance: correct output vs CPU Q4 GEMM. At least 5x faster than
+    CPU Q4 GEMM for 4096x4096 on DGX Spark.
+  - Dependencies: T27.1.
+  - Risk: Requires DGX Spark for testing. Skip tests gracefully on CPU-only.
+
+- [ ] S32.1.1 Tests and benchmarks (CUDA-gated)  Owner: TBD  Est: 1.5h
+
+- [ ] T32.2 Wire CUDA Q4 GEMM into GPUEngine  Owner: TBD  Est: 1.5h
+  - Modify `compute/gpu_kernels.go` to dispatch quantized MatMul to the
+    CUDA Q4 kernel.
+  - Acceptance: GPUEngine.MatMul with Q4 input produces correct output.
+  - Dependencies: T32.1.
+
+- [ ] S32.2.1 Integration tests  Owner: TBD  Est: 1h
+
+- [ ] T32.3 Run golangci-lint on compute/ and internal/cuda/  Owner: TBD  Est: 15m
+  - Dependencies: T32.2.
+
+### E33: Benchmark Suite (O45)
+
+- [ ] T33.1 Create tok/s benchmark framework  Owner: TBD  Est: 2h
+  - Create `tests/benchmark/` with `BenchmarkTokPerSec` that:
+    1. Loads a model (configurable via env var `BENCH_MODEL_PATH`).
+    2. Runs generation for a fixed prompt and max_tokens.
+    3. Measures wall time and computes tok/s.
+    4. Reports via `b.ReportMetric(toksPerSec, "tok/s")`.
+  - Include separate benchmarks for prefill (prompt processing) and decode
+    (token generation).
+  - Acceptance: `go test -bench=BenchmarkTokPerSec -run=^$ ./tests/benchmark/`
+    produces tok/s metrics.
+  - Dependencies: none.
+
+- [ ] S33.1.1 Benchmark validation tests  Owner: TBD  Est: 30m
+
+- [ ] T33.2 Add CPU GEMM micro-benchmarks  Owner: TBD  Est: 1h
+  - Add benchmarks to `internal/xblas/` comparing gonum, NEON, and AVX2
+    GEMM at sizes 128, 512, 1024, 2048, 4096.
+  - Also benchmark Q4 and Q8 dequant-GEMM.
+  - Acceptance: `go test -bench=. ./internal/xblas/` shows all variants.
+  - Dependencies: T29.3.
+
+- [ ] S33.2.1 Verify benchmark correctness  Owner: TBD  Est: 30m
+
+- [ ] T33.3 Add memory profiling benchmark  Owner: TBD  Est: 1h
+  - Benchmark that tracks `runtime.MemStats` during model load and generation.
+  - Reports peak heap, total allocs, and allocs/token.
+  - Acceptance: allocs/token is reported for KV cache performance tracking.
+  - Dependencies: T26.1.
+
+- [ ] T33.4 Run golangci-lint on tests/benchmark/  Owner: TBD  Est: 15m
+  - Dependencies: T33.3.
 
 ---
 
 ## 4. Timeline and Milestones
 
-M72-M96: All ACHIEVED (Phases 10-21). See ADRs 007-018.
+| Milestone | ID | Dependencies | Exit Criteria |
+|-----------|----|-------------|---------------|
+| M1: Zero-alloc inference | E25, E26 | none | Model loads via mmap, decode loop has 0 allocs/token |
+| M2: Quantized inference | E27, E28 | M1 | Q4_0 model loads, runs forward pass, output within tolerance |
+| M3: Fast CPU GEMM | E29 | none | NEON/AVX2 SGEMM >= 2x gonum, Q4 dot >= 3x scalar |
+| M4: Parallel and batched | E30, E31 | M1 | Parallel graph >= 1.3x speedup, batch server >= 2x throughput |
+| M5: GPU quantized + benchmarks | E32, E33 | M2 | CUDA Q4 GEMM works, tok/s benchmarks report metrics |
 
-| ID | Milestone | Dependencies | Exit Criteria |
-|----|-----------|--------------|---------------|
-| M97 | BF16 cuBLAS GEMM | E117 | GPUEngine[BFloat16].MatMul dispatches to GPU; benchmark recorded |
-| M98 | Unified memory allocator | E118 | cudaMallocManaged available in MemPool; managed GPUStorage works |
-| M99 | SigLIP parity PASS | E119 | TestSigLIPForwardPass PASS on DGX Spark |
-| M100 | Phase 22 complete | E120 | All three features implemented, tested, benchmarked, documented |
-| M101 | Critical coverage gaps closed | E121 | layers/core >= 95%, cmd tools >= 95% |
-| M102 | All packages >= 95% | E122, E123 | No package below 95% coverage |
-| M103 | Maximum coverage achieved | E124 | >= 20 packages at 100% coverage |
-| M104 | Phase 23 complete | E125 | Full coverage report, QUALITY.md updated |
-| M105 | FFN bias fix | E126 | WithFFNNoBias works with multiple opts; BuildFFN passes it |
-| M106 | Embedding loading | E127 | LoadModelFromZMF populates Embedding from embed_tokens |
-| M107 | cmd/zerfoo-predict testable | E128 | Coverage >= 70%, extracted run() and parseFlags() |
-| M108 | Phase 24 complete | E129 | All TODOs resolved, docs updated |
+Recommended execution order (parallelizable groups in brackets):
 
-Sequencing:
-- E117, E118, and E119 are independent and can proceed in parallel.
-- E120 depends on all three completing.
-- E117 T117.1-T117.3 can be developed locally (macOS). T117.4 requires DGX Spark.
-- E118 T118.1-T118.4 can be developed locally. T118.5 requires DGX Spark.
-- E119 T119.1 and T119.3 require DGX Spark. T119.2 may be doable locally
-  depending on the root cause.
-- Phase 23 (E121-E125) is independent of Phase 22 and can proceed in parallel.
-- Within Phase 23, E121-E124 are all independent and can proceed in parallel.
-- E125 depends on E121-E124 completing.
-- All Phase 23 tasks can run locally on macOS (no GPU required).
-- Phase 24 (E126-E129) is independent of Phases 22 and 23.
-- Within Phase 24, E126, E127, and E128 are independent and can proceed in parallel.
-- E129 depends on E126, E127, and E128 completing.
-- All Phase 24 tasks can run locally on macOS (no GPU required).
+1. [E25, E26, E29, E33.T33.1] -- independent foundations
+2. [E27, E30] -- quantized storage + parallel graph (independent)
+3. [E28, E32] -- quantized kernels (depend on E27)
+4. E31 -- continuous batching (depends on E26)
+5. E33.T33.2-T33.4 -- final benchmarks (depends on everything)
 
 ---
 
 ## 5. Risk Register
 
-Active risks only. Resolved/mitigated risks (R1-R13, R26) removed.
-
 | ID | Risk | Impact | Likelihood | Mitigation |
 |----|------|--------|------------|------------|
-| R14 | GRAL abstraction adds indirection overhead | GPU performance regression | Medium | Benchmark before/after; inline critical paths if needed. GRAL interfaces are internal, not virtual dispatch in hot loop. |
-| R15 | HIP API divergence from CUDA | Unexpected incompatibilities | Medium | HIP is designed as CUDA-compatible. Test on actual AMD hardware. |
-| R16 | MIOpen API differs significantly from cuDNN | Extra development time for DNN ops | High | MIOpen has different workspace management. Budget extra time for conv forward/backward. |
-| R17 | ROCm tests cannot run in CI | No AMD GPU in CI | High | Tests skip gracefully. Validate on AMD hardware manually (Instinct MI250 or RX 7900). |
-| R18 | OpenCL buffer model vs pointer model mismatch | GRAL interface awkward for OpenCL | High | GRAL Runtime uses unsafe.Pointer to wrap cl_mem handles. Document the convention. |
-| R19 | CLBlast performance worse than cuBLAS/rocBLAS | Slow OpenCL MatMul | Medium | CLBlast is the best available. Document expected performance gap. |
-| R20 | OpenCL kernel compilation at runtime is slow | Slow first inference | Medium | Cache compiled kernels (clGetProgramInfo + binary). |
-| R21 | cuDNN backward workspace larger than forward | GPU OOM during training | Medium | Pool workspace buffers. Fall back to CPU on OOM (existing pattern). |
-| R22 | CUTLASS INT4 packing format varies by model | Incompatible quantization formats | High | Support ONNX MatMulNBits format (block quantization, group_size). Document supported formats. |
-| R23 | TRT dynamic shapes slower than fixed shapes | Performance regression | Medium | Optimization profile's "opt" dimension guides kernel selection. Document tradeoff. |
+| R40 | Plan9 assembly for NEON has poor documentation | SIMD kernel development slows | Medium | Reference Go stdlib crypto/aes arm64 assembly. Start with simple dot product before full GEMM. |
+| R41 | Mmap on protobuf may not save memory if proto.Unmarshal copies internally | Mmap benefit reduced | Medium | Profile with pprof. If protobuf copies, use a flat binary format for tensor data alongside protobuf for metadata. |
+| R42 | Quantization accuracy loss breaks model parity tests | False test failures | Medium | Use wider tolerance for quantized models. Separate parity thresholds for float32 vs Q4. |
+| R43 | Parallel graph executor introduces non-determinism in floating point | Flaky tests | Low | Use sequential executor for tests. Only enable parallel for benchmarks and production. |
+| R44 | Continuous batching padding wastes compute for varied prompt lengths | Throughput gain < 2x | Medium | Implement length-sorted batching to minimize padding. |
+| R17 | ROCm tests cannot run in CI | No AMD GPU in CI | High | Tests skip gracefully. Validate on AMD hardware manually. |
 | R24 | Three GPU backends increase maintenance burden | Bug surface area grows | High | GRAL abstraction minimizes duplication. Only vendor-specific code is in internal/ packages. |
-| R25 | OpenCL DNN ops missing (no cuDNN/MIOpen equivalent) | Incomplete OpenCL support | High | Document that OpenCL does not support Conv2d/BatchNorm on GPU. CPU fallback is acceptable. |
-| R27 | CUTLASS sm_121 requires version >= 4.2 | Flash attention and INT4 GEMM kernels may not compile | High | Install CUTLASS 4.2+. If unavailable, skip cutlass-tagged tests; CPU fallback works. |
-| R28 | ARM64 memory ordering differs from x86 | Subtle concurrency bugs in CGo code | Low | Go runtime handles memory barriers. Monitor for flaky tests on ARM64. |
-| R30 | Gonum BLAS slower on ARM64 (no SIMD assembly) | CPU fallback operations significantly slower | Medium | Document perf gap. Long-term: link ARM-optimized BLAS (OpenBLAS with NEON). |
-| R31 | Single-GPU DGX Spark cannot validate multi-GPU code | NCCL and multi-GPU tests remain unvalidated | High | Tests skip gracefully. Second DGX Spark unit needed for full multi-GPU validation. |
-| R36 | cublasGemmEx BF16 compute precision differs from CPU | Numerical mismatches in BF16 MatMul parity | Medium | Use CUBLAS_COMPUTE_32F (accumulate in FP32) for maximum precision. Document tolerance. |
-| R37 | cudaMallocManaged slower than cudaMalloc on PCIe GPUs | Performance regression on non-unified-memory hardware | Low | Managed memory is opt-in, not default. Only beneficial on NVLink-C2C (DGX Spark). Document. |
-| R38 | SigLIP Concat fix may require zonnx converter changes | Fix spans two repositories | Medium | Check if root cause is in zerfoo (shape propagation) or zonnx (ONNX import). Fix in the correct repo. |
+| R31 | Single-GPU DGX Spark cannot validate multi-GPU code | NCCL and multi-GPU tests remain unvalidated | High | Tests skip gracefully. Second DGX Spark unit needed. |
 | R39 | Some code paths unreachable without GPU hardware | Cannot achieve 100% on GPU-tagged files locally | Medium | Accept 95% floor for packages with GPU build-tag code. Validate on DGX Spark. |
-| R40 | Large number of test files may slow CI | Longer CI run times | Low | Tests are fast (most under 1s). Monitor CI duration. |
 
 ---
 
@@ -838,34 +554,21 @@ A task is done when:
 6. Tests pass with `-race` flag.
 7. Non-CUDA build (`go build ./...` without any GPU tag) compiles.
 8. CUDA build (`go build -tags cuda ./...`) compiles.
-9. ROCm build (`go build -tags rocm ./...`) compiles.
-10. OpenCL build (`go build -tags opencl ./...`) compiles.
-11. Changes are committed in a small commit touching one directory only.
-
-### Review and QA Steps
-
-1. Read existing implementation before writing code.
-2. Write tests first or alongside implementation. Use table-driven tests.
-3. After implementation, run `go test -cover ./package/` to verify coverage.
-4. Run `golangci-lint run --fix ./package/` to fix lint issues.
-5. Run `gofmt -w .` to ensure formatting.
-6. Run `go test ./... -count=1` to verify no regressions.
-7. Run `go build ./...` (without GPU tags) to verify non-GPU build.
-8. Run `go build -tags cuda ./...` to verify CUDA build.
-9. Multi-GPU tests must skip gracefully when fewer than 2 GPUs are available.
-10. cuDNN tests must skip when libcudnn is not available.
-11. TensorRT tests must skip when libnvinfer is not available.
-12. CUTLASS tests must skip when cutlass build tag is not set.
-13. ROCm tests must skip when rocm build tag is not set or HIP SDK absent.
-14. OpenCL tests must skip when opencl build tag is not set or ICD loader absent.
+9. Changes are committed in a small commit touching one directory only.
 
 ### Commit Discipline
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(cublas): add BF16 GemmEx binding`.
-- Never allow changes to pile up. Commit after each completed subtask.
+- Use Conventional Commits: `feat(tensor): add Q4_0 block storage`.
 - Always run linters and formatters before committing.
+
+### Benchmark Protocol
+
+- All performance claims must be backed by `go test -bench` output.
+- Benchmarks run with `-benchtime=3s -count=5` for statistical validity.
+- Report median and p99 latency, not just mean.
+- Track regressions by storing benchmark results in `tests/benchmark/baseline/`.
 
 ---
 
@@ -873,15 +576,12 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
-| 2026-03-05 | 24 | Change Summary: Added Phase 24 (E126-E129) to fix remaining TODOs and code quality issues. E126: FFN bias detection heuristic fix + registry TODO. E127: embedding layer loading TODO. E128: cmd/zerfoo-predict testability refactor. Added O38, D63-D65, M105-M108. 4 epics, 10 tasks. All tasks local (no DGX Spark required). |
-| 2026-03-04 | 23 | Change Summary: Added Phase 23 (E121-E125) to raise test coverage to 100% where possible. Coverage baseline: 8 packages at 100%, 6 below 90%. Added O37, D59-D62, M101-M104, R39-R40. 5 epics, 20 tasks covering all 42 packages below 100%. |
-| 2026-03-04 | 22 | Change Summary: Created Phase 22 plan with 3 epics (E117-E119) and final verification (E120). Added BF16 cuBLAS GEMM (5 tasks), unified memory allocator (6 tasks), SigLIP Concat fix (4 tasks). Added risks R36-R38. New deliverables D56-D58, milestones M97-M100. |
-| 2026-03-04 | 21 | Phase 21 COMPLETE. T116.1 docs updated (27a94c8). All tasks marked complete. O32 COMPLETE. |
-| 2026-03-04 | 21 | Gemma 3 parity PASS (FP/GD/Gen). Fixes: tokenizer merges format, Gather embedded-indices, Slice hybrid mode, zonnx initializer promotion. Model parity now 11 PASS, 10 SKIP. |
-| 2026-03-04 | 21 | E115 COMPLETE. Multi-GPU test gap documented in ADR-017 (6 tests, hardware prereqs). Test runner script created (scripts/dgx-spark-multigpu.sh). Plan trimmed 1411->522 lines. ADR-018 written. |
-| 2026-03-03 | 20 | Phase 20 COMPLETE. ARM64 build (10 fixes), GPU tests (66 pkgs), benchmarks, feature gaps. ADR-017 written. |
-| 2026-03-03 | 14-19 | Phases 14-19 all COMPLETE. GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8 GEMM, TRT dynamic shapes. ADRs 011-016 written. |
-| 2026-03-03 | 10-13 | Phases 10-13 COMPLETE. Multi-GPU, cuDNN, TensorRT, CUTLASS. ADRs 007-010 written. |
+| 2026-03-05 | 25 | Plan created. Performance optimization phase scoped: mmap loading, pre-alloc KV cache, quantized inference, SIMD GEMM, parallel graph, continuous batching, benchmark suite. |
+| 2026-03-05 | 22-24 | Phases 22-24 COMPLETE. BF16 GEMM, unified memory, SigLIP fix, coverage push, TODO fixes. ADR-019 written. Plan trimmed. |
+| 2026-03-04 | 21 | Phase 21 COMPLETE. 18 ONNX fixes, 18 PASS across 6 model families. ADR-018 written. |
+| 2026-03-03 | 20 | Phase 20 COMPLETE. ARM64 build (10 fixes), GPU tests (66 pkgs), benchmarks. ADR-017 written. |
+| 2026-03-03 | 14-19 | Phases 14-19 COMPLETE. GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8, TRT dynamic. ADRs 011-016. |
+| 2026-03-03 | 10-13 | Phases 10-13 COMPLETE. Multi-GPU, cuDNN, TensorRT, CUTLASS. ADRs 007-010. |
 
 ---
 
@@ -891,26 +591,11 @@ A task is done when:
 
 - **Architecture:** Read docs/design.md for interface contracts, package layout,
   GPU architecture, operations, and troubleshooting. It is the single reference
-  document. Design decisions are in docs/adr/.
-- **Phases 1-21:** Complete. See ADRs 001-018.
-- **Phase 22 (Current):** BF16 GEMM + unified memory + SigLIP fix. Three
-  independent epics (E117, E118, E119) that can proceed in parallel.
-  T117.1-T117.3 and T118.1-T118.4 are complete. Remaining tasks require DGX Spark.
-- **Phase 23 (Complete):** Test coverage push. 9 packages at 100%, 42 of 50
-  packages >= 95%. See docs/QUALITY.md for full report.
-- **Phase 24 (Current):** Fix TODOs + code quality. Three independent epics:
-  E126 (FFN bias fix), E127 (embedding loading), E128 (predict refactor).
-  All tasks run locally on macOS.
-- **BF16 context:** The `float16` package (../float16) has a complete BFloat16
-  type. `tensor.Numeric` includes it. `model/tensor_decoder.go` decodes it from
-  ZMF files. What is missing: GPU compute dispatch in `compute/gpu_engine.go`
-  and cuBLAS BF16 binding in `internal/cublas/cublas.go`.
-- **Unified memory context:** DGX Spark GB10 has NVLink-C2C unified memory.
-  `cudaMallocManaged` enables zero-copy. Currently `MemPool` only uses
-  `cudaMalloc`. The Runtime interface in `internal/gpuapi/runtime.go` needs a
-  `MallocManaged` method.
-- **SigLIP context:** Concat fails at node 1462 with rank mismatch [1] vs [1 1].
-  Debug on DGX Spark with the SigLIP ZMF at ~/models/siglip/model.zmf.
+  document. Design decisions are in docs/adr/ (ADR-001 through ADR-019).
+- **Phases 1-24:** All complete. No active development tasks.
+- **Phase 25:** Performance optimization. This plan is the source of truth.
+- **Quality:** See docs/QUALITY.md for test coverage report. 9 packages at 100%,
+  42 of 50 at >= 95%.
 - **How to build:**
   - CPU: `go build ./...`
   - CUDA: `go build -tags cuda ./...`
@@ -921,110 +606,76 @@ A task is done when:
   - OpenCL: `go build -tags opencl ./...`
 - **Pre-commit hook:** Runs golangci-lint and tests. Rejects multi-directory commits.
 
+### Key Performance Bottlenecks (Current)
+
+1. `model/zmf_loader.go:21-37` -- `os.ReadFile` loads entire model into heap.
+2. `generate/kvcache.go:100-139` -- `ConcatAxis1` allocates on every token.
+3. `internal/xblas/gemm.go:15-21` -- gonum BLAS is pure Go, no SIMD.
+4. `graph/graph.go:27-68` -- sequential node execution under mutex.
+5. `inference/inference.go:191` -- float32 only, no quantized weight support.
+6. `serve/` -- single-request processing, no batching.
+
 ### External Dependencies
 
 - **DGX Spark (ndungu@192.168.86.250, aitopatom-bfc8):**
-  - Go 1.26.0 for linux/arm64 -- INSTALLED (~/.local/go).
-  - cuDNN 9.19.1 for CUDA 13.0 -- INSTALLED.
-  - TensorRT 10.15.1 -- INSTALLED.
-  - NCCL 2.29.7 -- INSTALLED.
-  - CUTLASS 4.2 headers -- INSTALLED (~/cutlass).
-  - CUDA 13.0.2 and driver 580.126.09 -- INSTALLED.
+  - Go 1.26.0 for linux/arm64, cuDNN 9.19.1, TensorRT 10.15.1,
+    NCCL 2.29.7, CUTLASS 4.2, CUDA 13.0.2 / driver 580.126.09.
 - HIP SDK (>= 5.0) for AMD ROCm backend.
-- OpenCL 2.0+ headers and ICD loader for OpenCL backend.
-- CLBlast library for OpenCL BLAS operations.
+- OpenCL 2.0+ headers + CLBlast for OpenCL backend.
 - Second DGX Spark unit (optional) for multi-GPU validation via ConnectX-7.
+
+### Remaining Hardware-Blocked Items
+
+1. **Multi-GPU parity test** -- requires >= 2 CUDA devices (second DGX Spark
+   via ConnectX-7). 6 tests skip on single-GPU. See ADR-017.
+2. **DeepSeek V3 parity** -- 671B MoE exceeds 128GB DGX Spark memory.
+
+### Known Untestable Gaps
+
+- health: EngineCheck takes concrete *CPUEngine type, preventing mock testing
+- layers/attention: dupl linter blocks MLA Forward engine error test
+- Most remaining gaps are tensor.New unreachable error paths
+- cmd tools: main() and os.Exit paths
 
 ---
 
 ## 9. Appendix
 
-### Production Readiness Scorecard (After Phase 21)
+### Production Readiness Scorecard (After Phase 24)
 
 | Category | Score | How Achieved |
 |----------|-------|-------------|
 | Architecture | 10/10 | Multi-architecture config; MLA; multi-GPU device affinity |
-| Core Functionality | 10/10 | 6 model families; multi-GPU inference; NCCL gradient exchange |
-| Testing | 10/10 | Parity tests for all architectures; multi-GPU integration tests |
+| Core Functionality | 10/10 | 6 model families; multi-GPU inference; BF16 GEMM; unified memory |
+| Testing | 10/10 | 18 model parity PASS; 42/50 packages >= 95% coverage |
 | Error Handling | 9/10 | Structured logging, RPC validation, context deadlines |
 | Security | 8/10 | TLS/mTLS for gRPC; HF_TOKEN for gated models |
 | Observability | 8/10 | Logging, metrics, pprof endpoints |
 | Configuration | 10/10 | Architecture-aware config parsing with HuggingFace field mapping |
 | Operations | 10/10 | CLI pull/run/serve, OpenAI-compatible HTTP API |
-| Documentation | 10/10 | Consolidated design.md + 18 ADRs |
-| CI/CD | 9/10 | Blocking tests, coverage gate, benchmark gate |
-| GPU Performance | 10/10 | cuBLAS + cuDNN + TensorRT (dynamic shapes) + CUTLASS flash attention + INT4/INT8 GEMM |
-| GPU Portability | 8/10 | NVIDIA (CUDA/cuDNN/TensorRT), AMD (ROCm/HIP/MIOpen), OpenCL (CLBlast) |
+| Documentation | 10/10 | Consolidated design.md + 19 ADRs |
+| Performance | 4/10 | BF16 GEMM and flash attention exist, but no quantization, no SIMD, no mmap |
 
-### Coverage Baseline (2026-03-04)
+### Ollama/llama.cpp Feature Comparison
 
-| Package | Coverage | Phase 23 Target |
-|---------|----------|-----------------|
-| cmd/bench-compare | 52.6% | >= 95% (E121) |
-| cmd/cli | 92.5% | >= 98% (E123) |
-| cmd/coverage-gate | 53.5% | >= 95% (E121) |
-| cmd/zerfoo-tokenize | 0.0% | >= 90% (E122) |
-| compute | 93.7% | >= 98% (E123) |
-| config | 95.8% | 100% (E124) |
-| data | 100.0% | -- |
-| device | 100.0% | -- |
-| distributed | 96.0% | 100% (E124) |
-| distributed/coordinator | 98.3% | 100% (E124) |
-| features | 99.0% | 100% (E124) |
-| generate | 95.0% | 100% (E124) |
-| graph | 97.3% | 100% (E124) |
-| health | 90.0% | >= 98% (E123) |
-| inference | 91.8% | >= 98% (E123) |
-| internal/gpuapi | [stubs] | -- |
-| internal/xblas | 100.0% | -- |
-| layers/activations | 97.4% | 100% (E124) |
-| layers/attention | 91.8% | >= 98% (E123) |
-| layers/components | 100.0% | -- |
-| layers/core | 76.0% | >= 95% (E121) |
-| layers/embeddings | 92.5% | >= 98% (E123) |
-| layers/features | 93.8% | >= 98% (E123) |
-| layers/gather | 91.6% | >= 98% (E123) |
-| layers/hrm | 95.5% | 100% (E124) |
-| layers/normalization | 95.7% | 100% (E124) |
-| layers/recurrent | 97.0% | 100% (E124) |
-| layers/reducesum | 95.9% | 100% (E124) |
-| layers/registry | 100.0% | -- |
-| layers/regularization | 97.6% | 100% (E124) |
-| layers/sequence | 94.0% | >= 98% (E123) |
-| layers/tokenizers | 100.0% | -- |
-| layers/transformer | 96.4% | 100% (E124) |
-| layers/transpose | 97.6% | 100% (E124) |
-| log | 97.7% | 100% (E124) |
-| metrics | 100.0% | -- |
-| metrics/runtime | 96.5% | 100% (E124) |
-| model | 81.4% | >= 95% (E122) |
-| model/hrm | 98.1% | 100% (E124) |
-| numeric | 98.5% | 100% (E124) |
-| pkg/tokenizer | 90.3% | >= 98% (E123) |
-| registry | 91.2% | >= 98% (E123) |
-| serve | 96.4% | 100% (E124) |
-| shutdown | 100.0% | -- |
-| tensor | 97.9% | 100% (E124) |
-| testing/testutils | 94.5% | >= 98% (E123) |
-| tests/internal/testutil | 98.5% | 100% (E124) |
-| training | 95.9% | 100% (E124) |
-| training/loss | 87.3% | >= 95% (E122) |
-| training/optimizer | 96.6% | 100% (E124) |
+| Feature | Ollama | Zerfoo (Current) | Zerfoo (Phase 25 Target) |
+|---------|--------|-------------------|--------------------------|
+| Model loading | mmap | os.ReadFile | mmap (E25) |
+| KV cache | pre-allocated | concat-per-token | pre-allocated ring (E26) |
+| Quantization | Q4_0/Q4_K/Q8_0/Q5_K | float32 only | Q4_0/Q8_0 (E27) |
+| CPU GEMM | hand-tuned SIMD | gonum (pure Go) | NEON/AVX2 (E29) |
+| GPU GEMM | cuBLAS | cuBLAS | cuBLAS + Q4 kernel (E32) |
+| Flash attention | yes | yes (CUTLASS) | yes |
+| Continuous batching | yes | no | yes (E31) |
+| Speculative decoding | yes | no | future phase |
+| PagedAttention | yes | no | future phase |
+| Streaming | yes | yes | yes |
+| OpenAI API | yes | yes | yes |
 
-### Key Files for Phase 22
+### References
 
-| File | Purpose | Epic |
-|------|---------|------|
-| internal/cublas/cublas.go | cuBLAS CGo bindings (add GemmEx) | E117 |
-| internal/gpuapi/blas.go | BLAS interface (add BFloat16Gemm) | E117 |
-| internal/gpuapi/cuda_blas.go | CUDA BLAS adapter (implement BFloat16Gemm) | E117 |
-| compute/gpu_engine.go | GPUEngine MatMul (add BF16 dispatch) | E117 |
-| compute/gpu_kernels.go | GPU kernel helpers (fix elemSize) | E117 |
-| internal/cuda/cuda.go | CUDA runtime (add MallocManaged) | E118 |
-| internal/cuda/mempool.go | MemPool (add AllocManaged) | E118 |
-| internal/gpuapi/mempool.go | MemPool interface (add AllocManaged) | E118 |
-| internal/gpuapi/cuda_mempool.go | CUDA pool adapter (add AllocManaged) | E118 |
-| tensor/gpu_storage.go | GPUStorage (add managed mode) | E118 |
-| layers/core/concat.go | Concat layer (fix or trace) | E119 |
-| compute/cpu_engine.go | Concat shape validation (possible fix) | E119 |
-| tests/parity/siglip_test.go | SigLIP parity test | E119 |
+- llama.cpp quantization: Q4_0 block format = 18 bytes per 32 values.
+- Go plan9 assembly: https://go.dev/doc/asm
+- gonum BLAS: https://pkg.go.dev/gonum.org/v1/gonum/blas
+- CUDA mixed-precision GEMM: cuBLAS cublasGemmEx with CUDA_R_8I.
+- Go mmap: `syscall.Mmap` on unix, `golang.org/x/sys/windows` for Windows.

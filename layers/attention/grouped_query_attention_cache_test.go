@@ -53,7 +53,7 @@ func TestGQA_CachedForward(t *testing.T) {
 
 	// --- Cached forward: one token at a time ---
 	// Need a fresh GQA with same weights (reuse the existing one, reset backward cache).
-	cache := generate.NewKVCache[float32](1)
+	cache := generate.NewKVCache[float32](1, 128)
 	ctx := generate.WithKVCache(context.Background(), cache)
 
 	var cachedLastOutput []float32
@@ -133,7 +133,7 @@ func TestGQA_CacheLayerIndex(t *testing.T) {
 	}
 	gqa1.LayerIndex = 1
 
-	cache := generate.NewKVCache[float32](2)
+	cache := generate.NewKVCache[float32](2, 128)
 	ctx := generate.WithKVCache(context.Background(), cache)
 
 	// Single token input.

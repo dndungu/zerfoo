@@ -12,16 +12,31 @@ type LayerKV[T tensor.Numeric] struct {
 	Value *tensor.TensorNumeric[T]
 }
 
-// KVCache stores key-value tensors for all attention layers during autoregressive generation.
-// Each call to Update appends new K/V along the sequence dimension (axis 1).
-type KVCache[T tensor.Numeric] struct {
-	layers []LayerKV[T]
+// layerBuf holds the pre-allocated backing buffer for one layer's KV cache.
+type layerBuf[T tensor.Numeric] struct {
+	keyBuf []T // pre-allocated [batch * maxSeqLen * dim]
+	valBuf []T // pre-allocated [batch * maxSeqLen * dim]
+	cursor int // number of sequence positions written
+	batch  int // detected on first Update
+	dim    int // detected on first Update
 }
 
-// NewKVCache creates a KVCache for the specified number of layers.
-func NewKVCache[T tensor.Numeric](numLayers int) *KVCache[T] {
+// KVCache stores key-value tensors for all attention layers during
+// autoregressive generation. Buffers are pre-allocated to maxSeqLen on first
+// Update, and subsequent Updates copy data at the cursor position with zero
+// allocation.
+type KVCache[T tensor.Numeric] struct {
+	layers    []layerBuf[T]
+	maxSeqLen int
+}
+
+// NewKVCache creates a KVCache for the specified number of layers and maximum
+// sequence length. Backing buffers are lazily allocated on the first Update
+// call for each layer (when batch and dim become known).
+func NewKVCache[T tensor.Numeric](numLayers, maxSeqLen int) *KVCache[T] {
 	return &KVCache[T]{
-		layers: make([]LayerKV[T], numLayers),
+		layers:    make([]layerBuf[T], numLayers),
+		maxSeqLen: maxSeqLen,
 	}
 }
 
@@ -30,45 +45,102 @@ func (c *KVCache[T]) NumLayers() int {
 	return len(c.layers)
 }
 
-// Get returns the cached key-value pair for the given layer.
+// Get returns the cached key-value pair for the given layer as tensors
+// covering [0:cursor] on the sequence axis. For batch=1, the returned
+// tensors are zero-copy views over the pre-allocated buffer. For batch>1,
+// data is compacted into a contiguous slice.
 // Returns false if the layer has not been populated yet.
 func (c *KVCache[T]) Get(layer int) (*LayerKV[T], bool) {
 	if layer < 0 || layer >= len(c.layers) {
 		return nil, false
 	}
-	lkv := &c.layers[layer]
-	if lkv.Key == nil {
+	lb := &c.layers[layer]
+	if lb.cursor == 0 {
 		return nil, false
 	}
-	return lkv, true
+
+	shape := []int{lb.batch, lb.cursor, lb.dim}
+	size := lb.batch * lb.cursor * lb.dim
+
+	var keyData, valData []T
+	if lb.batch == 1 || lb.cursor == c.maxSeqLen {
+		// Contiguous: use sub-slice directly (zero copy).
+		keyData = lb.keyBuf[:size]
+		valData = lb.valBuf[:size]
+	} else {
+		// Multi-batch with partial fill: compact the valid data.
+		keyData = make([]T, size)
+		valData = make([]T, size)
+		seqDim := lb.cursor * lb.dim
+		for bi := range lb.batch {
+			srcOff := bi * c.maxSeqLen * lb.dim
+			dstOff := bi * seqDim
+			copy(keyData[dstOff:dstOff+seqDim], lb.keyBuf[srcOff:srcOff+seqDim])
+			copy(valData[dstOff:dstOff+seqDim], lb.valBuf[srcOff:srcOff+seqDim])
+		}
+	}
+
+	keyT, err := tensor.New(shape, keyData)
+	if err != nil {
+		return nil, false
+	}
+	valT, err := tensor.New(shape, valData)
+	if err != nil {
+		return nil, false
+	}
+
+	return &LayerKV[T]{Key: keyT, Value: valT}, true
 }
 
 // Update appends new key and value tensors to the cache for the given layer.
-// Tensors are expected to have shape [batch, seq_len, dim].
-// The new tensors are concatenated along axis 1 (sequence dimension).
+// Tensors are expected to have shape [batch, seq_len, dim]. Data is copied
+// into the pre-allocated buffer at the current cursor position. After the
+// initial allocation, Update performs zero heap allocations.
 func (c *KVCache[T]) Update(layer int, newK, newV *tensor.TensorNumeric[T]) error {
 	if layer < 0 || layer >= len(c.layers) {
 		return fmt.Errorf("layer index %d out of range [0, %d)", layer, len(c.layers))
 	}
-	lkv := &c.layers[layer]
 
-	if lkv.Key == nil {
-		// First update: store directly.
-		lkv.Key = newK
-		lkv.Value = newV
-		return nil
+	shape := newK.Shape()
+	if len(shape) != 3 {
+		return fmt.Errorf("expected 3D tensor [batch, seq, dim], got %dD", len(shape))
 	}
 
-	// Concatenate along sequence dimension (axis 1).
-	var err error
-	lkv.Key, err = ConcatAxis1(lkv.Key, newK)
-	if err != nil {
-		return fmt.Errorf("concat key for layer %d: %w", layer, err)
+	batch, seqLen, dim := shape[0], shape[1], shape[2]
+	lb := &c.layers[layer]
+
+	// Lazy allocation on first Update.
+	if lb.keyBuf == nil {
+		lb.batch = batch
+		lb.dim = dim
+		total := batch * c.maxSeqLen * dim
+		lb.keyBuf = make([]T, total)
+		lb.valBuf = make([]T, total)
 	}
-	lkv.Value, err = ConcatAxis1(lkv.Value, newV)
-	if err != nil {
-		return fmt.Errorf("concat value for layer %d: %w", layer, err)
+
+	if batch != lb.batch {
+		return fmt.Errorf("batch mismatch: cache has %d, got %d", lb.batch, batch)
 	}
+	if dim != lb.dim {
+		return fmt.Errorf("dim mismatch: cache has %d, got %d", lb.dim, dim)
+	}
+	if lb.cursor+seqLen > c.maxSeqLen {
+		return fmt.Errorf("cache overflow: cursor=%d + seq=%d > maxSeqLen=%d", lb.cursor, seqLen, c.maxSeqLen)
+	}
+
+	// Copy new data into the buffer at the cursor position.
+	// Layout: [batch, maxSeqLen, dim] — copy seqLen*dim elements per batch
+	// at offset cursor*dim within each batch's maxSeqLen*dim region.
+	kData := newK.Data()
+	vData := newV.Data()
+	for bi := range batch {
+		srcOff := bi * seqLen * dim
+		dstOff := bi*c.maxSeqLen*dim + lb.cursor*dim
+		copy(lb.keyBuf[dstOff:dstOff+seqLen*dim], kData[srcOff:srcOff+seqLen*dim])
+		copy(lb.valBuf[dstOff:dstOff+seqLen*dim], vData[srcOff:srcOff+seqLen*dim])
+	}
+
+	lb.cursor += seqLen
 	return nil
 }
 
@@ -78,62 +150,13 @@ func (c *KVCache[T]) SeqLen() int {
 	if len(c.layers) == 0 {
 		return 0
 	}
-	lkv := &c.layers[0]
-	if lkv.Key == nil {
-		return 0
-	}
-	shape := lkv.Key.Shape()
-	if len(shape) < 2 {
-		return 0
-	}
-	return shape[1] // [batch, seq_len, dim]
+	return c.layers[0].cursor
 }
 
-// Reset clears all cached tensors.
+// Reset clears all cached data and resets cursors to zero.
+// The pre-allocated buffers are retained for reuse.
 func (c *KVCache[T]) Reset() {
 	for i := range c.layers {
-		c.layers[i].Key = nil
-		c.layers[i].Value = nil
+		c.layers[i].cursor = 0
 	}
-}
-
-// ConcatAxis1 concatenates two 3D tensors along axis 1 (sequence dimension).
-// Both tensors must have matching batch and dim dimensions.
-func ConcatAxis1[T tensor.Numeric](a, b *tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	shapeA := a.Shape()
-	shapeB := b.Shape()
-
-	if len(shapeA) != 3 || len(shapeB) != 3 {
-		return nil, fmt.Errorf("expected 3D tensors, got %dD and %dD", len(shapeA), len(shapeB))
-	}
-	if shapeA[0] != shapeB[0] {
-		return nil, fmt.Errorf("batch dimension mismatch: %d vs %d", shapeA[0], shapeB[0])
-	}
-	if shapeA[2] != shapeB[2] {
-		return nil, fmt.Errorf("feature dimension mismatch: %d vs %d", shapeA[2], shapeB[2])
-	}
-
-	batch := shapeA[0]
-	seqA := shapeA[1]
-	seqB := shapeB[1]
-	dim := shapeA[2]
-	newSeq := seqA + seqB
-
-	dataA := a.Data()
-	dataB := b.Data()
-	newData := make([]T, batch*newSeq*dim)
-
-	for bi := range batch {
-		// Copy from A: batch bi, all seqA positions.
-		srcOffA := bi * seqA * dim
-		dstOff := bi * newSeq * dim
-		copy(newData[dstOff:dstOff+seqA*dim], dataA[srcOffA:srcOffA+seqA*dim])
-
-		// Copy from B: batch bi, all seqB positions.
-		srcOffB := bi * seqB * dim
-		dstOff2 := dstOff + seqA*dim
-		copy(newData[dstOff2:dstOff2+seqB*dim], dataB[srcOffB:srcOffB+seqB*dim])
-	}
-
-	return tensor.New([]int{batch, newSeq, dim}, newData)
 }

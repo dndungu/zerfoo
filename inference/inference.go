@@ -28,6 +28,7 @@ type Model struct {
 	engine    compute.Engine[float32]
 	config    ModelMetadata
 	info      *registry.ModelInfo
+	closer    io.Closer // mmap reader, if loaded with mmap
 }
 
 // ModelMetadata holds model configuration loaded from config.json.
@@ -71,6 +72,7 @@ type loadOptions struct {
 	registry  registry.ModelRegistry
 	backend   string // "" or "default" for standard engine, "tensorrt" for TRT
 	precision string // "" or "fp32" for float32, "fp16" for half precision (TRT only)
+	mmap      bool   // use mmap for model loading (unix only)
 }
 
 // WithCacheDir sets the model cache directory.
@@ -116,6 +118,15 @@ func WithBackend(backend string) Option {
 func WithPrecision(precision string) Option {
 	return func(o *loadOptions) {
 		o.precision = precision
+	}
+}
+
+// WithMmap enables memory-mapped model loading. When true, the ZMF file
+// is mapped into memory using syscall.Mmap instead of os.ReadFile, avoiding
+// heap allocation for model weights. Only supported on unix platforms.
+func WithMmap(enabled bool) Option {
+	return func(o *loadOptions) {
+		o.mmap = enabled
 	}
 }
 
@@ -188,12 +199,23 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		buildOpts = append(buildOpts, model.WithGlobalAttributes(globalAttrs))
 	}
 
-	mdl, err := model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath, buildOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("load model: %w", err)
+	var mdl *model.Model[float32]
+	var mmapCloser io.Closer
+	if o.mmap {
+		mdl, mmapCloser, err = loadZMFWithMmap(eng, zmfPath, buildOpts)
+		if err != nil {
+			return nil, fmt.Errorf("load model (mmap): %w", err)
+		}
+	} else {
+		mdl, err = model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath, buildOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("load model: %w", err)
+		}
 	}
 
-	return assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen), nil
+	m := assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen)
+	m.closer = mmapCloser
+	return m, nil
 }
 
 // assembleModel wires together loaded components into a ready-to-use Model.
@@ -414,12 +436,20 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 // Close releases resources held by the model. If the model was loaded on a
-// GPU, this frees the CUDA engine's handles, pool, and stream.
+// GPU, this frees the CUDA engine's handles, pool, and stream. If loaded
+// with mmap, this releases the memory mapping.
 func (m *Model) Close() error {
+	var firstErr error
 	if c, ok := m.engine.(io.Closer); ok {
-		return c.Close()
+		firstErr = c.Close()
 	}
-	return nil
+	if m.closer != nil {
+		if err := m.closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		m.closer = nil
+	}
+	return firstErr
 }
 
 // Config returns the model metadata.

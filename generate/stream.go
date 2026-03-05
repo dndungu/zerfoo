@@ -42,7 +42,7 @@ func (gen *Generator[T]) GenerateStream(ctx context.Context, prompt string, sc S
 		return fmt.Errorf("prompt produced no tokens")
 	}
 
-	cache := NewKVCache[T](gen.config.NumLayers)
+	cache := NewKVCache[T](gen.config.NumLayers, gen.config.MaxSeqLen)
 	genCtx := WithKVCache(ctx, cache)
 
 	stopSet := make(map[int]bool, len(sc.StopTokenIDs)+1)

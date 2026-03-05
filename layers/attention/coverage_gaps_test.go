@@ -188,7 +188,7 @@ func TestGQA_Forward_CacheEngineErrors(t *testing.T) {
 			}
 
 			// Set up KV cache context
-			cache := generate.NewKVCache[float32](1)
+			cache := generate.NewKVCache[float32](1, 128)
 			ctx := generate.WithKVCache(context.Background(), cache)
 
 			// Swap engine to failing one for the forward call

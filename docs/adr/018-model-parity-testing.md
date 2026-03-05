@@ -69,10 +69,10 @@ Ten issues were fixed across the zerfoo and zonnx repositories:
 | Phi3 Generation | PASS | |
 | MultiGPU DualDevice | SKIP | Single GPU device |
 | DeepSeek (3 tests) | SKIP | Model too large (671B) for 128GB |
-| SigLIP (1 test) | SKIP | Concat shape mismatch in vision graph |
+| SigLIP ForwardPass | PASS | Fixed in Phase 22 (Squeeze scalar + Concat rank alignment) |
 
-**Summary:** 17 PASS, 5 SKIP (DeepSeek too large, SigLIP graph issue,
-1 test blocked on single-GPU hardware).
+**Summary:** 18 PASS, 4 SKIP (DeepSeek too large, 1 test blocked on
+single-GPU hardware).
 
 ## Infrastructure
 

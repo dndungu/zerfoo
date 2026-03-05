@@ -232,7 +232,103 @@ func DecodeTensor[T tensor.Numeric](tensorProto *zmf.Tensor) (*tensor.TensorNume
 			return nil, fmt.Errorf("unsupported destination type %T for UINT8 source", zero)
 		}
 
+	case zmf.Tensor_Q4_0:
+		f32, err := decodeQ4Blocks(tensorProto.Data, size)
+		if err != nil {
+			return nil, err
+		}
+		return castFloat32ToT[T](shape, f32, zero, "Q4_0")
+
+	case zmf.Tensor_Q8_0:
+		f32, err := decodeQ8Blocks(tensorProto.Data, size)
+		if err != nil {
+			return nil, err
+		}
+		return castFloat32ToT[T](shape, f32, zero, "Q8_0")
+
 	default:
 		return nil, fmt.Errorf("unsupported tensor dtype: %s", tensorProto.Dtype)
 	}
+}
+
+// castFloat32ToT converts dequantized float32 values to the target tensor type T.
+func castFloat32ToT[T tensor.Numeric](shape []int, f32 []float32, zero T, srcName string) (*tensor.TensorNumeric[T], error) {
+	switch any(zero).(type) {
+	case float32:
+		data := any(f32).([]T)
+		return tensor.New[T](shape, data)
+	case float16.Float16:
+		f16 := make([]float16.Float16, len(f32))
+		for i, v := range f32 {
+			f16[i] = float16.FromFloat32(v)
+		}
+		data := any(f16).([]T)
+		return tensor.New[T](shape, data)
+	case float16.BFloat16:
+		bf := make([]float16.BFloat16, len(f32))
+		for i, v := range f32 {
+			bf[i] = float16.BFloat16FromFloat32(v)
+		}
+		data := any(bf).([]T)
+		return tensor.New[T](shape, data)
+	default:
+		return nil, fmt.Errorf("unsupported destination type %T for %s source", zero, srcName)
+	}
+}
+
+// decodeQ4Blocks decodes Q4_0 quantized blocks into float32 values.
+// Q4_0 block layout: 2 bytes float16 scale + 16 bytes packed 4-bit data = 18 bytes per 32 values.
+func decodeQ4Blocks(data []byte, size int) ([]float32, error) {
+	const blockBytes = 18
+	const blockSize = 32
+
+	nBlocks := (size + blockSize - 1) / blockSize
+	if len(data) < nBlocks*blockBytes {
+		return nil, fmt.Errorf("Q4_0 data too short: need %d bytes for %d blocks, got %d", nBlocks*blockBytes, nBlocks, len(data))
+	}
+
+	f32 := make([]float32, size)
+	for bi := range nBlocks {
+		off := bi * blockBytes
+		scale := float16.FromBits(binary.LittleEndian.Uint16(data[off : off+2])).ToFloat32()
+		for j := 0; j < blockSize; j += 2 {
+			packed := data[off+2+j/2]
+			q0 := int(packed&0x0F) - 8
+			q1 := int(packed>>4) - 8
+
+			if idx := bi*blockSize + j; idx < size {
+				f32[idx] = float32(q0) * scale
+			}
+			if idx := bi*blockSize + j + 1; idx < size {
+				f32[idx] = float32(q1) * scale
+			}
+		}
+	}
+	return f32, nil
+}
+
+// decodeQ8Blocks decodes Q8_0 quantized blocks into float32 values.
+// Q8_0 block layout: 4 bytes float32 scale + 32 bytes int8 data = 36 bytes per 32 values.
+func decodeQ8Blocks(data []byte, size int) ([]float32, error) {
+	const blockBytes = 36
+	const blockSize = 32
+
+	nBlocks := (size + blockSize - 1) / blockSize
+	if len(data) < nBlocks*blockBytes {
+		return nil, fmt.Errorf("Q8_0 data too short: need %d bytes for %d blocks, got %d", nBlocks*blockBytes, nBlocks, len(data))
+	}
+
+	f32 := make([]float32, size)
+	for bi := range nBlocks {
+		off := bi * blockBytes
+		scale := math.Float32frombits(binary.LittleEndian.Uint32(data[off : off+4]))
+		for j := range blockSize {
+			idx := bi*blockSize + j
+			if idx >= size {
+				break
+			}
+			f32[idx] = float32(int8(data[off+4+j])) * scale
+		}
+	}
+	return f32, nil
 }
