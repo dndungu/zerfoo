@@ -97,13 +97,12 @@ func BenchmarkGenerateLoop(b *testing.B) {
 func BenchmarkKVCacheUpdate(b *testing.B) {
 	maxSeqLen := 2048
 	numLayers := 32
-	numHeads := 32
-	headDim := 64
+	dim := 32 * 64 // numHeads * headDim
 
 	cache := generate.NewKVCache[float32](numLayers, maxSeqLen)
 
-	newK, _ := tensor.New([]int{1, numHeads, 1, headDim}, make([]float32, numHeads*headDim))
-	newV, _ := tensor.New([]int{1, numHeads, 1, headDim}, make([]float32, numHeads*headDim))
+	newK, _ := tensor.New([]int{1, 1, dim}, make([]float32, dim))
+	newV, _ := tensor.New([]int{1, 1, dim}, make([]float32, dim))
 
 	for b.Loop() {
 		cache.Reset()
