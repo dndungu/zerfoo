@@ -10,57 +10,53 @@ import (
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
-// BuildGather constructs a Gather layer. It attempts to resolve embedding weights
-// from common parameter naming patterns; otherwise a minimal dummy tensor is used.
+// BuildGather constructs a Gather layer. For embedding-style nodes whose name
+// maps to a known weight parameter, weights are embedded in the layer.
+// For "gather from shape" nodes where the indices are constant, the indices
+// are embedded in the layer. All other Gather nodes operate as general ONNX
+// Gather (axis-0 indexing).
 func BuildGather[T tensor.Numeric](
 	engine compute.Engine[T],
 	_ numeric.Arithmetic[T],
 	name string,
 	params map[string]*graph.Parameter[T],
-	_ map[string]interface{},
+	attrs map[string]interface{},
 ) (graph.Node[T], error) {
-	// Try to find any weights parameter that could be used with this Gather layer
-	var embeddingWeights *graph.Parameter[T]
-
-	// Common patterns for weights parameters
+	// Derive weight patterns from the node name. ONNX node names use "/"
+	// separators (e.g. "/model/embed_tokens/Gather") while parameter names
+	// use "." separators (e.g. "model.embed_tokens.weight"). Normalize the
+	// node name so the pattern matches the parameter.
+	normalized := strings.ReplaceAll(strings.TrimPrefix(name, "/"), "/", ".")
 	weightPatterns := []string{
-		"model.embed_tokens.weight", // For embedding layers
 		name + ".weight",
 		strings.TrimSuffix(name, "/Gather") + ".weight",
-		name + "_weight",
+		strings.TrimSuffix(normalized, ".Gather") + ".weight",
 	}
-
-	// Also try to find any parameter that contains "weight" in the name
-	for paramName, param := range params {
-		if strings.Contains(paramName, "weight") {
-			weightPatterns = append(weightPatterns, paramName)
-			embeddingWeights = param
-
-			break
-		}
-	}
-
 	for _, pattern := range weightPatterns {
 		if param, exists := params[pattern]; exists {
-			embeddingWeights = param
-
-			break
+			return NewWithWeights[T](engine, param.Value), nil
 		}
 	}
 
-	if embeddingWeights != nil {
-		// Create Gather layer with embedded weights (expects only indices input)
-		return NewWithWeights[T](engine, embeddingWeights.Value), nil
+	// Check if constant indices were promoted to attributes by zonnx. These
+	// appear as []int64 values with keys like "/Constant_output_0".
+	for k, v := range attrs {
+		if k == "axis" {
+			continue
+		}
+		if ints, ok := v.([]int64); ok {
+			intVals := make([]int, len(ints))
+			for i, iv := range ints {
+				intVals[i] = int(iv)
+			}
+			idxTensor, err := tensor.New[int]([]int{len(intVals)}, intVals)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create embedded indices tensor: %w", err)
+			}
+			return NewWithIndices[T](engine, idxTensor), nil
+		}
 	}
 
-	// Create a dummy weight tensor - this is a workaround for Gemma's pattern
-	// In a real implementation, we'd need to handle this more elegantly
-	dummyShape := []int{1, 1} // Minimal shape
-
-	dummyTensor, err := tensor.New[T](dummyShape, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dummy tensor: %w", err)
-	}
-
-	return NewWithWeights[T](engine, dummyTensor), nil
+	// General-purpose Gather: no embedded weights, takes (data, indices) inputs.
+	return New[T](engine), nil
 }

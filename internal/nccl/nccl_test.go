@@ -224,7 +224,7 @@ func TestTwoGPUAllReduce(t *testing.T) {
 		for i := range n {
 			want := float32((1)*(i+1)) + float32((11)*(i+1))
 			if results[rank][i] != want {
-				t.Errorf("rank %d result[%d] = %f, want %f", rank, results[rank][i], want, i)
+				t.Errorf("rank %d result[%d] = %f, want %f", rank, i, results[rank][i], want)
 			}
 		}
 	}
@@ -319,7 +319,7 @@ func TestTwoGPUBroadcast(t *testing.T) {
 	for rank := range nRanks {
 		for i := range n {
 			if results[rank][i] != want[i] {
-				t.Errorf("rank %d result[%d] = %f, want %f", rank, results[rank][i], want[i], i)
+				t.Errorf("rank %d result[%d] = %f, want %f", rank, i, results[rank][i], want[i])
 			}
 		}
 	}

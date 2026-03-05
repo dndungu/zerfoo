@@ -302,6 +302,7 @@ registry to reconstruct graphs from serialized specs.
 
 - CUDA Toolkit 12.x (libcudart, development headers)
 - cuBLAS library (libcublas)
+- cuDNN library (libcudnn8 or later)
 - NVIDIA GPU with Compute Capability >= 7.0 (Volta/Turing or newer)
 - GCC/G++ (for CGO linking)
 
@@ -387,17 +388,100 @@ cuBLAS operates in column-major order. To compute C = A * B in row-major:
 - Call cublasSgemm with B as first argument, A as second, swapping m and n
 - This avoids explicit transposition and works for any matrix dimensions.
 
-### 4.9 CUDA File Layout
+### 4.9 cuDNN Integration
+
+`internal/cudnn/` provides CGo bindings wrapping libcudnn behind `//go:build cuda`.
+GPUEngine gains a `cudnnHandle` field alongside `cublasHandle`. cuDNN-accelerated
+operations are non-interface methods on GPUEngine in `compute/gpu_cudnn.go`:
+
+| Operation | cuDNN Function | Notes |
+|-----------|---------------|-------|
+| Conv2dForward | cudnnConvolutionForward | IMPLICIT_GEMM algo, grouped conv via SetGroupCount |
+| BatchNormForwardInference | cudnnBatchNormalizationForwardInference | Spatial mode |
+| CudnnActivationForward | cudnnActivationForward | ReLU, Sigmoid, Tanh |
+| CudnnPoolingForward | cudnnPoolingForward | Max, AvgIncPad, AvgExcPad |
+| CudnnSoftmaxForward | cudnnSoftmaxForward | Channel-mode softmax |
+| Conv2dBackwardData | cudnnConvolutionBackwardData | Algo0, workspace-based |
+| Conv2dBackwardFilter | cudnnConvolutionBackwardFilter | Algo0, workspace-based |
+| BatchNormForwardTraining | cudnnBatchNormalizationForwardTraining | Saves mean/invVar for backward |
+| CudnnBatchNormBackward | cudnnBatchNormalizationBackward | Returns dx, dScale, dBias |
+| CudnnActivationBackward | cudnnActivationBackward | ReLU, Sigmoid, Tanh |
+| CudnnPoolingBackward | cudnnPoolingBackward | Max, AvgIncPad, AvgExcPad |
+
+See [ADR-008](adr/008-cudnn-integration.md) and [ADR-014](adr/014-cudnn-backward-pass.md) for architecture decisions.
+
+### 4.10 TensorRT Integration
+
+`internal/tensorrt/` provides CGo bindings wrapping TensorRT's C++ API via a thin
+C shim in `cshim/trt_capi.h/cpp`. Pre-compiled into `libtrt_capi.a` via Makefile.
+
+The inference pipeline supports TensorRT via `WithBackend("tensorrt")`:
+
+1. **Graph conversion** (`inference/tensorrt_convert.go`): Walks the graph in
+   topological order, mapping each node to a TRT layer. Supported ops: MatMul,
+   Add/Sub/Mul/Div, ReLU/Sigmoid/Tanh, Softmax, Reshape, Transpose, ReduceSum,
+   Conv, Dense, Linear, Constant. Unsupported ops return `UnsupportedOpError`.
+
+2. **Engine caching** (`inference/tensorrt_cache.go`): SHA-256 key from
+   (modelID, precision, gpuArch). Cached at `~/.cache/zerfoo/tensorrt/`.
+   Cache hit skips the expensive TRT build step.
+
+3. **TRT pipeline** (`inference/tensorrt_pipeline.go`): `TRTInferenceEngine`
+   wraps the TRT execution context with `Forward()` and `Close()` methods.
+
+FP16 precision via `WithPrecision("fp16")` sets the `FP16` builder flag.
+
+4. **Dynamic shapes** (`DynamicShapeConfig`): Optimization profiles with
+   min/opt/max dims per input allow a single engine to handle variable batch
+   sizes and sequence lengths. `SetInputShape` is called before each enqueue.
+   Cache keys incorporate shape ranges for correctness.
+
+See [ADR-009](adr/009-tensorrt-integration.md) and [ADR-016](adr/016-tensorrt-dynamic-shapes.md) for architecture decisions.
+
+### 4.11 CUTLASS Flash Attention
+
+Flash attention fuses Q*K^T scaling, softmax, and V weighting into a single
+tiled CUDA kernel, reducing memory from O(n^2) to O(n) and eliminating three
+intermediate kernel launches.
+
+- **Kernel**: `internal/cuda/kernels/flash_attention.cu` -- online softmax
+  (log-sum-exp trick), shared memory for K/V tiles, causal masking. BLOCK_SIZE=64,
+  MAX_HEAD_DIM=128.
+- **Dispatch**: Build-tag-gated pair `layers/attention/flash_cuda.go` /
+  `flash_nocuda.go` (`//go:build cuda && cutlass` / `!(cuda && cutlass)`).
+  `ScaledDotProductAttention.Forward` calls `tryFlashForward` before the naive
+  path when no arbitrary mask is provided.
+- **Scope**: Float32 forward only. Backward pass deferred. Head dim > 128 or
+  arbitrary masks fall back to naive attention.
+
+See [ADR-010](adr/010-cutlass-flash-attention.md) for architecture decisions.
+
+### 4.12 CUDA File Layout
 
 ```
 compute/
-  gpu_engine.go            GPUEngine (pool, stream, cuBLAS) (//go:build cuda)
-  gpu_kernels.go           getDevicePtr, makeGPUResult, kernel dispatch (//go:build cuda)
+  gpu_engine.go            GPUEngine (GRAL interfaces, pool, stream) (//go:build cuda)
+  gpu_cudnn.go             DNN-accelerated operations via GRAL (//go:build cuda)
+  gpu_kernels.go           getDevicePtr, makeGPUResult, kernel dispatch via GRAL (//go:build cuda)
 
 tensor/
   storage.go               Storage[T] interface, CPUStorage[T], NewWithStorage
-  gpu_storage.go           GPUStorage[T], TrySlice/TrySet (//go:build cuda)
-  transfer.go              ToGPU/ToCPU helpers (//go:build cuda)
+  gpu_storage.go           GPUStorage[T] with gpuapi.Runtime (//go:build cuda)
+  transfer.go              ToGPU/ToCPU helpers via GRAL Runtime (//go:build cuda)
+
+internal/gpuapi/
+  doc.go                   Package identity
+  runtime.go               Runtime, Stream, MemcpyKind interfaces
+  blas.go                  BLAS interface (Sgemm)
+  dnn.go                   DNN interface (conv, batchnorm, activation, pooling, softmax)
+  kernels.go               KernelRunner interface (17 element-wise/reduction ops)
+  mempool.go               MemPool interface
+  gpuapi_test.go           Compile-time interface assertions
+  cuda_runtime.go          CUDARuntime adapter (//go:build cuda)
+  cuda_blas.go             CUDABlas adapter (//go:build cuda)
+  cuda_dnn.go              CUDADNN adapter (//go:build cuda)
+  cuda_kernels.go          CUDAKernels adapter (//go:build cuda)
+  cuda_mempool.go          CUDAMemPool adapter (//go:build cuda)
 
 device/
   cuda_device.go           CUDA device abstraction (//go:build cuda)
@@ -409,27 +493,116 @@ internal/cuda/
   kernels/
     elementwise.cu         CUDA kernel source (17 kernels, stream-aware)
     elementwise.go         CGO bindings for kernels (//go:build cuda)
+    flash_attention.cu     Tiled flash attention kernel (online softmax)
+    flash_attention.h      C function declaration
+    flash_attention.go     CGO binding (//go:build cuda && cutlass)
+    gemm_int8.cu           INT8 mixed-precision GEMM kernel
+    gemm_int8.h            C function declaration
+    gemm_int4.cu           INT4 mixed-precision GEMM kernels (left-mul + right-mul)
+    gemm_int4.h            C function declarations
+    gemm_quantized.go      CGO bindings for quantized GEMM (//go:build cuda && cutlass)
     Makefile               nvcc compilation
 
 internal/cublas/
   cublas.go                cuBLAS + SetStream bindings (//go:build cuda)
+
+internal/cudnn/
+  doc.go                   Package identity (no build tag)
+  cudnn.go                 cuDNN CGo bindings (//go:build cuda)
+
+internal/tensorrt/
+  doc.go                   Package identity (no build tag)
+  tensorrt.go              TensorRT Go bindings (//go:build cuda)
+  Makefile                 Compiles cshim/ into libtrt_capi.a
+  cshim/
+    trt_capi.h             C shim header for TensorRT C++ API
+    trt_capi.cpp           C shim implementation
+
+inference/
+  tensorrt_convert.go      Graph-to-TRT converter (//go:build cuda)
+  tensorrt_cache.go        TRT engine caching (//go:build cuda)
+  tensorrt_pipeline.go     TRT inference engine wrapper (//go:build cuda)
+
+layers/attention/
+  flash_cuda.go            Flash attention GPU dispatch (//go:build cuda && cutlass)
+  flash_nocuda.go          Naive fallback (//go:build !(cuda && cutlass))
 ```
 
 CGO linker flags:
 
 ```
-internal/cuda/runtime.go:     -lcudart
-internal/cublas/cublas.go:    -lcublas
-internal/cuda/kernels/*.go:   -L${SRCDIR} -lkernels -lcudart -lstdc++
+internal/cuda/runtime.go:       -lcudart
+internal/cublas/cublas.go:      -lcublas
+internal/cudnn/cudnn.go:        -lcudnn
+internal/tensorrt/tensorrt.go:  -L${SRCDIR} -ltrt_capi -lnvinfer -lstdc++
+internal/cuda/kernels/*.go:     -L${SRCDIR} -lkernels -lcudart -lstdc++
 ```
 
-### 4.10 Parity Tolerances
+### 4.13 GPU Runtime Abstraction Layer (GRAL)
+
+`internal/gpuapi/` defines vendor-neutral interfaces that decouple `compute/`
+and `tensor/` from any specific GPU SDK. GPUEngine stores five GRAL interfaces
+(`Runtime`, `BLAS`, `DNN`, `KernelRunner`, `MemPool`) instead of vendor-specific
+handles. GPUStorage stores a `Runtime` for memory operations.
+
+CUDA adapters in the same package implement these interfaces by delegating to
+`internal/cuda`, `internal/cublas`, and `internal/cudnn`. ROCm adapters delegate
+to `internal/hip`, `internal/rocblas`, and `internal/miopen`. Adding a new
+backend requires implementing the five interfaces -- no changes to compute/ or
+tensor/ are needed.
+
+The DNN interface abstracts at the operation level: callers pass shapes as
+`[4]int` arrays and the adapter manages vendor-specific descriptors internally.
+See [ADR-011](adr/011-gpu-runtime-abstraction-layer.md) for details.
+
+### 4.14 AMD ROCm Backend
+
+ROCmEngine mirrors GPUEngine's architecture using HIP/rocBLAS/MIOpen adapters.
+All 35 Engine[T] methods delegate to CPUEngine; the GRAL infrastructure is wired
+for GPU acceleration when AMD hardware is available.
+
+```
+internal/hip/runtime.go:           -lamdhip64
+internal/hip/mempool.go:           (pure Go, uses hip.Malloc/Free)
+internal/rocblas/rocblas.go:       -lrocblas
+internal/miopen/miopen.go:         -lMIOpen
+internal/hip/kernels/*.go:         -L${SRCDIR} -lhipkernels -lamdhip64 -lstdc++
+```
+
+Integration: `device/rocm_device.go` auto-registers AMD GPUs via init().
+`inference/engine_rocm.go` routes "rocm" / "rocm:N" to ROCmEngine.
+`layers/attention/flash_rocm.go` dispatches fused attention on AMD GPUs.
+See [ADR-012](adr/012-amd-rocm-backend.md) for details.
+
+### 4.15 OpenCL Backend
+
+OpenCLEngine mirrors GPUEngine's architecture using OpenCL/CLBlast adapters.
+All 35 Engine[T] methods delegate to CPUEngine; the GRAL infrastructure is wired
+for GPU acceleration when OpenCL hardware is available.
+
+```
+internal/opencl/runtime.go:                    -lOpenCL
+internal/opencl/kernels/kernels.go:            -lOpenCL (embeds elementwise.cl)
+internal/clblast/clblast.go:                   -lclblast -lOpenCL
+internal/gpuapi/opencl_{runtime,blas,dnn,kernels,mempool}.go
+```
+
+No DNN library: OpenCLDNN returns ErrNotSupported for all operations; the
+compute engine falls back to CPU. Kernels are compiled from .cl source at
+runtime via `clCreateProgramWithSource`.
+
+Integration: `device/opencl_device.go` auto-registers OpenCL GPUs via init().
+`inference/engine_opencl.go` routes "opencl" / "opencl:N" to OpenCLEngine.
+See [ADR-013](adr/013-opencl-backend.md) for details.
+
+### 4.16 Parity Tolerances
 
 - MatMul: 1e-5 relative error
 - Element-wise ops: 1e-6 relative error
 - Reductions (Sum, Mean): 1e-5 relative error
+- Flash attention: 1e-3 absolute error (online softmax reordering)
 
-### 4.11 Compatible Hardware
+### 4.17 Compatible Hardware
 
 | GPU | Arch | CUDA_ARCH | Memory | Platform |
 |-----|------|-----------|--------|----------|
@@ -613,6 +786,9 @@ Documented exceptions (unreachable `tensor.New` error paths):
 - Integration tests for cross-package workflows.
 - Numerical gradient checking via finite differences.
 - MockEngine for unit testing layers in isolation.
+- Model parity on DGX Spark: 8 PASS (Llama3, Qwen25, FlashAttentionGQA),
+  13 SKIP (no ZMF: Mistral, Phi4, Gemma3, DeepSeek, SigLIP; 1 device: MultiGPU).
+  10 ONNX compatibility fixes applied during Phase 21. See [ADR-018](adr/018-model-parity-testing.md).
 
 ### 7.3 Excluded from Coverage Target
 
@@ -746,7 +922,7 @@ curl http://localhost:8081/debug/pprof/goroutine?debug=2
 1. float32 only for GPU -- other types fall back to CPU transparently.
 2. No broadcasting in GPU kernels -- broadcast cases fall back to CPU.
 3. Single GPU -- no multi-GPU or distributed GPU support.
-4. No cuDNN -- all kernels are custom CUDA.
+4. cuDNN operations (Conv2d, BatchNorm, activations, pooling, softmax) are non-interface methods on GPUEngine -- layers must call them explicitly rather than through Engine[T].
 5. No mixed precision -- full float32 throughout.
 6. Default device -- always uses cuda:0, no device selection API.
 7. Hardware validation pending -- GCP GPU quota request pending.
@@ -910,3 +1086,79 @@ ADR files in `docs/adr/`.
 | [005](adr/005-multi-architecture-support.md) | Multi-Architecture Support | 9 | Config registry, param resolver, YaRN, partial RoPE, MLA, shared MoE |
 | [006](adr/006-gpu-engine-architecture.md) | GPU Engine Architecture | 2-3 | CUDA float32, memory pool, cuBLAS row-major, OOM fallback, parity tolerances |
 | [007](adr/007-multi-gpu-architecture.md) | Multi-GPU Architecture | 10 | Device affinity, NCCL bindings, NcclStrategy, cross-device transfer, inference device selection |
+| [008](adr/008-cudnn-integration.md) | cuDNN Integration | 11 | cuDNN bindings, Conv2d/BatchNorm/activation/pooling GPU acceleration, descriptor management |
+| [009](adr/009-tensorrt-integration.md) | TensorRT Integration | 12 | C shim for C++ API, subgraph conversion, engine caching, FP16 precision, inference pipeline |
+| [010](adr/010-cutlass-flash-attention.md) | CUTLASS Flash Attention | 13 | Tiled flash attention kernel, CUTLASS templates, causal mask, build-tag-gated dispatch |
+| [011](adr/011-gpu-runtime-abstraction-layer.md) | GPU Runtime Abstraction Layer | 14 | GRAL interfaces decouple compute/tensor from vendor SDKs, CUDA adapters, operation-level DNN |
+| [012](adr/012-amd-rocm-backend.md) | AMD ROCm Backend | 15 | HIP runtime, rocBLAS, MIOpen adapters, HIP kernels, device registration, inference routing |
+| [013](adr/013-opencl-backend.md) | OpenCL Backend | 16 | OpenCL runtime, CLBlast, runtime kernel compilation, DNN stub, cl_mem memory pool |
+| [014](adr/014-cudnn-backward-pass.md) | cuDNN Backward Pass | 17 | Backward CGo bindings, CUDA DNN adapter, GPUEngine backward methods for training |
+| [015](adr/015-cutlass-quantized-gemm.md) | CUTLASS Quantized GEMM | 18 | INT8/INT4 CUDA kernels, right-multiply variant, MatMulNBits GPU dispatch |
+| [016](adr/016-tensorrt-dynamic-shapes.md) | TensorRT Dynamic Shapes | 19 | Optimization profiles, min/opt/max dims, SetInputShape, dynamic cache keys |
+| [017](adr/017-dgx-spark-hardware-validation.md) | DGX Spark Hardware Validation | 20 | ARM64 build fixes, sm_121 BLOCK_SIZE=32, TRT 10 API, benchmark results |
+| [018](adr/018-model-parity-testing.md) | Model Parity Testing | 21 | 10 ONNX fixes, 8 PASS (Llama3+Qwen25), 13 SKIP, parity automation script |
+
+---
+
+## 15. DGX Spark Hardware Validation (Phase 20)
+
+The NVIDIA DGX Spark GB10 (Blackwell, sm_121, CUDA 13.0.2, ARM64 aarch64,
+128GB unified LPDDR5X) validated the full GPU stack. All 66 packages pass with
+`cuda,cutlass` build tags. See [ADR-017](adr/017-dgx-spark-hardware-validation.md).
+
+### 15.1 ARM64 Build Fixes
+
+Nine code fixes were required for aarch64 compatibility:
+
+- Flash attention BLOCK_SIZE reduced 64 -> 32 (48KB shared memory limit on sm_121)
+- TensorRT Makefile: auto-detect multiarch include path via `dpkg-architecture`
+- TensorRT C shim: `kEXPLICIT_BATCH` -> 0, `setOptimizationProfileShared` -> `setOptimizationProfileAsync`
+- Missing includes: `<cstdio>`, `<stdlib.h>` for C.free
+- API renames: `tensor.NewTensorNumeric` -> `tensor.New`, `metrics.Collector` -> `runtime.Collector`
+- Logger type safety: convert int/error args to string for `log.Logger`
+- Test fixes: ARM64 float32 precision (TanhGrad), MemPool reuse, NCCL format strings
+- Import cycle: remove `graph` import from `compute/gpu_integration_test.go`
+
+### 15.2 Benchmark Results (NVIDIA DGX Spark GB10)
+
+Hardware: 20-core ARM Cortex-A78AE, Blackwell GPU (sm_121), 128GB LPDDR5X.
+
+#### MatMul (cuBLAS SGEMM) GPU vs CPU
+
+| Size     | GPU (us) | CPU (us) | Speedup |
+|----------|----------|----------|---------|
+| 128x128  |       32 |      429 |   13.4x |
+| 512x512  |      158 |    4,109 |   26.0x |
+| 1024x1024|      509 |   23,393 |   45.9x |
+
+#### Softmax GPU vs CPU (shape: 64x128x512)
+
+| Engine | Latency (us) | Speedup |
+|--------|-------------|---------|
+| GPU    |       1,054 |   47.6x |
+| CPU    |      51,516 |   1.0x  |
+
+#### Flash Attention (CUTLASS, head_dim=64, num_heads=8)
+
+| Seq Len | Latency (us) |
+|---------|-------------|
+| 128     |         147 |
+| 512     |       1,035 |
+| 1024    |       2,335 |
+| 2048    |       8,924 |
+
+#### Quantized GEMM (CUTLASS INT4/INT8)
+
+| Kernel  | Size     | Latency (us) | GOPS     |
+|---------|----------|-------------|----------|
+| INT4    | 1024     |       3,958 |      545 |
+| INT4    | 2048     |      31,998 |      537 |
+| INT4    | 4096     |     426,040 |      322 |
+| INT8    | 1024     |         941 |    2,289 |
+| INT8    | 2048     |       7,933 |    2,166 |
+| INT8    | 4096     |      75,380 |    1,822 |
+
+#### TensorRT Inference
+
+TensorRT 10.15.1 engine build, serialization, deserialization, and inference all
+work on Blackwell. 15 tests pass in 5.6 seconds (including engine build time).

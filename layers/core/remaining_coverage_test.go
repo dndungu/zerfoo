@@ -373,17 +373,19 @@ func TestSub_Backward_PanicWrongInputs(t *testing.T) {
 	_, _ = s.Backward(context.Background(), types.FullBackprop, g, a)
 }
 
-func TestReshape_Forward_PanicWrongInputs(t *testing.T) {
+func TestReshape_Forward_ErrorWrongInputs(t *testing.T) {
 	engine := makeEngine()
 	r := NewReshape(engine, []int{2})
 	a := makeTensor(t, []int{2}, []float32{1, 2})
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Reshape Forward with 2 inputs should panic")
-		}
-	}()
-	_, _ = r.Forward(context.Background(), a, a)
+	// 0 inputs should error.
+	if _, err := r.Forward(context.Background()); err == nil {
+		t.Error("Reshape Forward with 0 inputs should error")
+	}
+	// 3 inputs should error.
+	if _, err := r.Forward(context.Background(), a, a, a); err == nil {
+		t.Error("Reshape Forward with 3 inputs should error")
+	}
 }
 
 func TestReshape_Backward_PanicWrongInputs(t *testing.T) {

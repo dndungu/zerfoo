@@ -14,7 +14,7 @@ import (
 func newTestGPUEngine(t *testing.T) *GPUEngine[float32] {
 	t.Helper()
 
-	eng, err := NewGPUEngine[float32](numeric.Float32Arithmetic{})
+	eng, err := NewGPUEngine[float32](numeric.Float32Ops{})
 	if err != nil {
 		t.Fatalf("NewGPUEngine: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestGPUEngine_MatMulBatched(t *testing.T) {
 
 func TestGPUEngine_MatMulParityWithCPU(t *testing.T) {
 	gpuEng := newTestGPUEngine(t)
-	cpuEng := NewCPUEngine[float32](numeric.Float32Arithmetic{})
+	cpuEng := NewCPUEngine[float32](numeric.Float32Ops{})
 	ctx := context.Background()
 
 	// 4x8 * 8x4 = 4x4

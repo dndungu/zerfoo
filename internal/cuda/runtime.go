@@ -135,6 +135,18 @@ func MemcpyPeer(dst unsafe.Pointer, dstDevice int, src unsafe.Pointer, srcDevice
 	return nil
 }
 
+// DeviceComputeCapability returns the major and minor compute capability of the
+// specified CUDA device.
+func DeviceComputeCapability(deviceID int) (major, minor int, err error) {
+	var prop C.struct_cudaDeviceProp
+	cerr := C.cudaGetDeviceProperties(&prop, C.int(deviceID))
+	if cerr != C.cudaSuccess {
+		return 0, 0, fmt.Errorf("cudaGetDeviceProperties failed: %s", C.GoString(C.cudaGetErrorString(cerr)))
+	}
+	return int(prop.major), int(prop.minor), nil
+}
+
+
 // MemcpyAsync copies count bytes asynchronously on the given stream.
 func MemcpyAsync(dst, src unsafe.Pointer, count int, kind MemcpyKind, stream *Stream) error {
 	var cs C.cudaStream_t

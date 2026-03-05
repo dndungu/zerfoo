@@ -11,7 +11,7 @@ import (
 	"github.com/zerfoo/zerfoo/internal/cuda"
 	"github.com/zerfoo/zerfoo/internal/nccl"
 	"github.com/zerfoo/zerfoo/log"
-	"github.com/zerfoo/zerfoo/metrics"
+	"github.com/zerfoo/zerfoo/metrics/runtime"
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
@@ -27,7 +27,7 @@ type NcclStrategy[T tensor.Numeric] struct {
 	stream *cuda.Stream
 
 	logger    log.Logger
-	collector metrics.Collector
+	collector runtime.Collector
 
 	shutdownOnce sync.Once
 }
@@ -39,7 +39,7 @@ var _ InternalStrategy[float32] = (*NcclStrategy[float32])(nil)
 type NcclStrategyConfig struct {
 	DeviceID  int
 	Logger    log.Logger
-	Collector metrics.Collector
+	Collector runtime.Collector
 }
 
 // NewNcclStrategy creates an NcclStrategy for the specified device.
@@ -51,7 +51,7 @@ func NewNcclStrategy[T tensor.Numeric](cfg NcclStrategyConfig) *NcclStrategy[T] 
 	}
 	c := cfg.Collector
 	if c == nil {
-		c = metrics.Nop()
+		c = runtime.Nop()
 	}
 	return &NcclStrategy[T]{
 		deviceID:  cfg.DeviceID,
@@ -78,7 +78,7 @@ func (s *NcclStrategy[T]) Init(rank int, size int, _ string) error {
 	}
 	s.stream = stream
 
-	s.logger.Info("nccl strategy initialized", "rank", rank, "size", size, "device", s.deviceID)
+	s.logger.Info("nccl strategy initialized", "rank", fmt.Sprintf("%d", rank), "size", fmt.Sprintf("%d", size), "device", fmt.Sprintf("%d", s.deviceID))
 	return nil
 }
 
@@ -106,7 +106,7 @@ func (s *NcclStrategy[T]) InitWithUID(rank, size int, uid *nccl.UniqueID) error 
 	}
 	s.comm = comm
 
-	s.logger.Info("nccl strategy initialized with UID", "rank", rank, "size", size, "device", s.deviceID)
+	s.logger.Info("nccl strategy initialized with UID", "rank", fmt.Sprintf("%d", rank), "size", fmt.Sprintf("%d", size), "device", fmt.Sprintf("%d", s.deviceID))
 	return nil
 }
 
@@ -252,17 +252,17 @@ func (s *NcclStrategy[T]) Shutdown() {
 	s.shutdownOnce.Do(func() {
 		if s.comm != nil {
 			if err := s.comm.Destroy(); err != nil {
-				s.logger.Error("nccl comm destroy", "error", err)
+				s.logger.Error("nccl comm destroy", "error", err.Error())
 			}
 			s.comm = nil
 		}
 		if s.stream != nil {
 			if err := s.stream.Destroy(); err != nil {
-				s.logger.Error("cuda stream destroy", "error", err)
+				s.logger.Error("cuda stream destroy", "error", err.Error())
 			}
 			s.stream = nil
 		}
-		s.logger.Info("nccl strategy shutdown", "rank", s.rank)
+		s.logger.Info("nccl strategy shutdown", "rank", fmt.Sprintf("%d", s.rank))
 	})
 }
 

@@ -3,7 +3,62 @@ package tensor
 import (
 	"reflect"
 	"testing"
+
+	"github.com/zerfoo/zerfoo/device"
 )
+
+// mockFreeableStorage implements Storage and the freeable interface for testing Release.
+type mockFreeableStorage[T Numeric] struct {
+	data  []T
+	freed bool
+}
+
+func (s *mockFreeableStorage[T]) Len() int               { return len(s.data) }
+func (s *mockFreeableStorage[T]) Slice() []T              { return s.data }
+func (s *mockFreeableStorage[T]) Set(data []T)            { s.data = data }
+func (s *mockFreeableStorage[T]) DeviceType() device.Type { return device.CPU }
+func (s *mockFreeableStorage[T]) Free() error             { s.freed = true; return nil }
+
+func TestTensorNumeric_Release_CPU(t *testing.T) {
+	// Release on CPU tensor is a no-op (CPUStorage doesn't implement freeable).
+	ten, err := New[float32]([]int{2, 2}, []float32{1, 2, 3, 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Should not panic.
+	ten.Release()
+}
+
+func TestTensorNumeric_Release_Freeable(t *testing.T) {
+	mock := &mockFreeableStorage[float32]{data: []float32{1, 2, 3, 4}}
+	ten, err := NewWithStorage[float32]([]int{4}, mock)
+	if err != nil {
+		t.Fatalf("NewWithStorage: %v", err)
+	}
+
+	if mock.freed {
+		t.Fatal("expected freed=false before Release")
+	}
+
+	ten.Release()
+
+	if !mock.freed {
+		t.Error("expected freed=true after Release")
+	}
+}
+
+func TestTensorNumeric_Release_Double(t *testing.T) {
+	mock := &mockFreeableStorage[float32]{data: []float32{1, 2}}
+	ten, err := NewWithStorage[float32]([]int{2}, mock)
+	if err != nil {
+		t.Fatalf("NewWithStorage: %v", err)
+	}
+
+	ten.Release()
+	// Second release should not panic.
+	ten.Release()
+}
 
 func TestNew(t *testing.T) {
 	// Test case: Valid shape and data

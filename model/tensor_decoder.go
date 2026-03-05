@@ -23,6 +23,12 @@ func DecodeTensor[T tensor.Numeric](tensorProto *zmf.Tensor) (*tensor.TensorNume
 
 	var zero T
 
+	// Guard against empty data when shape implies non-zero elements.
+	if size > 0 && len(tensorProto.Data) == 0 {
+		return nil, fmt.Errorf("tensor has shape %v (size %d) but no data; external data may not have been loaded",
+			tensorProto.Shape, size)
+	}
+
 	switch tensorProto.Dtype {
 	case zmf.Tensor_FLOAT32:
 		// Decode raw bytes into []float32

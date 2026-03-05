@@ -19,7 +19,13 @@ import (
 func main() {
 	profile := flag.String("profile", "coverage.out", "path to coverage profile")
 	threshold := flag.Float64("threshold", 93.0, "minimum coverage percentage")
+	exclude := flag.String("exclude", "", "comma-separated package path prefixes to exclude")
 	flag.Parse()
+
+	var excludePrefixes []string
+	if *exclude != "" {
+		excludePrefixes = strings.Split(*exclude, ",")
+	}
 
 	results, err := parseCoverageProfile(*profile)
 	if err != nil {
@@ -29,6 +35,10 @@ func main() {
 
 	failed := false
 	for pkg, cov := range results {
+		if isExcluded(pkg, excludePrefixes) {
+			fmt.Printf("%-60s %5.1f%%  SKIP\n", pkg, cov)
+			continue
+		}
 		status := "PASS"
 		if cov < *threshold {
 			status = "FAIL"
@@ -120,4 +130,14 @@ func parseCoverageProfile(path string) (map[string]float64, error) {
 	}
 
 	return results, nil
+}
+
+// isExcluded returns true if pkg matches any of the exclude prefixes.
+func isExcluded(pkg string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.Contains(pkg, strings.TrimSpace(p)) {
+			return true
+		}
+	}
+	return false
 }

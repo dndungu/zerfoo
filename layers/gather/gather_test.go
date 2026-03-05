@@ -217,18 +217,68 @@ func TestForward_WithoutWeights_WrongInputCount(t *testing.T) {
 	}
 }
 
-func TestForward_WithoutWeights_WrongIndicesType(t *testing.T) {
+func TestForward_WithoutWeights_Float32Indices(t *testing.T) {
 	engine := newEngine()
 	g := New[float32](engine)
 	ctx := context.Background()
 
-	// Both inputs are float32, but indices needs to be *tensor.TensorNumeric[int]
-	params, _ := tensor.New[float32]([]int{4, 3}, nil)
-	indices, _ := tensor.New[float32]([]int{1, 2}, nil)
+	// General Gather now accepts float32 indices (converts to int internally).
+	params, _ := tensor.New[float32]([]int{4, 3}, []float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
+	indices, _ := tensor.New[float32]([]int{}, []float32{1}) // scalar index
 
-	_, err := g.Forward(ctx, params, indices)
-	if err == nil {
-		t.Error("Forward with float32 indices should fail (expects int)")
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+	if out == nil {
+		t.Fatal("output is nil")
+	}
+}
+
+func TestForward_ScalarGatherFrom1DData(t *testing.T) {
+	engine := newEngine()
+	g := New[float32](engine)
+	ctx := context.Background()
+
+	// 1D data (e.g. output of Shape op) with scalar index → 0D scalar result.
+	params, _ := tensor.New[float32]([]int{3}, []float32{10, 20, 30})
+	indices, _ := tensor.New[float32]([]int{}, []float32{1}) // scalar index
+
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	// Output should be 0D (scalar).
+	if len(out.Shape()) != 0 {
+		t.Errorf("output shape = %v, want [] (0D scalar)", out.Shape())
+	}
+
+	// Value should be 20 (element at index 1).
+	if out.Data()[0] != 20 {
+		t.Errorf("output value = %v, want 20", out.Data()[0])
+	}
+}
+
+func TestForward_ScalarGatherNegativeIndex(t *testing.T) {
+	engine := newEngine()
+	g := New[float32](engine)
+	ctx := context.Background()
+
+	// Negative index: -1 means last element.
+	params, _ := tensor.New[float32]([]int{4}, []float32{100, 200, 300, 400})
+	indices, _ := tensor.New[float32]([]int{}, []float32{-1})
+
+	out, err := g.Forward(ctx, params, indices)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+
+	if len(out.Shape()) != 0 {
+		t.Errorf("output shape = %v, want [] (0D scalar)", out.Shape())
+	}
+	if out.Data()[0] != 400 {
+		t.Errorf("output value = %v, want 400", out.Data()[0])
 	}
 }
 
@@ -315,6 +365,82 @@ func TestBackward_WithIntIndices(t *testing.T) {
 	// Second gradient should be nil (indices don't have gradients)
 	if grads[1] != nil {
 		t.Error("gradient[1] should be nil")
+	}
+}
+
+func TestNewWithIndices(t *testing.T) {
+	engine := newEngine()
+	idx, err := tensor.New[int]([]int{1}, []int{1})
+	if err != nil {
+		t.Fatalf("failed to create indices: %v", err)
+	}
+	g := NewWithIndices[float32](engine, idx)
+	if g == nil {
+		t.Fatal("NewWithIndices returned nil")
+	}
+	if g.HasEmbeddedWeights() {
+		t.Error("HasEmbeddedWeights() should be false for NewWithIndices")
+	}
+}
+
+func TestForward_WithEmbeddedIndices_ScalarGather(t *testing.T) {
+	engine := newEngine()
+
+	// Embedded index: scalar 1 → pick element at index 1.
+	idx, _ := tensor.New[int]([]int{1}, []int{1})
+	g := NewWithIndices[float32](engine, idx)
+
+	// Data input: 1D shape tensor [10, 20, 30].
+	data, _ := tensor.New[float32]([]int{3}, []float32{10, 20, 30})
+
+	out, err := g.Forward(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+	if len(out.Shape()) != 0 {
+		t.Errorf("output shape = %v, want [] (0D scalar)", out.Shape())
+	}
+	if out.Data()[0] != 20 {
+		t.Errorf("output value = %v, want 20", out.Data()[0])
+	}
+}
+
+func TestForward_WithEmbeddedIndices_WrongInputCount(t *testing.T) {
+	engine := newEngine()
+	idx, _ := tensor.New[int]([]int{1}, []int{0})
+	g := NewWithIndices[float32](engine, idx)
+
+	d1, _ := tensor.New[float32]([]int{3}, nil)
+	d2, _ := tensor.New[float32]([]int{3}, nil)
+
+	_, err := g.Forward(context.Background(), d1, d2)
+	if err == nil {
+		t.Error("Forward with 2 inputs on embedded-indices gather should fail")
+	}
+}
+
+func TestBuildGather_WithEmbeddedIndices(t *testing.T) {
+	engine := newEngine()
+	attrs := map[string]interface{}{
+		"axis":                  0,
+		"/Constant_output_0": []int64{2},
+	}
+	node, err := BuildGather[float32](engine, numeric.Float32Ops{}, "/Gather", nil, attrs)
+	if err != nil {
+		t.Fatalf("BuildGather: %v", err)
+	}
+	if node.OpType() != "Gather" {
+		t.Errorf("OpType = %q, want %q", node.OpType(), "Gather")
+	}
+
+	// Verify it works with 1 input (data from Shape).
+	data, _ := tensor.New[float32]([]int{4}, []float32{10, 20, 30, 40})
+	out, err := node.Forward(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
+	if out.Data()[0] != 30 {
+		t.Errorf("output = %v, want 30", out.Data()[0])
 	}
 }
 

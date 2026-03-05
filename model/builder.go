@@ -75,7 +75,9 @@ func BuildFromZMF[T tensor.Numeric](
 
 	// 1. Handle Graph Inputs
 	// These are the entry points to the graph. We create special input nodes for them.
-	// Only create input nodes for actual model inputs, not parameters
+	// Only create input nodes for actual model inputs, not parameters.
+	// For KV-cache models, auto-supply attention_mask, position_ids, and past_key_values.
+	var primaryInputNode graph.Node[T]
 	for _, inputProto := range model.Graph.Inputs {
 		// Skip parameters - they should be embedded in layers, not treated as inputs
 		if _, isParam := params[inputProto.Name]; isParam {
@@ -84,10 +86,52 @@ func BuildFromZMF[T tensor.Numeric](
 
 		dims := make([]int, len(inputProto.Shape))
 		for i, dim := range inputProto.Shape {
-			dims[i] = int(dim) // Convert int64 to int
+			dims[i] = int(dim)
 		}
 
-		instantiatedNodes[inputProto.Name] = builder.Input(dims)
+		name := inputProto.Name
+		switch {
+		case strings.HasPrefix(name, "past_key_values"):
+			// KV cache inputs: create zero-cache nodes wired to the primary input.
+			numHeads, headDim := 1, 1
+			if len(dims) >= 4 {
+				numHeads = dims[1]
+				headDim = dims[3]
+			}
+			if numHeads == 0 {
+				numHeads = 1
+			}
+			if headDim == 0 {
+				headDim = 64
+			}
+			node := &zeroKVCacheNode[T]{numHeads: numHeads, headDim: headDim}
+			instantiatedNodes[name] = node
+			// Wire to primary input later (deferred).
+		case name == "attention_mask":
+			node := &maskFromInputNode[T]{}
+			instantiatedNodes[name] = node
+		case name == "position_ids":
+			node := &positionIdsNode[T]{}
+			instantiatedNodes[name] = node
+		default:
+			inputNode := builder.Input(dims)
+			instantiatedNodes[name] = inputNode
+			if primaryInputNode == nil {
+				primaryInputNode = inputNode
+			}
+		}
+	}
+
+	// Wire auto-input nodes to the primary input so they can derive batch/seq dims.
+	if primaryInputNode != nil {
+		for _, inputProto := range model.Graph.Inputs {
+			name := inputProto.Name
+			if name == "attention_mask" || name == "position_ids" || strings.HasPrefix(name, "past_key_values") {
+				if node, ok := instantiatedNodes[name]; ok {
+					builder.AddNode(node, primaryInputNode)
+				}
+			}
+		}
 	}
 
 	// 1.5. Handle Parameters as nodes (only add them if they don't conflict with layer nodes)
@@ -124,6 +168,23 @@ func BuildFromZMF[T tensor.Numeric](
 		}
 
 		attributes := convertAttributes(nodeProto.Attributes)
+		// Promote dedicated proto fields into the attributes map so layer
+		// builders can find them via the standard attributes interface.
+		if len(nodeProto.Perm) > 0 {
+			if _, exists := attributes["perm"]; !exists {
+				attributes["perm"] = nodeProto.Perm
+			}
+		}
+		if nodeProto.Epsilon != nil {
+			if _, exists := attributes["epsilon"]; !exists {
+				attributes["epsilon"] = *nodeProto.Epsilon
+			}
+		}
+		if nodeProto.Axis != nil {
+			if _, exists := attributes["axis"]; !exists {
+				attributes["axis"] = int(*nodeProto.Axis)
+			}
+		}
 		// Merge global attributes (e.g. rope_scaling) into per-node attributes.
 		for k, v := range cfg.globalAttributes {
 			if _, exists := attributes[k]; !exists {
@@ -137,6 +198,12 @@ func BuildFromZMF[T tensor.Numeric](
 		}
 
 		instantiatedNodes[nodeProto.Name] = node
+		// Register output aliases so downstream nodes can reference them by output name.
+		for _, outName := range nodeProto.Outputs {
+			if outName != "" && outName != nodeProto.Name {
+				instantiatedNodes[outName] = node
+			}
+		}
 	}
 
 	// 3. Second pass: Connect the nodes
@@ -204,9 +271,100 @@ func BuildFromZMF[T tensor.Numeric](
 						intsAttr := &zmf.Ints{Val: shapeValues}
 						attr := &zmf.Attribute{Value: &zmf.Attribute_Ints{Ints: intsAttr}}
 						nodeProto.Attributes["shape"] = attr
-					}
 
+						// Rebuild the node with the extracted shape attribute.
+						updatedAttrs := convertAttributes(nodeProto.Attributes)
+						rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+						if rebuildErr == nil {
+							node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+							if nodeErr == nil {
+								instantiatedNodes[nodeProto.Name] = node
+								for _, outName := range nodeProto.Outputs {
+									if outName != "" && outName != nodeProto.Name {
+										instantiatedNodes[outName] = node
+									}
+								}
+								currentNode = node
+							}
+						}
+
+						// Static shape extracted; only data input needed.
+						actualInputNames = actualInputNames[:1]
+					} else if resolved := resolveParam(shapeInputName, params, instantiatedNodes); resolved != nil {
+						shapeValues := make([]int64, resolved.Size())
+						for i := 0; i < resolved.Size(); i++ { //nolint:intrange // classic loop for generic tensor access
+							val, _ := resolved.At(i)
+							shapeValues[i] = int64(val)
+						}
+
+						if nodeProto.Attributes == nil {
+							nodeProto.Attributes = make(map[string]*zmf.Attribute)
+						}
+
+						intsAttr := &zmf.Ints{Val: shapeValues}
+						attr := &zmf.Attribute{Value: &zmf.Attribute_Ints{Ints: intsAttr}}
+						nodeProto.Attributes["shape"] = attr
+
+						// Rebuild the node with the extracted shape attribute.
+						updatedAttrs := convertAttributes(nodeProto.Attributes)
+						rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+						if rebuildErr == nil {
+							node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+							if nodeErr == nil {
+								instantiatedNodes[nodeProto.Name] = node
+								for _, outName := range nodeProto.Outputs {
+									if outName != "" && outName != nodeProto.Name {
+										instantiatedNodes[outName] = node
+									}
+								}
+								currentNode = node
+							}
+						}
+
+						actualInputNames = actualInputNames[:1]
+					}
+					// else: shape is dynamic (from another node) — keep both
+					// inputs so Reshape.Forward receives the shape tensor.
+				}
+			case "Unsqueeze":
+				// ONNX opset 13+: axes come as a second input tensor.
+				if len(actualInputNames) > 1 {
+					axesParam := resolveParam(actualInputNames[1], params, instantiatedNodes)
+					if axesParam != nil {
+						axesValues := make([]int64, axesParam.Size())
+						for i := 0; i < axesParam.Size(); i++ { //nolint:intrange // generic tensor access
+							val, err := axesParam.At(i)
+							if err != nil {
+								return nil, fmt.Errorf("unsqueeze axes extraction failed at %d: %w", i, err)
+							}
+							axesValues[i] = int64(val)
+						}
+						if nodeProto.Attributes == nil {
+							nodeProto.Attributes = make(map[string]*zmf.Attribute)
+						}
+						nodeProto.Attributes["axes"] = &zmf.Attribute{
+							Value: &zmf.Attribute_Ints{Ints: &zmf.Ints{Val: axesValues}},
+						}
+						updatedAttrs := convertAttributes(nodeProto.Attributes)
+						rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+						if rebuildErr == nil {
+							node, nodeErr := rebuilt(engine, ops, nodeProto.Name, params, updatedAttrs)
+							if nodeErr == nil {
+								instantiatedNodes[nodeProto.Name] = node
+								for _, outName := range nodeProto.Outputs {
+									if outName != "" && outName != nodeProto.Name {
+										instantiatedNodes[outName] = node
+									}
+								}
+								currentNode = node
+							}
+						}
+					}
 					actualInputNames = actualInputNames[:1]
+				} else {
+					// zonnx may promote the axes constant into an attribute.
+					// Translate the promoted key to "axes" and rebuild.
+					currentNode = rebuildWithPromotedAxes(nodeProto, engine, ops, instantiatedNodes, currentNode)
 				}
 			}
 		}
@@ -288,6 +446,74 @@ func BuildFromZMF[T tensor.Numeric](
 	return builder.Build(outputNode)
 }
 
+// maskFromInputNode generates an all-ones attention mask from input_ids shape.
+type maskFromInputNode[T tensor.Numeric] struct{}
+
+func (m *maskFromInputNode[T]) OpType() string                  { return "AutoAttentionMask" }
+func (m *maskFromInputNode[T]) Attributes() map[string]any       { return nil }
+func (m *maskFromInputNode[T]) OutputShape() []int               { return nil }
+func (m *maskFromInputNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (m *maskFromInputNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	shape := inputs[0].Shape()
+	data := make([]T, inputs[0].Size())
+	for i := range data {
+		data[i] = T(1)
+	}
+	return tensor.New(shape, data)
+}
+
+func (m *maskFromInputNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
+}
+
+// positionIdsNode generates sequential position IDs [0, 1, ..., seq_len-1] per batch.
+type positionIdsNode[T tensor.Numeric] struct{}
+
+func (p *positionIdsNode[T]) OpType() string                  { return "AutoPositionIds" }
+func (p *positionIdsNode[T]) Attributes() map[string]any       { return nil }
+func (p *positionIdsNode[T]) OutputShape() []int               { return nil }
+func (p *positionIdsNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (p *positionIdsNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	shape := inputs[0].Shape()
+	size := inputs[0].Size()
+	data := make([]T, size)
+	seqLen := shape[len(shape)-1]
+	for i := range data {
+		data[i] = T(i % seqLen)
+	}
+	return tensor.New(shape, data)
+}
+
+func (p *positionIdsNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
+}
+
+// zeroKVCacheNode generates a zero tensor with shape [batch, num_heads, 0, head_dim].
+type zeroKVCacheNode[T tensor.Numeric] struct {
+	numHeads int
+	headDim  int
+}
+
+func (z *zeroKVCacheNode[T]) OpType() string                  { return "AutoZeroKVCache" }
+func (z *zeroKVCacheNode[T]) Attributes() map[string]any       { return nil }
+func (z *zeroKVCacheNode[T]) OutputShape() []int               { return nil }
+func (z *zeroKVCacheNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (z *zeroKVCacheNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	batch := 1
+	if len(inputs) > 0 {
+		batch = inputs[0].Shape()[0]
+	}
+	shape := []int{batch, z.numHeads, 0, z.headDim}
+	return tensor.New(shape, []T{})
+}
+
+func (z *zeroKVCacheNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
+}
+
 // parameterNode is a special node type for parameters that are referenced as inputs.
 type parameterNode[T tensor.Numeric] struct {
 	value *tensor.TensorNumeric[T]
@@ -315,6 +541,22 @@ func (p *parameterNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *
 }
 
 func (p *parameterNode[T]) Parameters() []*graph.Parameter[T] {
+	return nil
+}
+
+// resolveParam looks up a tensor value for an input name that is expected to be a
+// constant or parameter (e.g. Unsqueeze axes, Reshape shape). It checks the params
+// map first, then tries constant nodes in the instantiated map.
+func resolveParam[T tensor.Numeric](name string, params map[string]*graph.Parameter[T], nodes map[string]graph.Node[T]) *tensor.TensorNumeric[T] {
+	if p, ok := params[name]; ok {
+		return p.Value
+	}
+	// Try as a constant node (parameterNode).
+	if n, ok := nodes[name]; ok {
+		if pn, isPn := n.(*parameterNode[T]); isPn {
+			return pn.value
+		}
+	}
 	return nil
 }
 
@@ -410,6 +652,57 @@ func buildConstantNode[T tensor.Numeric](nodeProto *zmf.Node) (*parameterNode[T]
 	}
 
 	return &parameterNode[T]{value: decoded}, nil
+}
+
+// rebuildWithPromotedAxes checks if a node has a constant-promoted attribute
+// that should be interpreted as "axes" (for Unsqueeze). If found, it sets
+// the "axes" key and rebuilds the node.
+func rebuildWithPromotedAxes[T tensor.Numeric](
+	nodeProto *zmf.Node,
+	engine compute.Engine[T],
+	ops numeric.Arithmetic[T],
+	nodes map[string]graph.Node[T],
+	currentNode graph.Node[T],
+) graph.Node[T] {
+	for k, attr := range nodeProto.Attributes {
+		if !isConstantPromotedAttr(k) {
+			continue
+		}
+		if v, ok := attr.Value.(*zmf.Attribute_Ints); ok {
+			if nodeProto.Attributes == nil {
+				nodeProto.Attributes = make(map[string]*zmf.Attribute)
+			}
+			nodeProto.Attributes["axes"] = &zmf.Attribute{
+				Value: &zmf.Attribute_Ints{Ints: &zmf.Ints{Val: v.Ints.Val}},
+			}
+			updatedAttrs := convertAttributes(nodeProto.Attributes)
+			rebuilt, rebuildErr := GetLayerBuilder[T](nodeProto.OpType)
+			if rebuildErr == nil {
+				node, nodeErr := rebuilt(engine, ops, nodeProto.Name, nil, updatedAttrs)
+				if nodeErr == nil {
+					nodes[nodeProto.Name] = node
+					for _, outName := range nodeProto.Outputs {
+						if outName != "" && outName != nodeProto.Name {
+							nodes[outName] = node
+						}
+					}
+					return node
+				}
+			}
+		}
+	}
+	return currentNode
+}
+
+// isConstantPromotedAttr returns true if the attribute key looks like an ONNX
+// output name that was promoted from a Constant node input by the zonnx converter.
+// Standard attributes have short names ("axis", "epsilon", "perm") while
+// promoted constants have names like "/Constant_output_0" or "onnx::Gather_919".
+func isConstantPromotedAttr(key string) bool {
+	if strings.HasPrefix(key, "/") || strings.HasPrefix(key, "onnx::") {
+		return true
+	}
+	return false
 }
 
 // convertAttributes converts ZMF attributes to a more usable map[string]interface{}.

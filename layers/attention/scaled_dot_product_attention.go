@@ -52,6 +52,15 @@ func (sdpa *ScaledDotProductAttention[T]) Forward(ctx context.Context, q, k, v, 
 	sdpa.k = k
 	sdpa.v = v
 
+	// Try fused flash attention when no arbitrary mask is provided.
+	// Flash attention handles causal masking internally via the causal flag.
+	// When mask is nil, we use non-causal flash attention.
+	if mask == nil {
+		if result, err := tryFlashForward(q, k, v, int(sdpa.headDim), false); result != nil || err != nil {
+			return result, err
+		}
+	}
+
 	// 1. MatMul Q and K^T
 	// (batch, seq_len_q, head_dim) x (batch, head_dim, seq_len_k) -> (batch, seq_len_q, seq_len_k)
 	kTransposed, err := sdpa.engine.Transpose(ctx, k, []int{0, 2, 1}) // Transpose K for 3D tensor

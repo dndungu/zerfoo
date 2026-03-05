@@ -47,5 +47,10 @@ func computeGradientsCommon[T tensor.Numeric](
 		return zero, fmt.Errorf("model backward pass failed: %w", err)
 	}
 
-	return lossTensor.Data()[0], nil
+	lossVal := lossTensor.Data()[0]
+
+	// Release intermediate tensors to free GPU memory between training steps.
+	g.ClearMemo()
+
+	return lossVal, nil
 }

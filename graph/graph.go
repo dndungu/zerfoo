@@ -37,7 +37,7 @@ func (g *Graph[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[
 		g.memo[n] = inputs[i]
 	}
 
-	for _, n := range g.nodes {
+	for nodeIdx, n := range g.nodes {
 		if _, ok := n.(*inputNode[T]); ok {
 			continue
 		}
@@ -49,7 +49,16 @@ func (g *Graph[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[
 
 		output, err := n.Forward(ctx, nodeInputs...)
 		if err != nil {
-			return nil, err
+			// Include node op type and input shapes for debugging.
+			var inputShapes [][]int
+			var depOps []string
+			for j, dep := range g.dependencies[n] {
+				depOps = append(depOps, dep.OpType())
+				if j < len(nodeInputs) && nodeInputs[j] != nil {
+					inputShapes = append(inputShapes, nodeInputs[j].Shape())
+				}
+			}
+			return nil, fmt.Errorf("node[%d] %s: %w (input shapes: %v, dep ops: %v)", nodeIdx, n.OpType(), err, inputShapes, depOps)
 		}
 
 		g.memo[n] = output
@@ -97,6 +106,27 @@ func (g *Graph[T]) Backward(ctx context.Context, mode types.BackwardMode, initia
 	}
 
 	return nil
+}
+
+// ClearMemo releases intermediate tensors from the last forward pass.
+// Call this after Backward to free GPU device memory between training steps.
+// Input tensors and parameter values are not released.
+func (g *Graph[T]) ClearMemo() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	inputSet := make(map[Node[T]]bool, len(g.inputs))
+	for _, n := range g.inputs {
+		inputSet[n] = true
+	}
+
+	for node, t := range g.memo {
+		if inputSet[node] {
+			continue // Don't release caller-owned input tensors.
+		}
+		t.Release()
+	}
+	g.memo = nil
 }
 
 // Parameters returns all the trainable parameters in the graph.

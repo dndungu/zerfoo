@@ -19,9 +19,9 @@ type tokenizerJSON struct {
 }
 
 type modelJSON struct {
-	Type   string         `json:"type"`
-	Vocab  map[string]int `json:"vocab"`
-	Merges []string       `json:"merges"`
+	Type      string          `json:"type"`
+	Vocab     map[string]int  `json:"vocab"`
+	RawMerges json.RawMessage `json:"merges"`
 }
 
 type addedTokenJSON struct {
@@ -56,14 +56,10 @@ func LoadFromJSON(path string) (*BPETokenizer, error) {
 		return nil, fmt.Errorf("unsupported model type: %q (only BPE supported)", tj.Model.Type)
 	}
 
-	// Parse merges.
-	merges := make([]MergePair, 0, len(tj.Model.Merges))
-	for i, m := range tj.Model.Merges {
-		left, right, ok := strings.Cut(m, " ")
-		if !ok {
-			return nil, fmt.Errorf("invalid merge at index %d: %q", i, m)
-		}
-		merges = append(merges, MergePair{Left: left, Right: right})
+	// Parse merges — supports both ["a b", …] and [["a","b"], …] formats.
+	merges, err := parseMerges(tj.Model.RawMerges)
+	if err != nil {
+		return nil, fmt.Errorf("parse merges: %w", err)
 	}
 
 	// Detect byte-level BPE from pre-tokenizer config.
@@ -155,4 +151,40 @@ func buildNormalizer(n *normalizerJSON) NormalizerFunc {
 	default:
 		return nil
 	}
+}
+
+// parseMerges decodes merges from JSON, accepting either space-separated
+// strings (["a b", …]) or two-element arrays ([["a","b"], …]).
+func parseMerges(raw json.RawMessage) ([]MergePair, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	// Try []string first (most common).
+	var stringMerges []string
+	if err := json.Unmarshal(raw, &stringMerges); err == nil {
+		merges := make([]MergePair, 0, len(stringMerges))
+		for i, m := range stringMerges {
+			left, right, ok := strings.Cut(m, " ")
+			if !ok {
+				return nil, fmt.Errorf("invalid merge at index %d: %q", i, m)
+			}
+			merges = append(merges, MergePair{Left: left, Right: right})
+		}
+		return merges, nil
+	}
+
+	// Try [][]string (Gemma 3 format).
+	var arrayMerges [][]string
+	if err := json.Unmarshal(raw, &arrayMerges); err != nil {
+		return nil, fmt.Errorf("unsupported merges format: %w", err)
+	}
+	merges := make([]MergePair, 0, len(arrayMerges))
+	for i, pair := range arrayMerges {
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("invalid merge at index %d: expected 2 elements, got %d", i, len(pair))
+		}
+		merges = append(merges, MergePair{Left: pair[0], Right: pair[1]})
+	}
+	return merges, nil
 }

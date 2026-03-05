@@ -274,6 +274,70 @@ func TestGraph_Backward_GradientAccumulation(t *testing.T) {
 	}
 }
 
+// ---------- ClearMemo ----------
+
+func TestGraph_ClearMemo(t *testing.T) {
+	engine := compute.NewCPUEngine[int](numeric.IntOps{})
+	b := NewBuilder[int](engine)
+
+	in := b.Input([]int{2})
+	node := &mockNode{name: "n"}
+	b.AddNode(node, in)
+
+	g, err := b.Build(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("nil memo", func(t *testing.T) {
+		// ClearMemo before any Forward should not panic.
+		g.ClearMemo()
+	})
+
+	t.Run("after forward", func(t *testing.T) {
+		input, _ := tensor.New[int]([]int{2}, []int{1, 2})
+		_, err := g.Forward(context.Background(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if g.memo == nil {
+			t.Fatal("memo should be populated after Forward")
+		}
+
+		g.ClearMemo()
+
+		if g.memo != nil {
+			t.Error("memo should be nil after ClearMemo")
+		}
+	})
+
+	t.Run("forward after clear", func(t *testing.T) {
+		// Forward should still work after ClearMemo.
+		input, _ := tensor.New[int]([]int{2}, []int{3, 4})
+		out, err := g.Forward(context.Background(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if out == nil {
+			t.Error("output should not be nil")
+		}
+	})
+
+	t.Run("double clear", func(t *testing.T) {
+		input, _ := tensor.New[int]([]int{2}, []int{5, 6})
+		_, err := g.Forward(context.Background(), input)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		g.ClearMemo()
+		// Second clear on nil memo should not panic.
+		g.ClearMemo()
+	})
+}
+
 // ---------- AddGradient for all numeric types ----------
 
 func testAddGradientType[T tensor.Numeric](t *testing.T, typeName string, vals []T, grads []T) {

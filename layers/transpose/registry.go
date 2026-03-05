@@ -10,6 +10,7 @@ import (
 )
 
 // BuildTranspose constructs a Transpose node, reading the permutation from attributes.
+// If perm is absent, the ONNX default (reverse all axes) is applied at forward time.
 func BuildTranspose[T tensor.Numeric](
 	engine compute.Engine[T],
 	_ numeric.Arithmetic[T],
@@ -19,7 +20,9 @@ func BuildTranspose[T tensor.Numeric](
 ) (graph.Node[T], error) {
 	permAttr, ok := attributes["perm"]
 	if !ok {
-		return nil, errors.New("Transpose layer requires a 'perm' attribute")
+		// ONNX spec: when perm is absent, reverse all axes.
+		// Pass nil; resolved at forward time when input rank is known.
+		return New(engine, nil), nil
 	}
 
 	perm, ok := permAttr.([]any)

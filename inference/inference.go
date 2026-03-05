@@ -69,6 +69,8 @@ type loadOptions struct {
 	device    string
 	maxSeqLen int
 	registry  registry.ModelRegistry
+	backend   string // "" or "default" for standard engine, "tensorrt" for TRT
+	precision string // "" or "fp32" for float32, "fp16" for half precision (TRT only)
 }
 
 // WithCacheDir sets the model cache directory.
@@ -96,6 +98,24 @@ func WithMaxSeqLen(n int) Option {
 func WithRegistry(r registry.ModelRegistry) Option {
 	return func(o *loadOptions) {
 		o.registry = r
+	}
+}
+
+// WithBackend selects the inference backend. Supported values: "" or "default"
+// for the standard Engine path, "tensorrt" for TensorRT-optimized inference.
+// TensorRT requires the cuda build tag and a CUDA device.
+func WithBackend(backend string) Option {
+	return func(o *loadOptions) {
+		o.backend = backend
+	}
+}
+
+// WithPrecision sets the compute precision for the TensorRT backend.
+// Supported values: "" or "fp32" for full precision, "fp16" for half precision.
+// Has no effect when the backend is not "tensorrt".
+func WithPrecision(precision string) Option {
+	return func(o *loadOptions) {
+		o.precision = precision
 	}
 }
 
@@ -433,7 +453,35 @@ func parseDevice(device string) (devType string, deviceID int, err error) {
 		}
 		return "cuda", id, nil
 	}
-	return "", 0, fmt.Errorf("unsupported device %q: expected \"cpu\", \"cuda\", or \"cuda:N\"", device)
+	if device == "rocm" {
+		return "rocm", 0, nil
+	}
+	if strings.HasPrefix(device, "rocm:") {
+		idStr := device[len("rocm:"):]
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid device ID in %q: %w", device, err)
+		}
+		if id < 0 {
+			return "", 0, fmt.Errorf("negative device ID in %q", device)
+		}
+		return "rocm", id, nil
+	}
+	if device == "opencl" {
+		return "opencl", 0, nil
+	}
+	if strings.HasPrefix(device, "opencl:") {
+		idStr := device[len("opencl:"):]
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid device ID in %q: %w", device, err)
+		}
+		if id < 0 {
+			return "", 0, fmt.Errorf("negative device ID in %q", device)
+		}
+		return "opencl", id, nil
+	}
+	return "", 0, fmt.Errorf("unsupported device %q: expected \"cpu\", \"cuda\", \"cuda:N\", \"rocm\", \"rocm:N\", \"opencl\", or \"opencl:N\"", device)
 }
 
 // NewTestModel constructs a Model from pre-built components.

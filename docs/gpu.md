@@ -153,6 +153,73 @@ Layer 1 is prerequisite for everything. Layer 2a gives multi-GPU inference.
 Layer 2b gives multi-GPU training with CPU-based gradient exchange. Layer 3
 gives fast GPU-native gradient exchange.
 
+## cuDNN Integration (Phase 11)
+
+Phase 11 adds cuDNN-accelerated operations to GPUEngine. See
+[ADR-008](adr/008-cudnn-integration.md) for architecture decisions.
+
+### Status: COMPLETE (Phase 11, 2026-03-03)
+
+- `internal/cudnn/` -- CGo bindings for cuDNN handle, descriptors, forward ops
+- `compute/gpu_cudnn.go` -- non-interface GPUEngine methods:
+  - `Conv2dForward` -- cuDNN convolution with grouped conv, bias, IMPLICIT_GEMM
+  - `BatchNormForwardInference` -- spatial batch norm
+  - `CudnnActivationForward` -- ReLU, Sigmoid, Tanh
+  - `CudnnPoolingForward` -- Max, AvgIncPad, AvgExcPad
+  - `CudnnSoftmaxForward` -- channel-mode softmax
+
+cuDNN operations are non-interface methods (not part of Engine[T]) to avoid
+breaking changes. Layers that want cuDNN acceleration must type-assert to
+`*GPUEngine` and call these methods directly.
+
+## TensorRT Integration (Phase 12)
+
+Phase 12 adds TensorRT inference optimization. See
+[ADR-009](adr/009-tensorrt-integration.md) for architecture decisions.
+
+### Status: COMPLETE (Phase 12, 2026-03-03)
+
+- `internal/tensorrt/` -- CGo bindings via C++ shim (cshim/trt_capi.h/cpp)
+  - Logger, Builder, NetworkDefinition, BuilderConfig, Runtime, Engine, ExecutionContext
+  - Layer bindings: activation, elementwise, matmul, softmax, reduce, constant, shuffle, convolution
+- `inference/tensorrt_convert.go` -- graph-to-TRT converter
+  - Maps supported ops to TRT layers in topological order
+  - Returns UnsupportedOpError for unknown ops
+- `inference/tensorrt_cache.go` -- engine caching
+  - SHA-256 key from (modelID, precision, gpuArch)
+  - ~/.cache/zerfoo/tensorrt/ directory
+- `inference/tensorrt_pipeline.go` -- TRTInferenceEngine wrapper
+  - Forward() and Close() methods
+- `inference.WithBackend("tensorrt")` -- opt-in TRT backend
+- `inference.WithPrecision("fp16")` -- half-precision TRT builds
+
+## CUTLASS Flash Attention (Phase 13)
+
+**Status:** COMPLETE (2026-03-03)
+
+Flash attention fuses the Q*K^T -> scale -> softmax -> V weighting pipeline
+into a single tiled CUDA kernel. Memory drops from O(n^2) to O(n) and four
+kernel launches collapse to one.
+
+**Kernel** (`internal/cuda/kernels/flash_attention.cu`):
+- Online softmax via log-sum-exp trick (no full n x n scores matrix)
+- Shared memory staging for K/V tiles (BLOCK_SIZE=64)
+- Causal masking via tile skipping + per-element mask
+- MAX_HEAD_DIM=128 (covers Gemma, Llama, Mistral, Qwen, Phi)
+
+**Dispatch** (`layers/attention/flash_cuda.go` / `flash_nocuda.go`):
+- Build tags: `//go:build cuda && cutlass` / `!(cuda && cutlass)`
+- `ScaledDotProductAttention.Forward` calls `tryFlashForward` before naive path
+- Automatically used by GQA and MLA when mask is nil and data is on GPU
+- Falls back to naive attention for: CPU data, head_dim > 128, arbitrary masks
+
+**Scope limitations:**
+- Float32 only. FP16/BF16 deferred.
+- Forward pass only. Backward pass (training) deferred.
+- No variable-length batching.
+
+See [ADR-010](adr/010-cutlass-flash-attention.md) for architecture decisions.
+
 ## Architecture Advantages
 
 The existing codebase anticipated this extension:

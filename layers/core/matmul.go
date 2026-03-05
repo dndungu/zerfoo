@@ -42,32 +42,32 @@ func (m *MatMul[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 
 	a, b := inputs[0], inputs[1]
 
-	// Check for dimension mismatch and attempt transpose if needed
-	if a.Shape()[len(a.Shape())-1] != b.Shape()[0] {
-		// Check if this is a case where b needs to be transposed
-		if len(a.Shape()) >= 2 && len(b.Shape()) == 2 {
-			aInner := a.Shape()[len(a.Shape())-1]
-			bInner := b.Shape()[1]
+	aShape := a.Shape()
+	bShape := b.Shape()
 
-			// If a's inner dimension matches b's inner dimension, we might need to transpose b
-			if aInner == bInner {
-				bTransposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
-				if err != nil {
-					return nil, fmt.Errorf("failed to transpose second operand: %w", err)
-				}
+	if len(aShape) < 2 || len(bShape) < 2 {
+		return nil, fmt.Errorf("MatMul requires at least 2D tensors, got %dD and %dD", len(aShape), len(bShape))
+	}
 
-				result, err := m.engine.MatMul(ctx, a, bTransposed)
-				if err != nil {
-					return nil, err
-				}
-
-				m.outputShape = result.Shape()
-
-				return result, nil
+	// For a @ b, a's last dim must match b's second-to-last dim.
+	if aShape[len(aShape)-1] != bShape[len(bShape)-2] {
+		// Check if this is a case where b needs to be transposed (2D only).
+		if len(bShape) == 2 && aShape[len(aShape)-1] == bShape[1] {
+			bTransposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
+			if err != nil {
+				return nil, fmt.Errorf("failed to transpose second operand: %w", err)
 			}
+
+			result, err := m.engine.MatMul(ctx, a, bTransposed)
+			if err != nil {
+				return nil, err
+			}
+
+			m.outputShape = result.Shape()
+			return result, nil
 		}
 
-		return nil, fmt.Errorf("incompatible dimensions for matrix multiplication: %v x %v", a.Shape(), b.Shape())
+		return nil, fmt.Errorf("incompatible dimensions for matrix multiplication: %v x %v", aShape, bShape)
 	}
 
 	result, err := m.engine.MatMul(ctx, a, b)

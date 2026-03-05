@@ -52,15 +52,25 @@ func (t *Transpose[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNume
 	input := inputs[0]
 	shape := input.Shape()
 
+	// If perm is nil, use the ONNX default: reverse all axes.
+	perm := t.perm
+	if perm == nil {
+		perm = make([]int, len(shape))
+		for i := range perm {
+			perm[i] = len(shape) - 1 - i
+		}
+		t.perm = perm
+	}
+
 	outputShape := make([]int, len(shape))
-	for i, axis := range t.perm {
+	for i, axis := range perm {
 		outputShape[i] = shape[axis]
 	}
 
 	t.outputShape = outputShape
 
 	// Transpose the input tensor
-	transposed, err := t.engine.Transpose(ctx, inputs[0], t.perm)
+	transposed, err := t.engine.Transpose(ctx, inputs[0], perm)
 
 	return transposed, err
 }

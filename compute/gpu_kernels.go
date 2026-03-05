@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/zerfoo/zerfoo/internal/cuda"
-	"github.com/zerfoo/zerfoo/internal/cuda/kernels"
+	"github.com/zerfoo/zerfoo/internal/gpuapi"
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
 const f32Size = int(unsafe.Sizeof(float32(0)))
 
-// getDevicePtr returns a CUDA device pointer for the tensor's data.
+// getDevicePtr returns a GPU device pointer for the tensor's data.
 // If the tensor has GPUStorage, returns Ptr() directly (zero-copy).
 // If the tensor has CPUStorage, allocates device memory from the pool,
 // copies H2D, and returns a cleanup function that returns the buffer to the pool.
@@ -35,7 +34,7 @@ func getDevicePtr[T tensor.Numeric](e *GPUEngine[T], t *tensor.TensorNumeric[T])
 
 	aF32 := *(*[]float32)(unsafe.Pointer(&data))
 
-	if err := cuda.Memcpy(devPtr, unsafe.Pointer(&aF32[0]), byteSize, cuda.MemcpyHostToDevice); err != nil {
+	if err := e.runtime.Memcpy(devPtr, unsafe.Pointer(&aF32[0]), byteSize, gpuapi.MemcpyHostToDevice); err != nil {
 		e.pool.Free(e.deviceID, devPtr, byteSize)
 
 		return nil, nil, err
@@ -78,7 +77,7 @@ func gpuBinaryOp[T tensor.Numeric](
 	e *GPUEngine[T],
 	ctx context.Context,
 	a, b *tensor.TensorNumeric[T],
-	kernelFn func(devA, devB, devC unsafe.Pointer, n int, stream unsafe.Pointer) error,
+	kernelFn func(devA, devB, devC unsafe.Pointer, n int, stream gpuapi.Stream) error,
 	dst ...*tensor.TensorNumeric[T],
 ) (*tensor.TensorNumeric[T], error) {
 	var zero T
@@ -112,18 +111,10 @@ func gpuBinaryOp[T tensor.Numeric](
 		return nil, err
 	}
 
-	if err := kernelFn(devA, devB, devC, n, e.streamPtr()); err != nil {
+	if err := kernelFn(devA, devB, devC, n, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devC, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devC, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
@@ -133,7 +124,7 @@ func gpuBinaryOp[T tensor.Numeric](
 func gpuUnaryOp[T tensor.Numeric](
 	e *GPUEngine[T],
 	a *tensor.TensorNumeric[T],
-	kernelFn func(devA, devC unsafe.Pointer, n int, stream unsafe.Pointer) error,
+	kernelFn func(devA, devC unsafe.Pointer, n int, stream gpuapi.Stream) error,
 	dst ...*tensor.TensorNumeric[T],
 ) (*tensor.TensorNumeric[T], error) {
 	var zero T
@@ -157,18 +148,10 @@ func gpuUnaryOp[T tensor.Numeric](
 		return nil, err
 	}
 
-	if err := kernelFn(devA, devC, n, e.streamPtr()); err != nil {
+	if err := kernelFn(devA, devC, n, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devC, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devC, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
@@ -179,7 +162,7 @@ func gpuScalarOp[T tensor.Numeric](
 	e *GPUEngine[T],
 	a *tensor.TensorNumeric[T],
 	scalar float32,
-	kernelFn func(devA unsafe.Pointer, scalar float32, devC unsafe.Pointer, n int, stream unsafe.Pointer) error,
+	kernelFn func(devA unsafe.Pointer, scalar float32, devC unsafe.Pointer, n int, stream gpuapi.Stream) error,
 	dst ...*tensor.TensorNumeric[T],
 ) (*tensor.TensorNumeric[T], error) {
 	var zero T
@@ -203,18 +186,10 @@ func gpuScalarOp[T tensor.Numeric](
 		return nil, err
 	}
 
-	if err := kernelFn(devA, scalar, devC, n, e.streamPtr()); err != nil {
+	if err := kernelFn(devA, scalar, devC, n, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devC, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devC, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, a.Shape(), devC, n, dst...)
@@ -242,7 +217,7 @@ func (e *GPUEngine[T]) gpuAdd(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 	e.setDevice()
 
-	return gpuBinaryOp(e, ctx, a, b, kernels.Add, dst...)
+	return gpuBinaryOp(e, ctx, a, b, e.kernels.Add, dst...)
 }
 
 func (e *GPUEngine[T]) gpuSub(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -252,7 +227,7 @@ func (e *GPUEngine[T]) gpuSub(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 	e.setDevice()
 
-	return gpuBinaryOp(e, ctx, a, b, kernels.Sub, dst...)
+	return gpuBinaryOp(e, ctx, a, b, e.kernels.Sub, dst...)
 }
 
 func (e *GPUEngine[T]) gpuMul(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -262,7 +237,7 @@ func (e *GPUEngine[T]) gpuMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 	e.setDevice()
 
-	return gpuBinaryOp(e, ctx, a, b, kernels.Mul, dst...)
+	return gpuBinaryOp(e, ctx, a, b, e.kernels.Mul, dst...)
 }
 
 func (e *GPUEngine[T]) gpuDiv(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -272,7 +247,7 @@ func (e *GPUEngine[T]) gpuDiv(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 	e.setDevice()
 
-	return gpuBinaryOp(e, ctx, a, b, kernels.Div, dst...)
+	return gpuBinaryOp(e, ctx, a, b, e.kernels.Div, dst...)
 }
 
 func (e *GPUEngine[T]) gpuPow(ctx context.Context, base, exponent *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -282,7 +257,7 @@ func (e *GPUEngine[T]) gpuPow(ctx context.Context, base, exponent *tensor.Tensor
 
 	e.setDevice()
 
-	return gpuBinaryOp(e, ctx, base, exponent, kernels.Pow, dst...)
+	return gpuBinaryOp(e, ctx, base, exponent, e.kernels.Pow, dst...)
 }
 
 func (e *GPUEngine[T]) gpuExp(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -292,7 +267,7 @@ func (e *GPUEngine[T]) gpuExp(ctx context.Context, a *tensor.TensorNumeric[T], d
 
 	e.setDevice()
 
-	return gpuUnaryOp(e, a, kernels.Exp, dst...)
+	return gpuUnaryOp(e, a, e.kernels.Exp, dst...)
 }
 
 func (e *GPUEngine[T]) gpuLog(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -302,7 +277,7 @@ func (e *GPUEngine[T]) gpuLog(ctx context.Context, a *tensor.TensorNumeric[T], d
 
 	e.setDevice()
 
-	return gpuUnaryOp(e, a, kernels.Log, dst...)
+	return gpuUnaryOp(e, a, e.kernels.Log, dst...)
 }
 
 func (e *GPUEngine[T]) gpuSqrt(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -312,7 +287,7 @@ func (e *GPUEngine[T]) gpuSqrt(ctx context.Context, a *tensor.TensorNumeric[T], 
 
 	e.setDevice()
 
-	return gpuUnaryOp(e, a, kernels.Sqrt, dst...)
+	return gpuUnaryOp(e, a, e.kernels.Sqrt, dst...)
 }
 
 func (e *GPUEngine[T]) gpuRsqrt(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -322,7 +297,7 @@ func (e *GPUEngine[T]) gpuRsqrt(ctx context.Context, a *tensor.TensorNumeric[T],
 
 	e.setDevice()
 
-	return gpuUnaryOp(e, a, kernels.Rsqrt, dst...)
+	return gpuUnaryOp(e, a, e.kernels.Rsqrt, dst...)
 }
 
 func (e *GPUEngine[T]) gpuTanh(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -332,7 +307,7 @@ func (e *GPUEngine[T]) gpuTanh(ctx context.Context, a *tensor.TensorNumeric[T], 
 
 	e.setDevice()
 
-	return gpuUnaryOp(e, a, kernels.Tanh, dst...)
+	return gpuUnaryOp(e, a, e.kernels.Tanh, dst...)
 }
 
 func (e *GPUEngine[T]) gpuTanhPrime(ctx context.Context, a, upstream *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -342,7 +317,7 @@ func (e *GPUEngine[T]) gpuTanhPrime(ctx context.Context, a, upstream *tensor.Ten
 
 	e.setDevice()
 
-	return gpuBinaryOp(e, ctx, a, upstream, kernels.TanhPrime, dst...)
+	return gpuBinaryOp(e, ctx, a, upstream, e.kernels.TanhPrime, dst...)
 }
 
 func (e *GPUEngine[T]) gpuAddScalar(ctx context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -352,7 +327,7 @@ func (e *GPUEngine[T]) gpuAddScalar(ctx context.Context, a *tensor.TensorNumeric
 
 	e.setDevice()
 
-	return gpuScalarOp(e, a, toFloat32(scalar), kernels.AddScalar, dst...)
+	return gpuScalarOp(e, a, toFloat32(scalar), e.kernels.AddScalar, dst...)
 }
 
 func (e *GPUEngine[T]) gpuMulScalar(ctx context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -362,7 +337,7 @@ func (e *GPUEngine[T]) gpuMulScalar(ctx context.Context, a *tensor.TensorNumeric
 
 	e.setDevice()
 
-	return gpuScalarOp(e, a, toFloat32(scalar), kernels.MulScalar, dst...)
+	return gpuScalarOp(e, a, toFloat32(scalar), e.kernels.MulScalar, dst...)
 }
 
 func (e *GPUEngine[T]) gpuDivScalar(ctx context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -372,7 +347,7 @@ func (e *GPUEngine[T]) gpuDivScalar(ctx context.Context, a *tensor.TensorNumeric
 
 	e.setDevice()
 
-	return gpuScalarOp(e, a, toFloat32(scalar), kernels.DivScalar, dst...)
+	return gpuScalarOp(e, a, toFloat32(scalar), e.kernels.DivScalar, dst...)
 }
 
 func (e *GPUEngine[T]) gpuFill(ctx context.Context, t *tensor.TensorNumeric[T], value T) error {
@@ -390,18 +365,10 @@ func (e *GPUEngine[T]) gpuFill(ctx context.Context, t *tensor.TensorNumeric[T], 
 		return e.cpu.Fill(ctx, t, value)
 	}
 
-	if err := kernels.Fill(devPtr, toFloat32(value), n, e.streamPtr()); err != nil {
+	if err := e.kernels.Fill(devPtr, toFloat32(value), n, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devPtr, byteSize)
 
 		return err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devPtr, byteSize)
-
-			return err
-		}
 	}
 
 	gs, err := tensor.NewGPUStorageFromPtr[T](devPtr, n, e.deviceID)
@@ -492,18 +459,10 @@ func (e *GPUEngine[T]) gpuSum(ctx context.Context, a *tensor.TensorNumeric[T], a
 		return e.cpu.Sum(ctx, a, axis, keepDims, dst...)
 	}
 
-	if err := kernels.SumAxis(devIn, devOut, outer, inner, axisSize, e.streamPtr()); err != nil {
+	if err := e.kernels.SumAxis(devIn, devOut, outer, inner, axisSize, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devOut, outByteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devOut, outByteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, newShape, devOut, numStripes, dst...)
@@ -601,18 +560,10 @@ func (e *GPUEngine[T]) gpuSoftmax(ctx context.Context, a *tensor.TensorNumeric[T
 		return e.cpu.Softmax(ctx, a, axis, dst...)
 	}
 
-	if err := kernels.Softmax(devIn, devOut, outer, inner, axisSize, e.streamPtr()); err != nil {
+	if err := e.kernels.Softmax(devIn, devOut, outer, inner, axisSize, e.stream); err != nil {
 		e.pool.Free(e.deviceID, devOut, byteSize)
 
 		return nil, err
-	}
-
-	if e.stream != nil {
-		if err := e.stream.Synchronize(); err != nil {
-			e.pool.Free(e.deviceID, devOut, byteSize)
-
-			return nil, err
-		}
 	}
 
 	return makeGPUResult[T](e, shape, devOut, n, dst...)

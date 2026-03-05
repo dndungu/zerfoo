@@ -205,13 +205,13 @@ func (gen *Generator[T]) sampleFromLogits(
 	return sampleFromDistribution(logitsF64), nil
 }
 
-// idsToTensor converts token IDs to a [1, seqLen, 1] input tensor.
+// idsToTensor converts token IDs to a [1, seqLen] input tensor.
 func (gen *Generator[T]) idsToTensor(ids []int) (*tensor.TensorNumeric[T], error) {
 	data := make([]T, len(ids))
 	for i, id := range ids {
 		data[i] = T(id)
 	}
-	return tensor.New([]int{1, len(ids), 1}, data)
+	return tensor.New([]int{1, len(ids)}, data)
 }
 
 // checkStop checks if the decoded generated tokens contain any stop string.

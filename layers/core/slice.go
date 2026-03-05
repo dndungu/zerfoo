@@ -28,18 +28,38 @@ func NewSlice[T tensor.Numeric](engine compute.Engine[T], starts, ends, axes, st
 }
 
 // Forward applies the slice operation to the input tensor.
+// Accepts 1 input (attribute-based, opset 1-9) or 3-5 inputs
+// (ONNX opset 10+: data, starts, ends, [axes], [steps]).
 func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if len(inputs) != 1 {
-		return nil, fmt.Errorf("Slice expects 1 input, got %d", len(inputs))
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("Slice expects at least 1 input, got 0")
 	}
+
 	input := inputs[0]
 	shape := input.Shape()
 	ndim := len(shape)
 
-	// Resolve axes (default: 0..len(starts)-1).
+	// Resolve starts/ends/axes from either attributes or input tensors.
+	starts := s.starts
+	ends := s.ends
 	axes := s.axes
-	if axes == nil {
-		axes = make([]int64, len(s.starts))
+
+	switch {
+	case len(inputs) >= 3:
+		// ONNX opset 10+: starts and ends come as input tensors.
+		starts = tensorToInt64(inputs[1])
+		ends = tensorToInt64(inputs[2])
+		if len(inputs) >= 4 {
+			axes = tensorToInt64(inputs[3])
+		}
+		// steps (inputs[4]) are ignored (only step=1 is supported).
+	case len(inputs) == 2:
+		// Hybrid: starts from input tensor, ends/axes/steps from attributes.
+		starts = tensorToInt64(inputs[1])
+	}
+
+	if axes == nil && starts != nil {
+		axes = make([]int64, len(starts))
 		for i := range axes {
 			axes[i] = int64(i)
 		}
@@ -56,11 +76,11 @@ func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 		if dim < 0 {
 			dim += ndim
 		}
-		start := int(s.starts[i])
+		start := int(starts[i])
 		if start < 0 {
 			start += shape[dim]
 		}
-		end := int(s.ends[i])
+		end := int(ends[i])
 		if end < 0 {
 			end += shape[dim]
 		}
@@ -69,6 +89,12 @@ func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 		}
 		if start < 0 {
 			start = 0
+		}
+		if start > shape[dim] {
+			start = shape[dim]
+		}
+		if start > end {
+			end = start // empty range
 		}
 		ranges[dim] = [2]int{start, end}
 	}
@@ -86,6 +112,16 @@ func (s *Slice[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 	}
 	s.outputShape = out.Shape()
 	return out, nil
+}
+
+// tensorToInt64 converts a numeric tensor's data to []int64.
+func tensorToInt64[T tensor.Numeric](t *tensor.TensorNumeric[T]) []int64 {
+	data := t.Data()
+	out := make([]int64, len(data))
+	for i, v := range data {
+		out[i] = int64(v)
+	}
+	return out
 }
 
 // Backward returns nil (not required for inference).

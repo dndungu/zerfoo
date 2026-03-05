@@ -1,28 +1,30 @@
-//go:build cuda
+//go:build cuda || rocm || opencl
 
 package tensor
 
 import (
 	"fmt"
 	"log"
+	"runtime"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/device"
-	"github.com/zerfoo/zerfoo/internal/cuda"
+	"github.com/zerfoo/zerfoo/internal/gpuapi"
 )
 
-// GPUStorage is a CUDA device-backed Storage implementation.
+// GPUStorage is a GPU device-backed Storage implementation.
 // Slice() copies data from the GPU to a new CPU slice (not zero-copy).
 // Set() copies data from a CPU slice to the GPU.
 // Each GPUStorage tracks which device it resides on via deviceID.
 type GPUStorage[T Numeric] struct {
-	devicePtr unsafe.Pointer // CUDA device pointer from cudaMalloc
+	devicePtr unsafe.Pointer // GPU device pointer
 	length    int            // number of elements
 	byteSize  int            // total bytes = length * sizeof(T)
-	deviceID  int            // CUDA device ordinal
+	deviceID  int            // GPU device ordinal
+	runtime   gpuapi.Runtime // GPU runtime for memory operations
 }
 
-// NewGPUStorage allocates CUDA device memory for the given number of elements
+// NewGPUStorage allocates GPU device memory for the given number of elements
 // on the specified device. An optional deviceID selects the GPU (default 0).
 func NewGPUStorage[T Numeric](length int, deviceID ...int) (*GPUStorage[T], error) {
 	dev := 0
@@ -30,7 +32,8 @@ func NewGPUStorage[T Numeric](length int, deviceID ...int) (*GPUStorage[T], erro
 		dev = deviceID[0]
 	}
 
-	if err := cuda.SetDevice(dev); err != nil {
+	rt := getDefaultRuntime()
+	if err := rt.SetDevice(dev); err != nil {
 		return nil, err
 	}
 
@@ -38,20 +41,24 @@ func NewGPUStorage[T Numeric](length int, deviceID ...int) (*GPUStorage[T], erro
 	elemSize := int(unsafe.Sizeof(zero))
 	byteSize := length * elemSize
 
-	devPtr, err := cuda.Malloc(byteSize)
+	devPtr, err := rt.Malloc(byteSize)
 	if err != nil {
 		return nil, err
 	}
 
-	return &GPUStorage[T]{
+	gs := &GPUStorage[T]{
 		devicePtr: devPtr,
 		length:    length,
 		byteSize:  byteSize,
 		deviceID:  dev,
-	}, nil
+		runtime:   rt,
+	}
+	runtime.SetFinalizer(gs, func(s *GPUStorage[T]) { _ = s.Free() })
+
+	return gs, nil
 }
 
-// NewGPUStorageFromSlice allocates CUDA device memory, copies data from a CPU
+// NewGPUStorageFromSlice allocates GPU device memory, copies data from a CPU
 // slice, and returns a GPUStorage on the specified device. An optional
 // deviceID selects the GPU (default 0).
 func NewGPUStorageFromSlice[T Numeric](data []T, deviceID ...int) (*GPUStorage[T], error) {
@@ -62,9 +69,9 @@ func NewGPUStorageFromSlice[T Numeric](data []T, deviceID ...int) (*GPUStorage[T
 
 	if len(data) > 0 {
 		src := unsafe.Pointer(unsafe.SliceData(data))
-		if err := cuda.Memcpy(s.devicePtr, src, s.byteSize, cuda.MemcpyHostToDevice); err != nil {
+		if err := s.runtime.Memcpy(s.devicePtr, src, s.byteSize, gpuapi.MemcpyHostToDevice); err != nil {
 			// Clean up on failure
-			_ = cuda.Free(s.devicePtr)
+			_ = s.runtime.Free(s.devicePtr)
 
 			return nil, err
 		}
@@ -73,9 +80,8 @@ func NewGPUStorageFromSlice[T Numeric](data []T, deviceID ...int) (*GPUStorage[T
 	return s, nil
 }
 
-// NewGPUStorageFromPtr wraps an existing CUDA device pointer as a GPUStorage.
-// The caller is responsible for the lifetime of the device pointer. The
-// GPUStorage does NOT free the pointer when Free() is called.
+// NewGPUStorageFromPtr wraps an existing GPU device pointer as a GPUStorage.
+// A GC finalizer ensures the device memory is freed if Release() is not called.
 // An optional deviceID records which device the pointer belongs to (default 0).
 func NewGPUStorageFromPtr[T Numeric](devPtr unsafe.Pointer, length int, deviceID ...int) (*GPUStorage[T], error) {
 	dev := 0
@@ -86,18 +92,22 @@ func NewGPUStorageFromPtr[T Numeric](devPtr unsafe.Pointer, length int, deviceID
 	var zero T
 	elemSize := int(unsafe.Sizeof(zero))
 
-	return &GPUStorage[T]{
+	gs := &GPUStorage[T]{
 		devicePtr: devPtr,
 		length:    length,
 		byteSize:  length * elemSize,
 		deviceID:  dev,
-	}, nil
+		runtime:   getDefaultRuntime(),
+	}
+	runtime.SetFinalizer(gs, func(s *GPUStorage[T]) { _ = s.Free() })
+
+	return gs, nil
 }
 
 // Len returns the number of elements.
 func (s *GPUStorage[T]) Len() int { return s.length }
 
-// DeviceID returns the CUDA device ordinal this storage resides on.
+// DeviceID returns the GPU device ordinal this storage resides on.
 func (s *GPUStorage[T]) DeviceID() int { return s.deviceID }
 
 // TrySlice copies device memory to a new CPU slice.
@@ -107,12 +117,12 @@ func (s *GPUStorage[T]) TrySlice() ([]T, error) {
 		return []T{}, nil
 	}
 
-	_ = cuda.SetDevice(s.deviceID)
+	_ = s.runtime.SetDevice(s.deviceID)
 
 	host := make([]T, s.length)
 	dst := unsafe.Pointer(unsafe.SliceData(host))
 
-	if err := cuda.Memcpy(dst, s.devicePtr, s.byteSize, cuda.MemcpyDeviceToHost); err != nil {
+	if err := s.runtime.Memcpy(dst, s.devicePtr, s.byteSize, gpuapi.MemcpyDeviceToHost); err != nil {
 		return nil, fmt.Errorf("GPUStorage.TrySlice: %w", err)
 	}
 
@@ -136,16 +146,16 @@ func (s *GPUStorage[T]) Slice() []T {
 // If the new slice has a different length, the old device memory is freed and
 // new memory is allocated. Returns an error instead of panicking on failure.
 func (s *GPUStorage[T]) TrySet(data []T) error {
-	_ = cuda.SetDevice(s.deviceID)
+	_ = s.runtime.SetDevice(s.deviceID)
 
 	var zero T
 	elemSize := int(unsafe.Sizeof(zero))
 	newByteSize := len(data) * elemSize
 
 	if len(data) != s.length {
-		_ = cuda.Free(s.devicePtr)
+		_ = s.runtime.Free(s.devicePtr)
 
-		ptr, err := cuda.Malloc(newByteSize)
+		ptr, err := s.runtime.Malloc(newByteSize)
 		if err != nil {
 			s.devicePtr = nil
 			s.length = 0
@@ -161,7 +171,7 @@ func (s *GPUStorage[T]) TrySet(data []T) error {
 
 	if len(data) > 0 {
 		src := unsafe.Pointer(unsafe.SliceData(data))
-		if err := cuda.Memcpy(s.devicePtr, src, s.byteSize, cuda.MemcpyHostToDevice); err != nil {
+		if err := s.runtime.Memcpy(s.devicePtr, src, s.byteSize, gpuapi.MemcpyHostToDevice); err != nil {
 			return fmt.Errorf("GPUStorage.TrySet: memcpy: %w", err)
 		}
 	}
@@ -177,20 +187,20 @@ func (s *GPUStorage[T]) Set(data []T) {
 	}
 }
 
-// DeviceType returns device.CUDA.
-func (s *GPUStorage[T]) DeviceType() device.Type { return device.CUDA }
+// DeviceType returns the device type for this storage.
+func (s *GPUStorage[T]) DeviceType() device.Type { return s.runtime.DeviceType() }
 
-// Ptr returns the raw CUDA device pointer.
+// Ptr returns the raw GPU device pointer.
 func (s *GPUStorage[T]) Ptr() unsafe.Pointer { return s.devicePtr }
 
-// Free releases the CUDA device memory. After calling Free, the storage must
+// Free releases the GPU device memory. After calling Free, the storage must
 // not be used.
 func (s *GPUStorage[T]) Free() error {
 	if s.devicePtr == nil {
 		return nil
 	}
 
-	err := cuda.Free(s.devicePtr)
+	err := s.runtime.Free(s.devicePtr)
 	s.devicePtr = nil
 	s.length = 0
 	s.byteSize = 0
