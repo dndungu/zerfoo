@@ -340,7 +340,7 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
 - [x] S29.3.1 Integration tests  Owner: TBD  Est: 30m
   - All downstream tests (compute, layers/*) pass with SIMD-backed GemmF32.
 
-- [ ] T29.4 NEON Q4 dot product kernel  Owner: TBD  Est: 3h
+- [ ] T29.4 NEON Q4 dot product kernel  Owner: TBD  Est: 3h  **DEFERRED**: dequantize+SgemmSimd path sufficient
   - Deferred: Q4/Q8 GEMM already uses dequantize + SgemmSimd path.
   - A dedicated Q4 NEON dot product would further optimize but is not critical.
 
@@ -410,7 +410,7 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
 
 ### E32: Quantized CUDA Kernel (O41)
 
-- [ ] T32.1 CUDA Q4_0 dequant-GEMM kernel  Owner: TBD  Est: 4h
+- [ ] T32.1 CUDA Q4_0 dequant-GEMM kernel  Owner: TBD  Est: 4h  **DEFERRED**: requires GPU hardware
   - Create `internal/cuda/kernels/gemm_quant.cu` with a kernel that:
     1. Loads Q4_0 blocks from global memory into shared memory.
     2. Dequantizes 32 values per thread block.
