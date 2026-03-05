@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -55,27 +56,30 @@ type PredictionResult struct {
 }
 
 func main() {
-	// Check if we should use the new CLI framework
-	if len(os.Args) > 1 && (os.Args[1] == "--new-cli" || os.Getenv("ZERFOO_USE_NEW_CLI") == "true") {
-		if err := runNewCLI(); err != nil {
-			log.Printf("CLI execution failed: %v", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// Legacy behavior for backward compatibility
-	if err := runLegacy(); err != nil {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
 		log.Printf("Prediction failed: %v", err)
 		os.Exit(1)
 	}
 }
 
-func runLegacy() error {
-	config := parsePredictFlags()
+func run(args []string, stdout io.Writer) error {
+	// Check for new CLI mode.
+	for _, arg := range args {
+		if arg == "--new-cli" {
+			return runNewCLI(args)
+		}
+	}
+	if os.Getenv("ZERFOO_USE_NEW_CLI") == "true" {
+		return runNewCLI(args)
+	}
+
+	config, err := parseFlags(args)
+	if err != nil {
+		return err
+	}
 
 	if config.Verbose {
-		log.Printf("Starting prediction with config: %+v", config)
+		_, _ = fmt.Fprintf(stdout, "Starting prediction with config: %+v\n", config)
 	}
 
 	result := &PredictionResult{
@@ -99,11 +103,11 @@ func runLegacy() error {
 	}
 
 	result.Success = true
-	log.Printf("Prediction completed successfully in %v", result.Duration)
+	_, _ = fmt.Fprintf(stdout, "Prediction completed successfully in %v\n", result.Duration)
 	return nil
 }
 
-func runNewCLI() error {
+func runNewCLI(args []string) error {
 	coord := shutdown.New()
 	ctx, cancel := cli.SignalContext(context.Background(), coord)
 	defer cancel()
@@ -114,8 +118,6 @@ func runNewCLI() error {
 	predictCmd := cli.NewPredictCommand(modelRegistry, func(f float64) float32 { return float32(f) }, func(v float32) float64 { return float64(v) })
 	cliApp.RegisterCommand(predictCmd)
 
-	// Filter out --new-cli flag.
-	args := os.Args[1:]
 	filteredArgs := make([]string, 0, len(args))
 	for _, arg := range args {
 		if arg != "--new-cli" {
@@ -126,29 +128,32 @@ func runNewCLI() error {
 	return cliApp.Run(ctx, append([]string{"predict"}, filteredArgs...))
 }
 
-func parsePredictFlags() *PredictConfig {
+func parseFlags(args []string) (*PredictConfig, error) {
 	config := &PredictConfig{}
+	fs := flag.NewFlagSet("zerfoo-predict", flag.ContinueOnError)
 
 	// Input/Output flags
-	flag.StringVar(&config.DataPath, "data", "", "Path to input data (required)")
-	flag.StringVar(&config.ModelPath, "model", "", "Path to trained model (required)")
-	flag.StringVar(&config.OutputPath, "output", "", "Output path for predictions (required)")
+	fs.StringVar(&config.DataPath, "data", "", "Path to input data (required)")
+	fs.StringVar(&config.ModelPath, "model", "", "Path to trained model (required)")
+	fs.StringVar(&config.OutputPath, "output", "", "Output path for predictions (required)")
 
 	// Prediction options
-	flag.IntVar(&config.BatchSize, "batch-size", 10000, "Prediction batch size")
-	flag.StringVar(&config.OutputFormat, "format", "csv", "Output format (csv, json, parquet)")
-	flag.BoolVar(&config.IncludeProbs, "include-probs", false, "Include prediction probabilities")
+	fs.IntVar(&config.BatchSize, "batch-size", 10000, "Prediction batch size")
+	fs.StringVar(&config.OutputFormat, "format", "csv", "Output format (csv, json, parquet)")
+	fs.BoolVar(&config.IncludeProbs, "include-probs", false, "Include prediction probabilities")
 
 	// Data processing
-	featureColumnsFlag := flag.String("features", "", "Comma-separated feature column names (default: auto-detect)")
-	flag.StringVar(&config.IDColumn, "id-col", "id", "ID column name")
-	flag.StringVar(&config.GroupColumn, "group-col", "", "Optional grouping column name (e.g., time periods, batches)")
+	featureColumnsFlag := fs.String("features", "", "Comma-separated feature column names (default: auto-detect)")
+	fs.StringVar(&config.IDColumn, "id-col", "id", "ID column name")
+	fs.StringVar(&config.GroupColumn, "group-col", "", "Optional grouping column name (e.g., time periods, batches)")
 
 	// Execution options
-	flag.BoolVar(&config.Verbose, "verbose", false, "Verbose output")
-	flag.BoolVar(&config.Overwrite, "overwrite", false, "Overwrite existing output file")
+	fs.BoolVar(&config.Verbose, "verbose", false, "Verbose output")
+	fs.BoolVar(&config.Overwrite, "overwrite", false, "Overwrite existing output file")
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
 
 	// Process feature columns
 	if *featureColumnsFlag != "" {
@@ -158,23 +163,25 @@ func parsePredictFlags() *PredictConfig {
 		}
 	}
 
-	// Validate required flags
+	return config, validateConfig(config)
+}
+
+func validateConfig(config *PredictConfig) error {
 	if config.DataPath == "" {
-		log.Fatal("Data path is required (-data)")
+		return fmt.Errorf("data path is required (-data)")
 	}
 	if config.ModelPath == "" {
-		log.Fatal("Model path is required (-model)")
+		return fmt.Errorf("model path is required (-model)")
 	}
 	if config.OutputPath == "" {
-		log.Fatal("Output path is required (-output)")
+		return fmt.Errorf("output path is required (-output)")
 	}
 
-	// Check if output exists and overwrite flag
 	if _, err := os.Stat(config.OutputPath); err == nil && !config.Overwrite {
-		log.Fatalf("Output file exists and -overwrite not specified: %s", config.OutputPath)
+		return fmt.Errorf("output file exists and -overwrite not specified: %s", config.OutputPath)
 	}
 
-	return config
+	return nil
 }
 
 func runPrediction(config *PredictConfig, result *PredictionResult) error {
@@ -258,7 +265,7 @@ func generateCSVPredictions(config *PredictConfig, result *PredictionResult) err
 	}
 
 	// Write placeholder data
-	for i := 0; i < result.NumSamples; i++ {
+	for i := range result.NumSamples {
 		row := []string{
 			fmt.Sprintf("id_%06d", i),
 			fmt.Sprintf("%.6f", 0.5+float64(i%100)/10000.0), // Placeholder prediction
@@ -291,7 +298,7 @@ func generateJSONPredictions(config *PredictConfig, result *PredictionResult) er
 
 	var predictions []PredictionRow
 
-	for i := 0; i < min(1000, result.NumSamples); i++ { // Limit for JSON output
+	for i := range min(1000, result.NumSamples) { // Limit for JSON output
 		row := PredictionRow{
 			ID:         fmt.Sprintf("id_%06d", i),
 			Prediction: 0.5 + float64(i%100)/10000.0,
@@ -314,7 +321,7 @@ func generateJSONPredictions(config *PredictConfig, result *PredictionResult) er
 		return fmt.Errorf("failed to marshal predictions: %w", err)
 	}
 
-	return os.WriteFile(config.OutputPath, data, 0600)
+	return os.WriteFile(config.OutputPath, data, 0o600)
 }
 
 func savePredictionResult(config *PredictConfig, result *PredictionResult) {
@@ -329,7 +336,7 @@ func savePredictionResult(config *PredictConfig, result *PredictionResult) {
 		return
 	}
 
-	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+	if err := os.WriteFile(metaPath, data, 0o600); err != nil {
 		log.Printf("Failed to save prediction metadata: %v", err)
 		return
 	}
@@ -337,12 +344,4 @@ func savePredictionResult(config *PredictConfig, result *PredictionResult) {
 	if config.Verbose {
 		log.Printf("Prediction metadata saved to: %s", metaPath)
 	}
-}
-
-// Utility functions
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
