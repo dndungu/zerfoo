@@ -3,13 +3,129 @@
 package kernels
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/internal/cuda"
-	"github.com/zerfoo/zerfoo/tensor"
 )
+
+// quantizeQ4 performs Q4_0 quantization inline (avoids tensor import cycle).
+// Returns packed bytes (18 bytes per block of 32 values) and dequantized reference.
+func quantizeQ4(src []float32) (packed []byte, dequant []float32) {
+	const blockSize = 32
+	n := len(src)
+	nBlocks := (n + blockSize - 1) / blockSize
+	packed = make([]byte, nBlocks*18)
+	dequant = make([]float32, n)
+
+	for bi := range nBlocks {
+		offset := bi * blockSize
+
+		// Find absmax.
+		var absMax float32
+		for j := range blockSize {
+			idx := offset + j
+			if idx < n {
+				if av := float32(math.Abs(float64(src[idx]))); av > absMax {
+					absMax = av
+				}
+			}
+		}
+
+		// Compute scale.
+		var scale float32
+		if absMax > 0 {
+			scale = absMax / 7.0
+		}
+
+		// Convert scale to float16 bits (IEEE 754 half precision).
+		scaleBits := float32ToFloat16Bits(scale)
+
+		blkOff := bi * 18
+		binary.LittleEndian.PutUint16(packed[blkOff:blkOff+2], scaleBits)
+
+		// Quantize and pack.
+		var invScale float32
+		if scale > 0 {
+			invScale = 1.0 / scale
+		}
+		for j := 0; j < blockSize; j += 2 {
+			var v0, v1 float32
+			if offset+j < n {
+				v0 = src[offset+j]
+			}
+			if offset+j+1 < n {
+				v1 = src[offset+j+1]
+			}
+
+			q0 := clampQ4(int(math.Round(float64(v0 * invScale))))
+			q1 := clampQ4(int(math.Round(float64(v1 * invScale))))
+
+			packed[blkOff+2+j/2] = byte(q0+8) | (byte(q1+8) << 4)
+		}
+
+		// Dequantize for reference.
+		f16Scale := float16BitsToFloat32(scaleBits)
+		for j := 0; j < blockSize; j += 2 {
+			p := packed[blkOff+2+j/2]
+			d0 := float32(int(p&0x0F)-8) * f16Scale
+			d1 := float32(int(p>>4)-8) * f16Scale
+			if offset+j < n {
+				dequant[offset+j] = d0
+			}
+			if offset+j+1 < n {
+				dequant[offset+j+1] = d1
+			}
+		}
+	}
+	return packed, dequant
+}
+
+func clampQ4(v int) int {
+	if v < -8 {
+		return -8
+	}
+	if v > 7 {
+		return 7
+	}
+	return v
+}
+
+// float32ToFloat16Bits converts a float32 to IEEE 754 half-precision bits.
+func float32ToFloat16Bits(f float32) uint16 {
+	b := math.Float32bits(f)
+	sign := (b >> 16) & 0x8000
+	exp := int((b>>23)&0xFF) - 127 + 15
+	frac := b & 0x7FFFFF
+
+	if exp <= 0 {
+		return uint16(sign) // flush to zero
+	}
+	if exp >= 31 {
+		return uint16(sign | 0x7C00) // infinity
+	}
+	return uint16(sign | uint32(exp)<<10 | (frac >> 13))
+}
+
+// float16BitsToFloat32 converts IEEE 754 half-precision bits to float32.
+func float16BitsToFloat32(bits uint16) float32 {
+	sign := uint32(bits>>15) & 1
+	exp := uint32(bits>>10) & 0x1F
+	frac := uint32(bits) & 0x3FF
+
+	if exp == 0 {
+		return 0
+	}
+	if exp == 31 {
+		return float32(math.Inf(1))
+	}
+
+	f32Exp := exp - 15 + 127
+	f32Bits := (sign << 31) | (f32Exp << 23) | (frac << 13)
+	return math.Float32frombits(f32Bits)
+}
 
 func TestGemmQ4F32_Correctness(t *testing.T) {
 	// Small matrix: M=2, K=32, N=4.
@@ -23,8 +139,7 @@ func TestGemmQ4F32_Correctness(t *testing.T) {
 	}
 
 	// Quantize A to Q4.
-	aQ4 := tensor.QuantizeQ4(aF32)
-	aBytes := aQ4.RawBytes()
+	aBytes, aDequant := quantizeQ4(aF32)
 
 	// Create B matrix.
 	bF32 := make([]float32, K*N)
@@ -33,7 +148,6 @@ func TestGemmQ4F32_Correctness(t *testing.T) {
 	}
 
 	// Compute reference: dequant(A) * B on CPU.
-	aDequant := aQ4.Slice()
 	ref := make([]float32, M*N)
 	for i := range M {
 		for j := range N {
@@ -104,9 +218,7 @@ func TestGemmQ4F32_LargerMatrix(t *testing.T) {
 	for i := range aF32 {
 		aF32[i] = float32(i%11-5) * 0.05
 	}
-	aQ4 := tensor.QuantizeQ4(aF32)
-	aBytes := aQ4.RawBytes()
-	aDequant := aQ4.Slice()
+	aBytes, aDequant := quantizeQ4(aF32)
 
 	bF32 := make([]float32, K*N)
 	for i := range bF32 {
@@ -186,8 +298,7 @@ func BenchmarkGemmQ4F32_1024(b *testing.B) {
 	for i := range aF32 {
 		aF32[i] = float32(i%7-3) * 0.01
 	}
-	aQ4 := tensor.QuantizeQ4(aF32)
-	aBytes := aQ4.RawBytes()
+	aBytes, _ := quantizeQ4(aF32)
 
 	bF32 := make([]float32, K*N)
 	for i := range bF32 {
