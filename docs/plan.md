@@ -340,11 +340,17 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
 - [x] S29.3.1 Integration tests  Owner: TBD  Est: 30m
   - All downstream tests (compute, layers/*) pass with SIMD-backed GemmF32.
 
-- [ ] T29.4 NEON Q4 dot product kernel  Owner: TBD  Est: 3h  **DEFERRED**: dequantize+SgemmSimd path sufficient
-  - Deferred: Q4/Q8 GEMM already uses dequantize + SgemmSimd path.
-  - A dedicated Q4 NEON dot product would further optimize but is not critical.
+- [x] T29.4 Fused Q4 dequant+multiply kernel  Owner: TBD  Est: 3h
+  - Implemented GemmQ4F32Fused: dequantizes one Q4 block (32 values) at a time
+    into a stack buffer and immediately multiplies via sgemmAccRow (NEON/AVX2).
+  - Eliminates O(M*K) heap allocation. ~16% faster for GEMV, ~13-18% for GEMM.
+  - Added BlockScaleF32/BlockData accessors to Q4Storage.
+  - sgemmAccRow unified across all platforms (NEON, AVX2, scalar fallback).
+  - GemmQ4F32 now delegates to the fused path.
 
-- [ ] S29.4.1 Tests for NEON Q4 dot product  Owner: TBD  Est: 1h
+- [x] S29.4.1 Tests for fused Q4 kernel  Owner: TBD  Est: 1h
+  - 3 correctness tests (table-driven, GEMV M=1, large 32x64x256).
+  - 3 benchmarks (512, 1024 square GEMM + GEMV 1x4096x4096 fused vs dequant).
 
 - [x] T29.5 Run golangci-lint on internal/xblas/  Owner: TBD  Est: 15m
   - 0 issues.
