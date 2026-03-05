@@ -17,6 +17,11 @@ func vdotf32(a, b unsafe.Pointer, n int) float32
 //go:noescape
 func sgemmAccRowNeon(c, b unsafe.Pointer, aVal float32, n int)
 
+// sgemmAccRow is the platform-agnostic name used by GemmQ4F32Fused.
+func sgemmAccRow(c, b unsafe.Pointer, aVal float32, n int) {
+	sgemmAccRowNeon(c, b, aVal, n)
+}
+
 const tileK = 256
 
 // SgemmSimd computes C = A*B using NEON-accelerated operations.

@@ -134,6 +134,16 @@ func (q *Q4Storage) RawBytes() []byte {
 	return out
 }
 
+// BlockScaleF32 returns the dequantization scale for block i as float32.
+func (q *Q4Storage) BlockScaleF32(i int) float32 {
+	return q.blocks[i].scale.ToFloat32()
+}
+
+// BlockData returns a pointer to the 16 packed bytes for block i.
+func (q *Q4Storage) BlockData(i int) *byte {
+	return &q.blocks[i].data[0]
+}
+
 // Ensure Q4Storage implements Storage[float32].
 var _ Storage[float32] = (*Q4Storage)(nil)
 
