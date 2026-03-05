@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/zerfoo/float16"
 	"github.com/zerfoo/zerfoo/internal/gpuapi"
 	"github.com/zerfoo/zerfoo/log"
 	"github.com/zerfoo/zerfoo/numeric"
@@ -158,13 +159,15 @@ func (e *GPUEngine[T]) OOMFallbackCount() int64 {
 // Ops returns the arithmetic ops for this engine.
 func (e *GPUEngine[T]) Ops() numeric.Arithmetic[T] { return e.cpu.Ops() }
 
-// MatMul performs matrix multiplication using GPU BLAS for float32 tensors.
-// For non-float32 types, it falls back to the CPU implementation.
+// MatMul performs matrix multiplication using GPU BLAS for float32 and BFloat16
+// tensors. For other types, it falls back to the CPU implementation.
 // Supports 2D matrices and batched matmul (3D+ tensors).
 func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	// Only float32 has a BLAS path; fall back for other types.
+	// float32 and BFloat16 have GPU BLAS paths; fall back for other types.
 	var zero T
-	if _, ok := any(zero).(float32); !ok {
+	_, isFloat32 := any(zero).(float32)
+	_, isBFloat16 := any(zero).(float16.BFloat16)
+	if !isFloat32 && !isBFloat16 {
 		return e.cpu.MatMul(ctx, a, b, dst...)
 	}
 
@@ -243,7 +246,7 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 
 	defer cleanupB()
 
-	elemSize := int(unsafe.Sizeof(float32(0)))
+	elemSize := int(unsafe.Sizeof(zero))
 	aMatSize := m * k
 	bMatSize := k * n
 	cMatSize := m * n
@@ -270,10 +273,17 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 		batchDevB := unsafe.Add(devB, bOff)
 		batchDevC := unsafe.Add(devCTotal, cOff)
 
-		if err := e.blas.Sgemm(m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC); err != nil {
+		var blasErr error
+		if isBFloat16 {
+			blasErr = e.blas.BFloat16Gemm(m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC)
+		} else {
+			blasErr = e.blas.Sgemm(m, n, k, 1.0, batchDevA, batchDevB, 0.0, batchDevC)
+		}
+
+		if blasErr != nil {
 			e.pool.Free(e.deviceID, devCTotal, batchSize*cMatSize*elemSize)
 
-			return nil, fmt.Errorf("MatMul: BLAS Sgemm batch %d: %w", batch, err)
+			return nil, fmt.Errorf("MatMul: BLAS batch %d: %w", batch, blasErr)
 		}
 	}
 

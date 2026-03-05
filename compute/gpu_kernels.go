@@ -25,16 +25,16 @@ func getDevicePtr[T tensor.Numeric](e *GPUEngine[T], t *tensor.TensorNumeric[T])
 	// CPUStorage path: allocate from pool, copy H2D.
 	data := t.Data()
 	n := len(data)
-	byteSize := n * f32Size
+	var zero T
+	elemSize := int(unsafe.Sizeof(zero))
+	byteSize := n * elemSize
 
 	devPtr, err := e.pool.Alloc(e.deviceID, byteSize)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	aF32 := *(*[]float32)(unsafe.Pointer(&data))
-
-	if err := e.runtime.Memcpy(devPtr, unsafe.Pointer(&aF32[0]), byteSize, gpuapi.MemcpyHostToDevice); err != nil {
+	if err := e.runtime.Memcpy(devPtr, unsafe.Pointer(&data[0]), byteSize, gpuapi.MemcpyHostToDevice); err != nil {
 		e.pool.Free(e.deviceID, devPtr, byteSize)
 
 		return nil, nil, err
