@@ -267,6 +267,22 @@ func TestOptions(t *testing.T) {
 			t.Error("registry not set")
 		}
 	})
+
+	t.Run("WithBackend", func(t *testing.T) {
+		o := &loadOptions{}
+		WithBackend("tensorrt")(o)
+		if o.backend != "tensorrt" {
+			t.Errorf("backend = %q, want %q", o.backend, "tensorrt")
+		}
+	})
+
+	t.Run("WithPrecision", func(t *testing.T) {
+		o := &loadOptions{}
+		WithPrecision("fp16")(o)
+		if o.precision != "fp16" {
+			t.Errorf("precision = %q, want %q", o.precision, "fp16")
+		}
+	})
 }
 
 // --- GenerateOption tests ---
@@ -1035,6 +1051,24 @@ func TestModel_Close_NilEngine(t *testing.T) {
 }
 
 // --- Load with invalid device ---
+
+func TestNewTestModel(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	eng := compute.NewCPUEngine[float32](ops)
+	meta := ModelMetadata{VocabSize: 100, NumLayers: 1}
+	info := &registry.ModelInfo{ID: "test-model"}
+
+	m := NewTestModel(nil, nil, eng, meta, info)
+	if m == nil {
+		t.Fatal("expected non-nil model")
+	}
+	if m.Config().VocabSize != 100 {
+		t.Errorf("VocabSize = %d, want 100", m.Config().VocabSize)
+	}
+	if m.Info().ID != "test-model" {
+		t.Errorf("ID = %q, want test-model", m.Info().ID)
+	}
+}
 
 func TestLoad_InvalidDevice(t *testing.T) {
 	dir := t.TempDir()
