@@ -25,23 +25,38 @@ Phase 20 validated the full GPU stack on DGX Spark GB10 (Blackwell sm_121,
 ARM64, CUDA 13.0): 66 packages pass, benchmarks captured, feature gaps
 documented. See ADR-017.
 
+Phase 21 resolved model parity test gaps (17 PASS, 5 SKIP across 7 model
+families) and documented the multi-GPU test coverage gap. See ADR-018.
+
+Phase 22 addresses three gaps identified during Phase 20-21 validation:
+1. BF16 GPU compute: cuBLAS supports BF16 GEMM via `cublasGemmEx`, but
+   zerfoo only wraps `cublasSgemm` (float32). The `float16.BFloat16` type
+   exists in the `float16` package with full arithmetic, and `tensor.Numeric`
+   already includes `float16.BFloat16`, but GPUEngine falls back to CPU for
+   all non-float32 types.
+2. Unified memory: The DGX Spark GB10 has NVLink-C2C hardware-coherent access
+   to 128 GB shared LPDDR5X. `cudaMallocManaged` avoids explicit H2D copies.
+   Currently, MemPool only uses `cudaMalloc` (discrete device memory).
+3. SigLIP Concat: The SigLIP vision model fails at node 1462 with
+   "Concat shape mismatch [1] vs [1 1]" -- a rank mismatch between 1D and 2D
+   tensors at a Concat input. Root cause is likely a missing Unsqueeze or
+   incorrect shape propagation in a preceding node.
+
 Architecture, design, GPU details, operations, and troubleshooting are
 documented in docs/design.md (the single reference document). Stable design
 decisions are extracted into docs/adr/ (see [ADR index](design.md#14-architectural-decision-records)).
 
 ### Objectives
 
-O12-O28: COMPLETE (Phases 10-19). Device affinity, multi-GPU inference, NCCL,
-cuDNN forward/backward, TensorRT with dynamic shapes, CUTLASS flash attention
-and INT4/INT8 GEMM, GRAL, ROCm backend, OpenCL backend.
+O12-O31: COMPLETE (Phases 10-20). See ADRs 007-017.
+O32-O33: COMPLETE (Phase 21). See ADR-018.
 
-O29-O31: COMPLETE (Phase 20). ARM64 build compatibility, Blackwell GPU
-validation, feature gap assessment.
-
-- O32: Run all model parity tests on GPU by downloading, converting, and
-  deploying ZMF model files for all 7 model families on DGX Spark. **(COMPLETE)**
-- O33: Document multi-GPU test coverage gap and define the conditions under
-  which multi-GPU tests can be validated. **(COMPLETE)**
+- O34: Add BF16 cuBLAS GEMM support so `GPUEngine[float16.BFloat16].MatMul`
+  runs on GPU instead of falling back to CPU. **(IN PROGRESS)**
+- O35: Add `cudaMallocManaged` allocator option in MemPool for zero-copy model
+  loading on DGX Spark GB10 unified memory. **(IN PROGRESS)**
+- O36: Fix SigLIP vision model Concat shape mismatch so the SigLIP parity test
+  passes. **(IN PROGRESS)**
 
 ### Non-Goals
 
@@ -58,9 +73,12 @@ validation, feature gap assessment.
 - ROCm TensorRT equivalent (MIGraphX integration deferred).
 - OpenCL multi-GPU collective communications (no NCCL equivalent).
 - OpenCL flash attention (too complex for OpenCL kernel model).
-- FP4 kernel implementation (assessment only in Phase 20; implementation deferred).
-- BF16 training loop (assessment only; implementation deferred).
-- ConnectX-7 multi-node inference (assessment only; implementation deferred).
+- FP4 kernel implementation (blocked on upstream CUTLASS SM121 FP4 fixes).
+- BF16 training loop (only inference GEMM is in scope for Phase 22).
+- ConnectX-7 multi-node inference (requires second DGX Spark unit).
+- ROCm or OpenCL BF16 GEMM (CUDA only for Phase 22).
+- Unified memory for ROCm or OpenCL (CUDA only for Phase 22).
+- Full FP16 GPU kernel support (only MatMul via cuBLAS for Phase 22).
 
 ### Constraints and Assumptions
 
@@ -85,533 +103,284 @@ validation, feature gap assessment.
 - DGX Spark GB10 is ARM64 (aarch64), not x86_64. CUDA 13.0 pre-installed.
   Compute capability sm_121 (Blackwell). 128GB unified LPDDR5X memory.
   Single GPU -- multi-GPU tests require two units linked via ConnectX-7.
+- The `float16` package (../float16) already provides a complete `BFloat16`
+  type with IEEE 754 compliance, conversions, arithmetic, and rounding modes.
+- `tensor.Numeric` already includes `float16.BFloat16` in its type constraint.
+- `model/tensor_decoder.go` already decodes BFloat16 from ZMF model files.
+- `cublasGemmEx` supports `CUDA_R_16BF` data type for BF16 GEMM on Blackwell.
 
 ### Success Metrics
 
-All metrics for Phases 10-20 ACHIEVED. See ADRs 007-017 and design.md Section 15.
+All metrics for Phases 10-21 ACHIEVED. See ADRs 007-018 and design.md Section 15.
 
-Phase 21 metrics:
+Phase 22 metrics:
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| Model parity on GPU | 7 model families tested | 17 PASS, 5 SKIP (see ADR-018) |
-| Multi-GPU gap documented | Prerequisites listed | ACHIEVED (ADR-017 updated, script created) |
+| BF16 MatMul on GPU | GPUEngine[BFloat16].MatMul dispatches to cublasGemmEx | NOT STARTED |
+| BF16 benchmark | BF16 GEMM benchmark on DGX Spark vs CPU baseline | NOT STARTED |
+| Unified memory allocator | MemPool.AllocManaged returns cudaMallocManaged pointer | NOT STARTED |
+| Unified memory model load | Model loaded via managed memory skips explicit H2D copy | NOT STARTED |
+| SigLIP parity test | TestSigLIPForwardPass PASS on DGX Spark | NOT STARTED |
 
 ---
 
 ## 2. Scope and Deliverables
 
-D11-D53: COMPLETE. See ADRs 007-017.
+D11-D55: COMPLETE. See ADRs 007-018.
 
 | ID | Description | Status |
 |----|-------------|--------|
-| D54 | Model parity on GPU | All 7 model families' parity tests pass on DGX Spark with ZMF models |
-| D55 | Multi-GPU gap doc | Multi-GPU test coverage gap documented with prerequisites for validation |
+| D56 | BF16 cuBLAS GEMM | cublasGemmEx binding + GPUEngine BF16 MatMul dispatch |
+| D57 | Unified memory allocator | cudaMallocManaged in MemPool + GPUStorage integration |
+| D58 | SigLIP Concat fix | Concat handles rank-mismatched inputs; SigLIP parity PASS |
 
 ---
 
 ## 3. Work Breakdown
 
-### Completed Phases (1-13)
+### Completed Phases (1-21)
 
 Phase 1 (Test Coverage), Phase 2 (GPU Engine), Phase 3 (GPU Production
 Readiness), Phase 4 (Enterprise Production Readiness), Phase 5 (Distributed
 Training Protocol), Phase 6 (Open Weights Model Import), Phase 7 (Architecture
 Cleanup), Phase 8 (Embeddable Inference Library), Phase 9 (Multi-Architecture
 Support), Phase 10 (Multi-GPU), Phase 11 (cuDNN), Phase 12 (TensorRT),
-Phase 13 (CUTLASS Flash Attention) are all complete. See docs/adr/ for design
-decisions.
+Phase 13 (CUTLASS Flash Attention), Phase 14 (GRAL), Phase 15 (ROCm),
+Phase 16 (OpenCL), Phase 17 (cuDNN Backward), Phase 18 (CUTLASS INT4/INT8),
+Phase 19 (TensorRT Dynamic Shapes), Phase 20 (DGX Spark Validation),
+Phase 21 (Model Parity + Multi-GPU Gap) are all complete.
+See docs/adr/ for design decisions.
 
-### Phase 14: GPU Runtime Abstraction Layer (GRAL) — COMPLETE 2026-03-03
+### Phase 22: BF16 GEMM, Unified Memory, SigLIP Fix
 
-GRAL interfaces (`internal/gpuapi/`), CUDA adapters, GPUEngine/GPUStorage
-refactor. Zero direct cuda/cublas/cudnn imports in compute/ and tensor/.
-See [ADR-011](adr/011-gpu-runtime-abstraction-layer.md).
+#### Phase 22 Context
 
-### Phase 15: AMD ROCm Backend — COMPLETE 2026-03-03
+Phase 20 identified BF16 GEMM and unified memory as low-effort improvements for
+DGX Spark (ADR-017 Sections "BF16 Tensor Operations" and "Unified Memory").
+Phase 21 identified SigLIP Concat shape mismatch as a bug to fix (ADR-018).
 
-HIP runtime, rocBLAS, MIOpen bindings, HIP kernels (elementwise + flash
-attention), ROCmEngine, device registration, inference routing.
-See [ADR-012](adr/012-amd-rocm-backend.md).
+Key codebase facts for implementers:
+- `internal/cublas/cublas.go`: Only wraps `cublasSgemm`. Needs `cublasGemmEx`.
+- `internal/gpuapi/blas.go`: BLAS interface has only `Sgemm`. Needs `GemmEx` or
+  `BFloat16Gemm` method.
+- `compute/gpu_engine.go` line 166-169: MatMul type-checks for float32 and falls
+  back to CPU for everything else. Needs BFloat16 dispatch path.
+- `compute/gpu_engine.go` line 246: `elemSize` is hardcoded to `float32(0)`.
+  Must use `unsafe.Sizeof(zero)` for the actual type T.
+- `internal/cuda/mempool.go`: Cache key is `(deviceID, byteSize)`. Alloc calls
+  `cudaMalloc` on cache miss. Needs `AllocManaged` variant using
+  `cudaMallocManaged`.
+- `internal/gpuapi/mempool.go`: MemPool interface has `Alloc`, `Free`, `Drain`,
+  `Stats`. Needs `AllocManaged` method.
+- `layers/core/concat.go`: Delegates to `engine.Concat()`.
+- `compute/cpu_engine.go` lines 1250-1267: Concat validates all non-axis
+  dimensions are equal. Fails when inputs have different ranks.
+- SigLIP error: "node[1462] Concat shape mismatch [1] vs [1 1]" -- one input is
+  1D shape [1], another is 2D shape [1,1]. A preceding Unsqueeze or Reshape is
+  likely not producing the expected rank.
 
-### Phase 16: OpenCL Backend — COMPLETE 2026-03-03
+#### E117: BF16 cuBLAS GEMM
 
-OpenCL runtime, CLBlast BLAS, 17 elementwise kernels (runtime compiled),
-OpenCLEngine, DNN stub (CPU fallback).
-See [ADR-013](adr/013-opencl-backend.md).
+Bind cublasGemmEx for BFloat16 GEMM and wire it into GPUEngine.MatMul.
 
-### Phase 17: cuDNN Backward Pass — COMPLETE 2026-03-03
-
-8 backward CGo bindings, CUDA DNN adapter, GPUEngine backward methods for
-training (Conv2d, BatchNorm, activation, pooling).
-See [ADR-014](adr/014-cudnn-backward-pass.md).
-
-### Phase 18: CUTLASS INT4/INT8 GEMM — COMPLETE 2026-03-03
-
-INT8 tiled kernel, INT4 packed kernel with left/right-multiply, CGo bindings,
-MatMulNBits GPU dispatch via build tags.
-See [ADR-015](adr/015-cutlass-quantized-gemm.md).
-
-### Phase 19: TensorRT Dynamic Shapes — COMPLETE 2026-03-03
-
-Optimization profiles (min/opt/max), SetInputShape, dynamic cache keys,
-DynamicShapeConfig in converter.
-See [ADR-016](adr/016-tensorrt-dynamic-shapes.md).
-
-### Phase 20: DGX Spark Hardware Validation — COMPLETE 2026-03-03
-
-ARM64 build (10 fixes), GPU tests (66 pkgs pass), benchmarks (MatMul 46x,
-flash 147us), feature gaps (FP4 blocked, BF16 3-5d). Model parity: 17 PASS
-(Llama3, Qwen25, Gemma3, Mistral, Phi3, FlashAttentionGQA), 5 SKIP.
-See [ADR-017](adr/017-dgx-spark-hardware-validation.md),
-[ADR-018](adr/018-model-parity-testing.md), design.md Section 15.
-
-### Phase 21: Skipped Test Coverage (Model Parity on GPU + Multi-GPU Gap)
-
-#### Phase 21 Context
-
-Phase 20 validated all GPU code on DGX Spark with 66 packages passing. However,
-25+ tests were skipped due to two gaps:
-
-1. **Model parity tests (20 tests):** The parity test framework in
-   `tests/parity/helpers_test.go` uses `envOrSkip(t, key)` to check environment
-   variables like `GEMMA3_ZMF_PATH`, `LLAMA3_ZMF_PATH`, etc. Without ZMF model
-   files on the DGX Spark, all model parity tests skip. This covers 7 model
-   families: Gemma 3, Llama 3, Mistral, Phi-4, Qwen 2.5, DeepSeek V3, and
-   SigLIP (+ Kimi-VL connector). Each family has ~3 tests (forward pass, greedy
-   decode, generation).
-
-2. **Multi-GPU tests (5 tests):** The DGX Spark GB10 has a single GPU.
-   Tests that check `GetDeviceCount() >= 2` skip: TestMemPoolNoCrossDeviceReuse,
-   TestMemPoolMultiDeviceStats, TestTwoGPUAllReduce, TestTwoGPUBroadcast,
-   TestMultiGPU_DualDeviceInference, TestNcclStrategy_TwoGPUAllReduce.
-   These require a second DGX Spark unit connected via ConnectX-7.
-
-- [x] T70.1 Add deviceID parameter to MemPool.Alloc and MemPool.Free  Owner: TBD  Est: 1h  Completed: 2026-03-03
+- [x] T117.1 Add cublasGemmEx CGo binding  2026-03-04
   - Dependencies: None
-  - Files: internal/cuda/mempool.go
-  - Acceptance: MemPool.Alloc(deviceID int, byteSize int) calls cuda.SetDevice(deviceID)
-    before cuda.Malloc when cache misses. MemPool.Free(deviceID int, ptr, byteSize) stores
-    the pointer under (deviceID, byteSize). Cache key is (deviceID, byteSize). Drain()
-    iterates all devices, calling SetDevice before Free for each. No cross-device pointer
-    reuse possible. Existing behavior preserved when all calls use deviceID=0.
-  - [x] S70.1.1 Change cache type from map[int][]unsafe.Pointer to map[int]map[int][]unsafe.Pointer  Est: 15m
-  - [x] S70.1.2 Update Alloc to accept deviceID, call SetDevice before Malloc  Est: 15m
-  - [x] S70.1.3 Update Free to accept deviceID, store under (deviceID, byteSize)  Est: 10m
-  - [x] S70.1.4 Update Drain to iterate per-device, call SetDevice before Free  Est: 10m
-  - [x] S70.1.5 Write unit tests: alloc/free on device 0, alloc/free on device 1, no cross-reuse  Est: 20m
-  - [x] S70.1.6 Run golangci-lint and go test -cover  Est: 5m
-  - Note: Also updated all callers in compute/gpu_engine.go and compute/gpu_kernels.go to pass deviceID=0.
+  - Files: internal/cublas/cublas.go
+  - Commits: 33a97e5 (binding), 251c336 (tests)
+  - [x] S117.1.1 Define CudaDataType enum (CUDA_R_32F=0, CUDA_R_16BF=14, CUDA_R_16F=2)  Est: 10m
+  - [x] S117.1.2 Add GemmEx method with CGo call to cublasGemmEx  Est: 30m
+  - [x] S117.1.3 Add CublasComputeType enum (CUBLAS_COMPUTE_32F)  Est: 10m
+  - [x] S117.1.4 Write table-driven tests: FP32 via GemmEx (BF16 validated on DGX Spark)  Est: 30m
+  - [x] S117.1.5 Run golangci-lint and go test -cover  Est: 10m
 
-The model parity gap is addressable now. The `zonnx` CLI tool (in
-`../zonnx/`) downloads ONNX models from HuggingFace and converts them to ZMF
-format. The DGX Spark has 390 GB free disk and 115 GB free RAM -- sufficient
-for all 7 model families.
+- [x] T117.2 Add BFloat16Gemm to BLAS interface and CUDA adapter  2026-03-04
+  - Dependencies: T117.1
+  - Files: internal/gpuapi/blas.go, internal/gpuapi/cuda_blas.go,
+    internal/gpuapi/rocm_blas.go, internal/gpuapi/opencl_blas.go,
+    internal/gpuapi/gpuapi_test.go
+  - Commit: 51facd7
+  - [x] S117.2.1 Add BFloat16Gemm to BLAS interface  Est: 10m
+  - [x] S117.2.2 Implement BFloat16Gemm in CUDABlas  Est: 15m
+  - [x] S117.2.3 Add stub returning error in RocmBlas and OpenCLBlas  Est: 10m
+  - [x] S117.2.4 Run golangci-lint on internal/gpuapi/  Est: 5m
 
-**ZMF conversion workflow:**
-1. Install `zonnx` on DGX Spark (`go install` or copy binary)
-2. `zonnx download <hf-repo>` -- downloads ONNX model from HuggingFace
-3. `zonnx convert <onnx-dir> <output.zmf>` -- converts ONNX to ZMF format
-4. Set environment variables (e.g., `GEMMA3_ZMF_PATH=/path/to/gemma3.zmf`)
-5. Run parity tests with GPU tags
-
-**Model families and HuggingFace repos:**
-| Family | HuggingFace Repo | Env Vars |
-|--------|-----------------|----------|
-| Gemma 3 | google/gemma-3-1b-it (ONNX variant) | GEMMA3_ZMF_PATH, GEMMA3_MODEL_DIR |
-| Llama 3 | meta-llama/Llama-3.2-1B (ONNX variant) | LLAMA3_ZMF_PATH, LLAMA3_MODEL_DIR |
-| Mistral | mistralai/Mistral-7B-v0.1 (ONNX variant) | MISTRAL_ZMF_PATH, MISTRAL_MODEL_DIR |
-| Phi-4 | microsoft/phi-4 (ONNX variant) | PHI4_ZMF_PATH, PHI4_MODEL_DIR |
-| Qwen 2.5 | Qwen/Qwen2.5-0.5B (ONNX variant) | QWEN_ZMF_PATH, QWEN_MODEL_DIR |
-| DeepSeek V3 | deepseek-ai/DeepSeek-V3 (ONNX variant) | DEEPSEEK_ZMF_PATH, DEEPSEEK_MODEL_DIR |
-| SigLIP | google/siglip-so400m-patch14-384 (ONNX variant) | SIGLIP_ZMF_PATH, SIGLIP_MODEL_DIR |
-
-Note: Exact HuggingFace repo names and ONNX availability must be verified at
-runtime. Some models may require gated access (HF_TOKEN). Smaller model
-variants are preferred to fit within DGX Spark memory.
-
-#### E114: Model Parity Test Coverage on GPU
-
-- [x] T114.1 Install zonnx CLI on DGX Spark  2026-03-04
-  - Cloned zonnx repo, built binary, verified CLI on DGX Spark.
-  - Acceptance: `zonnx download --help` and `zonnx convert --help` succeed.
-  - [x] S114.1.1 Clone zonnx repo on DGX Spark  Est: 5m
-  - [x] S114.1.2 Build zonnx binary  Est: 15m
-  - [x] S114.1.3 Verify CLI works  Est: 5m
-
-- [x] T114.2 Download and convert Gemma 3 model  2026-03-04
-  - Downloaded google/gemma-3-1b-it via optimum-cli ONNX export on DGX Spark.
-  - Converted with zonnx (after root-cause fix for integer initializer promotion).
-  - Fixed: tokenizer array-of-arrays merges format, Gather embedded-indices,
-    Slice hybrid mode and range clamping, zonnx integer initializer promotion.
-  - Acceptance: ~/models/gemma3/model.zmf exists (3.8 GB, 381 params).
-    TestGemma3ForwardPass PASS, TestGemma3GreedyDecode PASS, TestGemma3Generation PASS.
-
-- [x] T114.3 Download and convert Llama 3 model  2026-03-04
-  - Used onnx-community/Llama-3.2-1B from HuggingFace (previously downloaded).
-  - Re-converted with updated zonnx (external data support).
-  - Fixed: zonnx importer now loads ONNX external data files (model.onnx_data).
-  - Fixed: Cos and Sin ONNX ops added for Llama RoPE position encoding.
-  - Acceptance: ~/models/llama3/model.zmf exists (4.7 GB). TestLlama3ForwardPass PASS.
-
-- [x] T114.4 Download and convert remaining models  2026-03-04
-  - [x] S114.4.1 Download and convert Mistral  2026-03-04
-    - Exported mistralai/Mistral-7B-Instruct-v0.3 via optimum-cli (torch 2.4.1).
-    - Converted to ZMF: ~/models/mistral/model.zmf (27GB).
-    - Added LessOrEqual and Or ops for Mistral attention mask.
-    - All 3 parity tests PASS (ForwardPass, GreedyDecode, Generation).
-  - [x] S114.4.2 Download and convert Phi-3  2026-03-04
-    - Phi-4-mini tokenizer incompatible with optimum 1.22.0; used Phi-3-mini instead.
-    - Exported microsoft/Phi-3-mini-4k-instruct via optimum-cli.
-    - Converted to ZMF: ~/models/phi4/model.zmf (15GB).
-    - All 3 parity tests PASS (ForwardPass, GreedyDecode, Generation).
-  - [x] S114.4.3 Download and convert Qwen 2.5  2026-03-04
-    - Previously downloaded. Re-converted with latest zonnx (proto field promotion).
-    - Fixed: Reshape rebuild in builder Pass 2, batched MatMul, Where broadcasting.
-    - TestQwen25ForwardPass PASS on DGX Spark. Output: [1 8 151936].
-  - [x] S114.4.4 Download and convert DeepSeek V3  2026-03-04
-    - SKIPPED: 671B MoE model exceeds 128GB DGX Spark memory.
-  - [x] S114.4.5 Download and convert SigLIP  2026-03-04
-    - Downloaded Xenova/siglip-base-patch16-224 pre-built ONNX.
-    - Converted vision_model.onnx to ZMF: ~/models/siglip/model.zmf (355MB).
-    - Added Squeeze, Tile, Mod, Gemm ops.
-    - SKIP: Concat shape mismatch in vision graph (needs further investigation).
-
-- [x] T114.5 Run model parity tests on GPU  2026-03-04
-  - Fixed 18 issues across zerfoo and zonnx repos. See ADR-018.
-  - 17 PASS: FlashAttentionGQA, Llama3 (FP/GD/Gen), Qwen25 (FP/GD/Gen),
-    Gemma3 (FP/GD/Gen), Mistral (FP/GD/Gen), Phi3 (FP/GD/Gen)
-  - 5 SKIP: DeepSeek (too large), SigLIP (graph issue), MultiGPU (1 device)
-
-- [x] T114.6 Create test automation script  2026-03-04
-  - File: scripts/dgx-spark-parity.sh (new)
-  - Purpose: Shell script that sets all ZMF env vars and runs the full parity
-    test suite. Makes it easy to re-run after code changes.
-  - Acceptance: `./scripts/dgx-spark-parity.sh` runs all model parity tests.
-
-#### E71: GPUEngine Device Affinity
-
-- [x] T71.1 Add deviceID field to GPUEngine and update constructor  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
-  - Dependencies: E70
-  - Files: compute/gpu_engine.go
-  - Acceptance: GPUEngine gains a `deviceID int` field. NewGPUEngine(ops, ...int)
-    accepts an optional device ID (default 0). Constructor calls cuda.SetDevice(deviceID)
-    before creating cuBLAS handle, stream, and pool. A DeviceID() int method exposes
-    the device. Existing callers (zero args) get device 0. Static assertion: single-arg
-    call still compiles.
-  - [ ] S71.1.1 Add deviceID int field to GPUEngine struct (line 27)  Est: 5m
-  - [ ] S71.1.2 Update NewGPUEngine signature to accept variadic ...int  Est: 10m
-  - [ ] S71.1.3 Call cuda.SetDevice(deviceID) before cublas.CreateHandle  Est: 10m
-  - [ ] S71.1.4 Pass deviceID to cuda.NewMemPool or store on engine for pool calls  Est: 10m
-  - [ ] S71.1.5 Add DeviceID() int method  Est: 5m
-  - [ ] S71.1.6 Write tests: create engine on device 0, verify DeviceID(); create on device 1 if available  Est: 20m
-  - [ ] S71.1.7 Run golangci-lint and go test -cover  Est: 5m
-
-- [x] T71.2 Add SetDevice guard to all GPUEngine methods  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
-  - Dependencies: T71.1
+- [x] T117.3 Add BFloat16 dispatch to GPUEngine.MatMul  2026-03-04
+  - Dependencies: T117.2
   - Files: compute/gpu_engine.go, compute/gpu_kernels.go
-  - Acceptance: Every method on GPUEngine that dispatches a CUDA kernel or cuBLAS
-    call begins with cuda.SetDevice(e.deviceID). This includes: MatMul, Add, Sub,
-    Mul, Div, Pow, AddScalar, MulScalar, DivScalar, Tanh, TanhPrime, Exp, Log,
-    Sqrt, Rsqrt, Sum, ReduceSum, ReduceMean, Softmax, Fill. Methods that delegate
-    to CPUEngine (Transpose, Reshape, etc.) do NOT need the guard. Test: two
-    GPUEngines on different devices can run MatMul concurrently without races or
-    wrong-device errors.
-  - Risk: Must not break the OOM fallback path (gpu_engine.go). When cudaMalloc
-    fails and falls back to CPUEngine, the SetDevice call is harmless but must
-    not interfere with the fallback logic.
-  - [ ] S71.2.1 Add e.setDevice() helper that calls cuda.SetDevice(e.deviceID)  Est: 10m
-  - [ ] S71.2.2 Insert e.setDevice() at the top of all GPU-dispatching methods  Est: 30m
-  - [ ] S71.2.3 Verify OOM fallback path still works with SetDevice  Est: 15m
-  - [ ] S71.2.4 Write concurrent test: 2 engines on 2 devices, parallel MatMul (skip if < 2 GPUs)  Est: 20m
-  - [ ] S71.2.5 Run golangci-lint and go test -cover -race  Est: 5m
+  - Commit: fc15197
+  - Note: BFloat16 MatMul tests require CUDA hardware; will be validated on DGX
+    Spark during T117.4.
+  - [x] S117.3.1 Fix elemSize to use unsafe.Sizeof(zero) for generic T  Est: 15m
+  - [x] S117.3.2 Fix getDevicePtr to use unsafe.Sizeof(zero) and direct pointer  Est: 15m
+  - [x] S117.3.3 Add BFloat16 type check and dispatch in MatMul  Est: 30m
+  - [ ] S117.3.4 Write tests: BFloat16 MatMul 2x2, 4x4, batched  Est: 20m  (DGX Spark)
+  - [x] S117.3.5 Run golangci-lint and go test -cover  Est: 10m
 
-- [x] T71.3 Update all GPUEngine pool calls to pass deviceID  Owner: TBD  Est: 45m  Completed: 2026-03-03
-  - Dependencies: T71.1, E70
-  - Files: compute/gpu_engine.go, compute/gpu_kernels.go
-  - Acceptance: Every call to e.pool.Alloc() and e.pool.Free() passes e.deviceID.
-    getDevicePtr and makeGPUResult in gpu_kernels.go pass deviceID through.
-    No pool call without a deviceID argument remains.
-  - [ ] S71.3.1 Update getDevicePtr to use e.pool.Alloc(e.deviceID, ...)  Est: 15m
-  - [ ] S71.3.2 Update makeGPUResult to use e.pool.Alloc(e.deviceID, ...)  Est: 15m
-  - [ ] S71.3.3 Grep for remaining pool.Alloc/pool.Free calls without deviceID; fix any  Est: 10m
-  - [ ] S71.3.4 Run golangci-lint and go test -cover  Est: 5m
+- [ ] T117.4 Benchmark BF16 GEMM on DGX Spark  Owner: TBD  Est: 30m
+  - Dependencies: T117.3
+  - Files: compute/gpu_engine_test.go (benchmark function)
+  - Acceptance: BenchmarkBF16MatMul runs 128x128, 512x512, 1024x1024 BF16 GEMM
+    on GPU. Results recorded in ADR-019. Compare with float32 Sgemm latency.
+  - [ ] S117.4.1 Write BenchmarkBF16MatMul table-driven benchmark  Est: 15m
+  - [ ] S117.4.2 Run on DGX Spark and record results  Est: 15m
 
-- [x] T71.4 Run linters and verify coverage for E71  Owner: TBD  Est: 15m  Completed: 2026-03-03
-  - Dependencies: T71.3
-  - Acceptance: golangci-lint 0 issues on compute/. go test -tags cuda -cover -race
-    passes. Coverage >= 95%.
-  - [ ] S71.4.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [ ] S71.4.2 Fix any remaining issues  Est: 5m
-
-#### E115: Multi-GPU Test Coverage Assessment
-
-- [x] T115.1 Document multi-GPU test coverage gap  2026-03-04
-  - File: docs/adr/017-dgx-spark-hardware-validation.md (updated)
-  - Added Multi-GPU Test Coverage Gap section listing all 6 tests that require
-    >= 2 CUDA devices, their file locations, skip conditions, and
-    hardware/software prerequisites for validation.
-  - Commit: fb74ccd
-
-- [x] T115.2 Add multi-GPU test runner script  2026-03-04
-  - File: scripts/dgx-spark-multigpu.sh (new)
-  - Shell script runs all 6 multi-GPU tests across 4 packages. Sets CUDA/CGo
-    env vars, NCCL ConnectX-7 configuration, filters tests by name.
-  - Commit: b3b0861
-
-#### E72: GPUStorage Device Affinity
-
-- [x] T72.1 Add deviceID field to GPUStorage and update constructors  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
-  - Dependencies: None (can be done in parallel with E71 after E70)
-  - Files: tensor/gpu_storage.go
-  - Acceptance: GPUStorage gains a `deviceID int` field and a `DeviceID() int`
-    method. NewGPUStorage(length, deviceID) calls cuda.SetDevice(deviceID) before
-    cuda.Malloc. NewGPUStorageFromSlice(data, deviceID) calls SetDevice before
-    Memcpy. NewGPUStorageFromPtr(ptr, length, deviceID) stores the deviceID.
-    TrySlice() calls SetDevice(s.deviceID) before D2H copy. TrySet() calls
-    SetDevice(s.deviceID) before H2D copy. Existing behavior preserved when
-    deviceID=0.
-  - Risk: All callers of NewGPUStorage must be updated to pass deviceID. This
-    includes gpu_engine.go, transfer.go, and any test files.
-  - [x] S72.1.1 Add deviceID int field to GPUStorage struct (line 17)  Est: 5m
-  - [x] S72.1.2 Add DeviceID() int method  Est: 5m
-  - [x] S72.1.3 Update NewGPUStorage to accept deviceID, call SetDevice  Est: 15m
-  - [x] S72.1.4 Update NewGPUStorageFromSlice to accept deviceID, call SetDevice  Est: 15m
-  - [x] S72.1.5 Update NewGPUStorageFromPtr to accept deviceID  Est: 10m
-  - [x] S72.1.6 Add SetDevice call in TrySlice and TrySet  Est: 10m
-  - [x] S72.1.7 Update all callers (grep for NewGPUStorage, NewGPUStorageFromSlice, NewGPUStorageFromPtr)  Est: 15m
-  - [x] S72.1.8 Write tests: create storage on device 0 and device 1, verify DeviceID  Est: 15m
-  - [x] S72.1.9 Run golangci-lint and go test -cover  Est: 5m
-
-- [x] T72.2 Update device/cuda_allocator.go with device affinity  Owner: TBD  Est: 30m  Completed: 2026-03-03
-  - Dependencies: None
-  - Files: device/cuda_allocator.go
-  - Acceptance: cudaAllocator gains a deviceID int field. NewCUDAAllocator(deviceID)
-    stores it. Allocate() calls cuda.SetDevice(a.deviceID) before cuda.Malloc().
-    Free() calls cuda.SetDevice(a.deviceID) before cuda.Free(). Update
-    cuda_device.go newCUDADevice to pass deviceID to NewCUDAAllocator.
-  - [x] S72.2.1 Add deviceID field to cudaAllocator  Est: 5m
-  - [x] S72.2.2 Update NewCUDAAllocator to accept deviceID  Est: 5m
-  - [x] S72.2.3 Add SetDevice calls in Allocate and Free  Est: 10m
-  - [x] S72.2.4 Update newCUDADevice to pass deviceID  Est: 5m
-  - [x] S72.2.5 Write tests for device-affine allocation  Est: 10m
-  - [x] S72.2.6 Run golangci-lint and go test -cover  Est: 5m
-
-- [x] T72.3 Add cross-device tensor transfer  Owner: TBD  Est: 1h  Completed: 2026-03-03
-  - Dependencies: T72.1
-  - Files: tensor/transfer.go, internal/cuda/runtime.go
-  - Acceptance: New function ToGPUDevice[T](t *TensorNumeric[T], deviceID int)
-    creates a copy of the tensor on the specified GPU. If the source tensor is
-    on a different GPU, uses cudaMemcpyPeer for D2D copy. If the source is CPU,
-    uses cudaMemcpyHostToDevice with SetDevice. New CGo binding
-    cuda.MemcpyPeer(dst, dstDevice, src, srcDevice, size) wraps cudaMemcpyPeer.
-    Update existing ToGPU to default to device 0 for backwards compatibility.
-  - [x] S72.3.1 Add MemcpyPeer binding to internal/cuda/runtime.go  Est: 15m
-  - [x] S72.3.2 Implement ToGPUDevice[T] in tensor/transfer.go  Est: 20m
-  - [x] S72.3.3 Update existing ToGPU to call ToGPUDevice with device 0  Est: 5m
-  - [x] S72.3.4 Write tests: CPU to GPU:0, CPU to GPU:1, GPU:0 to GPU:1 (skip if < 2 GPUs)  Est: 20m
-  - [x] S72.3.5 Run golangci-lint and go test -cover  Est: 5m
-
-- [x] T72.4 Run linters and verify coverage for E72  Owner: TBD  Est: 15m  Completed: 2026-03-03
-  - Dependencies: T72.3
-  - Acceptance: golangci-lint 0 issues on tensor/, device/. go test -tags cuda
-    -cover -race passes. Coverage >= 95%.
-  - [x] S72.4.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [x] S72.4.2 Fix any remaining issues  Est: 5m
-
-#### E73: Multi-GPU Inference
-
-Fix inference.Load() to create a GPUEngine when the device option specifies
-CUDA, and add Model.Close() for resource cleanup.
-
-- [x] T73.1 Implement device selection in inference.Load  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
-  - Dependencies: E71, E72
-  - Files: inference/inference.go
-  - Acceptance: inference.Load(modelID, WithDevice("cuda")) creates a GPUEngine[float32]
-    on device 0. inference.Load(modelID, WithDevice("cuda:1")) creates a GPUEngine on
-    device 1. inference.Load(modelID, WithDevice("cpu")) creates a CPUEngine (current
-    behavior). The device string is parsed: "cpu" -> CPUEngine; "cuda" -> GPUEngine(0);
-    "cuda:N" -> GPUEngine(N). If GPU creation fails (no CUDA, invalid device), return
-    a clear error. Test: mock-based test verifying device string parsing and engine
-    creation dispatch.
-  - [x] S73.1.1 Add device string parsing: extractDeviceType and extractDeviceID  Est: 15m
-  - [x] S73.1.2 Replace hardcoded NewCPUEngine (line 149) with device switch  Est: 20m
-  - [x] S73.1.3 Add Model.Close() method that calls GPUEngine.Close() if applicable  Est: 15m
-  - [x] S73.1.4 Write tests for device parsing: "cpu", "cuda", "cuda:0", "cuda:1", "invalid"  Est: 20m
-  - [x] S73.1.5 Write integration test: load model on GPU (skip if no CUDA)  Est: 15m
-  - [x] S73.1.6 Run golangci-lint and go test -cover  Est: 5m
-  - Note: Used build-tag-gated files (engine_cuda.go / engine_nocuda.go) for conditional GPU engine creation.
-
-- [x] T73.2 Add multi-GPU inference integration test  Owner: TBD  Est: 1h  Completed: 2026-03-03
-  - Dependencies: T73.1
-  - Files: tests/parity/multigpu_test.go (new)
-  - Acceptance: Test loads the same model on device 0 and device 1 (skip if < 2 GPUs).
-    Both models generate the same output for the same prompt (greedy decode). Verifies
-    device affinity: tensors from model 0 are on device 0, tensors from model 1 are on
-    device 1.
-  - [x] S73.2.1 Create tests/parity/multigpu_test.go with device count check  Est: 20m
-  - [x] S73.2.2 Test dual-device model loading and generation  Est: 25m
-  - [x] S73.2.3 Run golangci-lint and go test -tags cuda  Est: 5m
-  - Note: Test behind //go:build cuda tag. Requires 2 GPUs and cached model to execute.
-
-- [x] T73.3 Run linters and verify coverage for E73  Owner: TBD  Est: 15m  Completed: 2026-03-03
-  - Dependencies: T73.2
-  - Acceptance: golangci-lint 0 issues on inference/. go test -cover -race passes.
-  - [x] S73.3.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
-  - [x] S73.3.2 Fix any remaining issues  Est: 5m
-
-#### E74: NCCL Bindings
-
-Add CGo bindings for NCCL (NVIDIA Collective Communications Library) to enable
-GPU-native collective operations.
-
-- [x] T74.1 Create internal/nccl/ package with CGo bindings  Owner: TBD  Est: 2h  Completed: 2026-03-03
-  - Dependencies: None (can start in parallel with E70-E72)
-  - Files: internal/nccl/nccl.go (new)
-  - Acceptance: Package internal/nccl provides Go bindings for: ncclGetUniqueId,
-    ncclCommInitRank, ncclCommDestroy, ncclAllReduce (sum, avg), ncclBroadcast,
-    ncclGroupStart, ncclGroupEnd, ncclCommGetAsyncError. All behind //go:build cuda.
-    CGo links against -lnccl. NcclComm type wraps ncclComm_t. NcclUniqueID type
-    wraps ncclUniqueId. DataType mapping: float32 -> ncclFloat32. ReduceOp mapping:
-    Sum -> ncclSum. All functions return Go errors wrapping ncclResult_t.
-  - [x] S74.1.1 Create internal/nccl/nccl.go with CGo preamble and linker flags  Est: 15m
-  - [x] S74.1.2 Bind ncclGetUniqueId and NcclUniqueID type  Est: 15m
-  - [x] S74.1.3 Bind ncclCommInitRank and NcclComm type  Est: 15m
-  - [x] S74.1.4 Bind ncclAllReduce with stream parameter  Est: 20m
-  - [x] S74.1.5 Bind ncclBroadcast with stream parameter  Est: 15m
-  - [x] S74.1.6 Bind ncclCommDestroy, ncclGroupStart, ncclGroupEnd  Est: 10m
-  - [x] S74.1.7 Bind ncclCommGetAsyncError for error checking  Est: 10m
-  - [x] S74.1.8 Write unit tests: init/destroy comm on single GPU, AllReduce with 1 rank  Est: 20m
-  - [x] S74.1.9 Run golangci-lint and go test -tags cuda -cover  Est: 5m
-  - Note: Also added doc.go (no build tag) for package identity. UniqueID serialization via Bytes/FromBytes included.
-
-- [x] T74.2 Add multi-GPU NCCL integration test  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
-  - Dependencies: T74.1
-  - Files: internal/nccl/nccl_test.go
-  - Acceptance: Test initializes NCCL communicator across 2 GPUs (skip if < 2 GPUs).
-    Each GPU has a different float32 buffer. ncclAllReduce(Sum) produces correct
-    element-wise sum on both GPUs. ncclBroadcast from rank 0 sends data to rank 1.
-    Uses goroutines (one per GPU) to simulate multi-rank within a process.
-  - [x] S74.2.1 Write 2-GPU AllReduce test with goroutines  Est: 30m
-  - [x] S74.2.2 Write 2-GPU Broadcast test  Est: 20m
-  - [x] S74.2.3 Write error handling test (invalid comm)  Est: 15m
-  - [x] S74.2.4 Run golangci-lint and go test -tags cuda -cover -race  Est: 5m
-
-- [x] T74.3 Run linters and verify coverage for E74  Owner: TBD  Est: 15m  Completed: 2026-03-03
-  - Dependencies: T74.2
+- [ ] T117.5 Run linters and verify coverage for E117  Owner: TBD  Est: 15m
+  - Dependencies: T117.4
   - Acceptance: golangci-lint 0 issues. go test -tags cuda -cover -race passes.
-    Coverage >= 95% on internal/nccl/.
-  - [x] S74.3.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [x] S74.3.2 Fix any remaining issues  Est: 5m
+    Coverage >= 95% on internal/cublas/ and compute/ BF16 paths.
+  - [ ] S117.5.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [ ] S117.5.2 Fix any remaining issues  Est: 5m
 
-#### E75: NCCL Strategy
+#### E118: Unified Memory Allocator
 
-Implement NcclStrategy[T] that performs gradient exchange directly on GPU memory
-using NCCL, avoiding CPU round-trips.
+Add cudaMallocManaged support to MemPool for zero-copy model loading on the
+DGX Spark GB10 unified memory architecture.
 
-- [x] T75.1 Create NcclStrategy[T] struct  Owner: TBD  Est: 1.5h  Completed: 2026-03-03
-  - Dependencies: E71, E74
-  - Files: distributed/nccl_strategy.go (new)
-  - Acceptance: NcclStrategy[T] implements InternalStrategy[T]. Fields: rank int,
-    size int, deviceID int, comm *nccl.NcclComm, engine *compute.GPUEngine[T],
-    stream *cuda.Stream, logger log.Logger. Static interface assertion
-    var _ InternalStrategy[float32] = (*NcclStrategy[float32])(nil) compiles.
-    All behind //go:build cuda.
-  - [x] S75.1.1 Create distributed/nccl_strategy.go with struct definition  Est: 15m
-  - [x] S75.1.2 Implement NewNcclStrategy constructor  Est: 15m
-  - [x] S75.1.3 Implement Init: create NCCL communicator with rank and size  Est: 20m
-  - [x] S75.1.4 Implement Rank(), Size() methods  Est: 5m
-  - [x] S75.1.5 Write constructor tests  Est: 15m
-  - [x] S75.1.6 Run golangci-lint and go test -cover  Est: 5m
-  - Note: Added InitWithUID for direct UID injection; Init kept for interface compliance.
+- [x] T118.1 Add MallocManaged CGo binding  2026-03-04
+  - Dependencies: None
+  - Files: internal/cuda/runtime.go
+  - Commit: 52a2500
+  - [x] S118.1.1 Add MallocManaged CGo binding  Est: 20m
+  - [x] S118.1.2 Write test: MallocManaged, write from host, read from host  Est: 15m
+  - [x] S118.1.3 Run golangci-lint and go test -tags cuda -cover  Est: 10m
 
-- [x] T75.2 Implement AllReduceGradients using NCCL  Owner: TBD  Est: 2h  Completed: 2026-03-03
-  - Dependencies: T75.1
-  - Files: distributed/nccl_strategy.go
-  - [x] S75.2.1 Implement AllReduceGradients: iterate tensors, call ncclAllReduce  Est: 30m
-  - [x] S75.2.2 Add stream synchronization after all reductions  Est: 15m
-  - [x] S75.2.3 Handle GPU tensors: extract device pointer without D2H copy  Est: 15m
-  - [x] S75.2.4 Add metrics instrumentation  Est: 10m
-  - [x] S75.2.5 Write 2-GPU test: different gradients, verify average (skip if < 2 GPUs)  Est: 25m
-  - [x] S75.2.6 Run golangci-lint and go test -tags cuda -cover  Est: 5m
-  - Note: Uses ncclGroupStart/GroupEnd to batch all reductions into a single launch.
+- [x] T118.2 Add AllocManaged to MemPool  2026-03-04
+  - Dependencies: T118.1
+  - Files: internal/cuda/mempool.go
+  - Commit: 52c4660
+  - [x] S118.2.1 Add managedCache field to MemPool  Est: 10m
+  - [x] S118.2.2 Implement AllocManaged with cache lookup and MallocManaged fallback  Est: 20m
+  - [x] S118.2.3 Add FreeManaged method to return to managed cache  Est: 10m
+  - [x] S118.2.4 Update Drain to free managed cache entries  Est: 10m
+  - [x] S118.2.5 Write tests: AllocManaged/FreeManaged round-trip, Drain clears both caches  Est: 15m
+  - [x] S118.2.6 Run golangci-lint and go test -tags cuda -cover -race  Est: 5m
 
-- [x] T75.3 Implement Barrier and BroadcastTensor using NCCL  Owner: TBD  Est: 1h  Completed: 2026-03-03
-  - Dependencies: T75.1
-  - Files: distributed/nccl_strategy.go
-  - [x] S75.3.1 Implement Barrier via dummy AllReduce  Est: 15m
-  - [x] S75.3.2 Implement BroadcastTensor via ncclBroadcast  Est: 20m
-  - [x] S75.3.3 Write tests for Barrier and Broadcast (skip if < 2 GPUs)  Est: 20m
-  - [x] S75.3.4 Run golangci-lint and go test -tags cuda -cover  Est: 5m
+- [x] T118.3 Add AllocManaged to gpuapi.MemPool interface and CUDAMemPool  2026-03-04
+  - Dependencies: T118.2
+  - Files: internal/gpuapi/mempool.go, internal/gpuapi/cuda_mempool.go,
+    internal/gpuapi/rocm_mempool.go, internal/gpuapi/opencl_mempool.go,
+    internal/gpuapi/gpuapi_test.go
+  - Commit: b15bf8c
+  - [x] S118.3.1 Add AllocManaged and FreeManaged to MemPool interface  Est: 10m
+  - [x] S118.3.2 Implement in CUDAMemPool  Est: 10m
+  - [x] S118.3.3 Add stubs in ROCm and OpenCL pool implementations  Est: 10m
 
-- [x] T75.4 Implement Shutdown  Owner: TBD  Est: 30m  Completed: 2026-03-03
-  - Dependencies: T75.1
-  - Files: distributed/nccl_strategy.go
-  - [x] S75.4.1 Implement Shutdown with sync.Once  Est: 10m
-  - [x] S75.4.2 Write test: single shutdown, double shutdown  Est: 10m
-  - [x] S75.4.3 Run golangci-lint and go test -cover  Est: 5m
+- [x] T118.4 Add ManagedGPUStorage option to GPUStorage  2026-03-04
+  - Dependencies: T118.3
+  - Files: tensor/gpu_storage.go, tensor/gpu_storage_test.go
+  - Commit: 5a6350a
+  - Note: NewManagedGPUStorage accepts gpuapi.MemPool (not runtime) since
+    AllocManaged lives on the MemPool interface. Tests require CUDA hardware.
+  - [x] S118.4.1 Add managed bool field to GPUStorage  Est: 5m
+  - [x] S118.4.2 Add NewManagedGPUStorage constructor  Est: 15m
+  - [x] S118.4.3 Update TrySlice to skip Memcpy for managed storage  Est: 15m
+  - [x] S118.4.4 Update TrySet to skip Memcpy for managed storage  Est: 10m
+  - [x] S118.4.5 Write tests: create managed storage, write, read, verify  Est: 15m
+  - [x] S118.4.6 Run golangci-lint and go test -tags cuda -cover -race  Est: 5m
 
-- [x] T75.5 Run linters and verify coverage for E75  Owner: TBD  Est: 15m  Completed: 2026-03-03
-  - Dependencies: T75.4
-  - [x] S75.5.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
-  - [x] S75.5.2 Fix any remaining issues  Est: 5m
+- [ ] T118.5 Benchmark managed vs discrete allocation on DGX Spark  Owner: TBD  Est: 30m
+  - Dependencies: T118.4
+  - Files: tensor/gpu_storage_test.go (benchmark function)
+  - Acceptance: BenchmarkManagedVsDiscrete compares allocation+H2D copy time for
+    discrete vs managed memory at sizes 1MB, 10MB, 100MB. Results in ADR-019.
+  - [ ] S118.5.1 Write benchmark function  Est: 15m
+  - [ ] S118.5.2 Run on DGX Spark and record results  Est: 15m
 
-#### E76: Phase 10 Final Verification
+- [ ] T118.6 Run linters and verify coverage for E118  Owner: TBD  Est: 15m
+  - Dependencies: T118.5
+  - Acceptance: golangci-lint 0 issues. go test -tags cuda -cover -race passes.
+    Coverage >= 95% on unified memory paths.
+  - [ ] S118.6.1 Run golangci-lint, go vet, go test -tags cuda -cover -race  Est: 10m
+  - [ ] S118.6.2 Fix any remaining issues  Est: 5m
 
-Run the full quality gate suite after all Phase 10 work is complete.
+#### E119: SigLIP Concat Shape Mismatch Fix
 
-- [x] T76.1 Run full test suite  Owner: TBD  Est: 30m  Completed: 2026-03-03
-  - Dependencies: E70, E71, E72, E73, E74, E75
-  - Acceptance: go test ./... -cover -race passes (CPU tests). go test -tags cuda
-    ./... -cover -race passes (GPU tests). No regressions in existing packages.
-    All multi-GPU tests skip gracefully on single-GPU or no-GPU systems.
-  - [x] S76.1.1 Run go test ./... -cover -race (CPU)  Est: 10m
-  - [x] S76.1.2 Run go test -tags cuda ./... -cover -race (GPU)  Est: 10m
-  - [x] S76.1.3 Verify multi-GPU tests skip gracefully  Est: 5m
-  - [x] S76.1.4 Fix any regressions  Est: 5m
-  - Note: All 57 packages pass. CUDA-gated tests excluded on macOS (no GPU). No regressions.
+Fix the Concat layer to handle rank-mismatched inputs by broadcasting or
+erroring clearly, and fix the SigLIP model's shape propagation so the parity
+test passes.
 
-- [x] T76.2 Run linters  Owner: TBD  Est: 15m  Completed: 2026-03-03
-  - Dependencies: T76.1
-  - Acceptance: golangci-lint run ./... reports 0 issues. go vet ./... clean.
-  - [x] S76.2.1 Run golangci-lint run ./...  Est: 5m
-  - [x] S76.2.2 Run go vet ./...  Est: 5m
-  - [x] S76.2.3 Fix any remaining issues  Est: 5m
-  - Note: golangci-lint 0 issues, go vet clean.
-
-- [x] T76.3 Update documentation  Owner: TBD  Est: 45m  Completed: 2026-03-03
-  - Dependencies: T76.2
-  - Files: docs/plan.md, docs/design.md, docs/gpu.md, docs/adr/ (new ADR)
-  - Acceptance: docs/plan.md Phase 10 tasks marked complete. docs/design.md updated
-    with multi-GPU section. docs/gpu.md updated with completion status. New ADR for
-    multi-GPU architecture decisions.
-  - [x] S76.3.1 Update docs/plan.md  Est: 10m
-  - [x] S76.3.2 Update docs/design.md with multi-GPU section  Est: 15m
-  - [x] S76.3.3 Create docs/adr/007-multi-gpu-architecture.md  Est: 15m
-  - [x] S76.3.4 Update docs/gpu.md with completion status  Est: 5m
-
-#### E116: Phase 21 Final Verification
-
-- [x] T116.1 Update documentation  2026-03-04
-  - Dependencies: E114, E115
-  - Files: docs/plan.md, docs/design.md, docs/adr/017-dgx-spark-hardware-validation.md
+- [ ] T119.1 Reproduce and diagnose SigLIP Concat failure  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: tests/parity/siglip_test.go, graph/graph.go
   - Steps:
-    1. Mark all Phase 21 tasks complete with results
-    2. Update design.md Section 15 with model parity results
-    3. Update ADR-017 with model parity results and multi-GPU gap inventory
-  - Acceptance: All docs reflect actual test results.
+    1. Run TestSigLIPForwardPass on DGX Spark to confirm the exact error
+    2. Add temporary debug logging at graph.go line 61 to print node 1462
+       input shapes and dependency ops
+    3. Trace backward from node 1462 to find which node produces the [1]
+       shape and which produces [1 1]
+    4. Identify the root cause: missing Unsqueeze, incorrect Reshape target
+       shape, or Concat not handling rank broadcast
+  - Acceptance: Root cause documented with the specific ONNX node type and
+    index that produces the wrong shape. Fix strategy identified.
+  - [ ] S119.1.1 Run SigLIP test on DGX Spark and capture full error  Est: 15m
+  - [ ] S119.1.2 Add debug logging to trace node 1462 inputs  Est: 15m
+  - [ ] S119.1.3 Identify root cause node and shape mismatch origin  Est: 30m
+  - [ ] S119.1.4 Document fix strategy  Est: 15m
+
+- [ ] T119.2 Fix shape propagation or Concat rank handling  Owner: TBD  Est: 1.5h
+  - Dependencies: T119.1
+  - Files: TBD based on diagnosis (likely one of: layers/core/concat.go,
+    compute/cpu_engine.go, model/builder.go, or a specific layer's Forward)
+  - Acceptance: The fix addresses the root cause identified in T119.1. If the
+    issue is in Concat itself, add rank broadcasting (Unsqueeze lower-rank
+    inputs to match the highest rank). If the issue is in a preceding node,
+    fix that node's output shape. The fix must not break existing Concat tests.
+  - [ ] S119.2.1 Write a failing test that reproduces the shape mismatch  Est: 20m
+  - [ ] S119.2.2 Implement the fix  Est: 30m
+  - [ ] S119.2.3 Verify the failing test now passes  Est: 10m
+  - [ ] S119.2.4 Run existing Concat tests to verify no regressions  Est: 10m
+  - [ ] S119.2.5 Run golangci-lint  Est: 5m
+
+- [ ] T119.3 Run SigLIP parity test on DGX Spark  Owner: TBD  Est: 30m
+  - Dependencies: T119.2
+  - Files: tests/parity/siglip_test.go
+  - Acceptance: TestSigLIPForwardPass PASS on DGX Spark with the SigLIP ZMF
+    model at ~/models/siglip/model.zmf. Update ADR-018 results table.
+  - [ ] S119.3.1 Deploy fix to DGX Spark  Est: 10m
+  - [ ] S119.3.2 Run SigLIP parity test  Est: 10m
+  - [ ] S119.3.3 Update ADR-018 results (SKIP -> PASS)  Est: 10m
+
+- [ ] T119.4 Run linters and verify coverage for E119  Owner: TBD  Est: 15m
+  - Dependencies: T119.3
+  - Acceptance: golangci-lint 0 issues. All existing tests pass. SigLIP parity
+    PASS.
+  - [ ] S119.4.1 Run golangci-lint, go vet, go test -cover -race  Est: 10m
+  - [ ] S119.4.2 Fix any remaining issues  Est: 5m
+
+#### E120: Phase 22 Final Verification
+
+- [ ] T120.1 Update documentation  Owner: TBD  Est: 30m
+  - Dependencies: E117, E118, E119
+  - Files: docs/plan.md, docs/design.md, docs/adr/019-phase22-bf16-unified-siglip.md
+  - Steps:
+    1. Mark all Phase 22 tasks complete with results
+    2. Create ADR-019 with BF16 benchmark results, unified memory benchmark,
+       and SigLIP fix details
+    3. Update design.md Section 15 with BF16 and unified memory results
+    4. Update ADR-018 results table (SigLIP SKIP -> PASS)
+  - Acceptance: All docs reflect actual results. ADR-019 written.
 
 ---
 
 ## 4. Timeline and Milestones
 
-M72-M93: All ACHIEVED (Phases 14-20). See ADRs 011-017.
+M72-M96: All ACHIEVED (Phases 10-21). See ADRs 007-018.
 
 | ID | Milestone | Dependencies | Exit Criteria |
 |----|-----------|--------------|---------------|
-| M94 | Model parity on GPU | E114 | All 7 model families' parity tests pass (or skip with documented reason) on DGX Spark |
-| M95 | Multi-GPU gap documented | E115 | Multi-GPU test inventory and prerequisites documented in ADR-017 |
-| M96 | Phase 21 complete | E116 | Skipped test coverage addressed; docs updated |
+| M97 | BF16 cuBLAS GEMM | E117 | GPUEngine[BFloat16].MatMul dispatches to GPU; benchmark recorded |
+| M98 | Unified memory allocator | E118 | cudaMallocManaged available in MemPool; managed GPUStorage works |
+| M99 | SigLIP parity PASS | E119 | TestSigLIPForwardPass PASS on DGX Spark |
+| M100 | Phase 22 complete | E120 | All three features implemented, tested, benchmarked, documented |
+
+Sequencing:
+- E117, E118, and E119 are independent and can proceed in parallel.
+- E120 depends on all three completing.
+- E117 T117.1-T117.3 can be developed locally (macOS). T117.4 requires DGX Spark.
+- E118 T118.1-T118.4 can be developed locally. T118.5 requires DGX Spark.
+- E119 T119.1 and T119.3 require DGX Spark. T119.2 may be doable locally
+  depending on the root cause.
 
 ---
 
@@ -637,10 +406,9 @@ Active risks only. Resolved/mitigated risks (R1-R13, R26) removed.
 | R28 | ARM64 memory ordering differs from x86 | Subtle concurrency bugs in CGo code | Low | Go runtime handles memory barriers. Monitor for flaky tests on ARM64. |
 | R30 | Gonum BLAS slower on ARM64 (no SIMD assembly) | CPU fallback operations significantly slower | Medium | Document perf gap. Long-term: link ARM-optimized BLAS (OpenBLAS with NEON). |
 | R31 | Single-GPU DGX Spark cannot validate multi-GPU code | NCCL and multi-GPU tests remain unvalidated | High | Tests skip gracefully. Second DGX Spark unit needed for full multi-GPU validation. |
-| R32 | HuggingFace model download requires gated access | Model download blocked without HF_TOKEN | Medium | Set HF_TOKEN env var on DGX Spark. Accept HF terms of use for gated models. |
-| R33 | Large models exceed DGX Spark memory (128 GB) | Cannot run parity tests for large models | Medium | Use smallest available model variants. Skip models that exceed memory limits and document. |
-| R34 | ONNX models not available for all families | zonnx conversion not possible | Medium | Check HuggingFace for ONNX variants. If unavailable, export using optimum or skip with doc. |
-| R35 | Model parity tests reveal GPU-vs-CPU numerical differences | Parity failures on GPU | Medium | Adjust tolerances for GPU execution. FP32 GPU math may differ from CPU in last bits. |
+| R36 | cublasGemmEx BF16 compute precision differs from CPU | Numerical mismatches in BF16 MatMul parity | Medium | Use CUBLAS_COMPUTE_32F (accumulate in FP32) for maximum precision. Document tolerance. |
+| R37 | cudaMallocManaged slower than cudaMalloc on PCIe GPUs | Performance regression on non-unified-memory hardware | Low | Managed memory is opt-in, not default. Only beneficial on NVLink-C2C (DGX Spark). Document. |
+| R38 | SigLIP Concat fix may require zonnx converter changes | Fix spans two repositories | Medium | Check if root cause is in zerfoo (shape propagation) or zonnx (ONNX import). Fix in the correct repo. |
 
 ---
 
@@ -657,8 +425,8 @@ A task is done when:
 6. Tests pass with `-race` flag.
 7. Non-CUDA build (`go build ./...` without any GPU tag) compiles.
 8. CUDA build (`go build -tags cuda ./...`) compiles.
-9. ROCm build (`go build -tags rocm ./...`) compiles (after Phase 15).
-10. OpenCL build (`go build -tags opencl ./...`) compiles (after Phase 16).
+9. ROCm build (`go build -tags rocm ./...`) compiles.
+10. OpenCL build (`go build -tags opencl ./...`) compiles.
 11. Changes are committed in a small commit touching one directory only.
 
 ### Review and QA Steps
@@ -682,7 +450,7 @@ A task is done when:
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(cudnn): add convolution forward binding`.
+- Use Conventional Commits: `feat(cublas): add BF16 GemmEx binding`.
 - Never allow changes to pile up. Commit after each completed subtask.
 - Always run linters and formatters before committing.
 
@@ -692,6 +460,8 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-04 | 22 | Change Summary: Created Phase 22 plan with 3 epics (E117-E119) and final verification (E120). Added BF16 cuBLAS GEMM (5 tasks), unified memory allocator (6 tasks), SigLIP Concat fix (4 tasks). Added risks R36-R38. New deliverables D56-D58, milestones M97-M100. |
+| 2026-03-04 | 21 | Phase 21 COMPLETE. T116.1 docs updated (27a94c8). All tasks marked complete. O32 COMPLETE. |
 | 2026-03-04 | 21 | Gemma 3 parity PASS (FP/GD/Gen). Fixes: tokenizer merges format, Gather embedded-indices, Slice hybrid mode, zonnx initializer promotion. Model parity now 11 PASS, 10 SKIP. |
 | 2026-03-04 | 21 | E115 COMPLETE. Multi-GPU test gap documented in ADR-017 (6 tests, hardware prereqs). Test runner script created (scripts/dgx-spark-multigpu.sh). Plan trimmed 1411->522 lines. ADR-018 written. |
 | 2026-03-03 | 20 | Phase 20 COMPLETE. ARM64 build (10 fixes), GPU tests (66 pkgs), benchmarks, feature gaps. ADR-017 written. |
@@ -707,11 +477,19 @@ A task is done when:
 - **Architecture:** Read docs/design.md for interface contracts, package layout,
   GPU architecture, operations, and troubleshooting. It is the single reference
   document. Design decisions are in docs/adr/.
-- **Phases 1-20:** Complete. See ADRs 001-017.
-- **Phase 21 (Skipped test coverage):** IN PROGRESS. Install zonnx on DGX
-  Spark, download remaining model families from HuggingFace, convert to ZMF,
-  run model parity tests with GPU. Document multi-GPU gap.
-  SSH: `ndungu@192.168.86.250`.
+- **Phases 1-21:** Complete. See ADRs 001-018.
+- **Phase 22 (Current):** BF16 GEMM + unified memory + SigLIP fix. Three
+  independent epics (E117, E118, E119) that can proceed in parallel.
+- **BF16 context:** The `float16` package (../float16) has a complete BFloat16
+  type. `tensor.Numeric` includes it. `model/tensor_decoder.go` decodes it from
+  ZMF files. What is missing: GPU compute dispatch in `compute/gpu_engine.go`
+  and cuBLAS BF16 binding in `internal/cublas/cublas.go`.
+- **Unified memory context:** DGX Spark GB10 has NVLink-C2C unified memory.
+  `cudaMallocManaged` enables zero-copy. Currently `MemPool` only uses
+  `cudaMalloc`. The Runtime interface in `internal/gpuapi/runtime.go` needs a
+  `MallocManaged` method.
+- **SigLIP context:** Concat fails at node 1462 with rank mismatch [1] vs [1 1].
+  Debug on DGX Spark with the SigLIP ZMF at ~/models/siglip/model.zmf.
 - **How to build:**
   - CPU: `go build ./...`
   - CUDA: `go build -tags cuda ./...`
@@ -740,7 +518,7 @@ A task is done when:
 
 ## 9. Appendix
 
-### Production Readiness Scorecard (After Phase 20)
+### Production Readiness Scorecard (After Phase 21)
 
 | Category | Score | How Achieved |
 |----------|-------|-------------|
@@ -757,50 +535,20 @@ A task is done when:
 | GPU Performance | 10/10 | cuBLAS + cuDNN + TensorRT (dynamic shapes) + CUTLASS flash attention + INT4/INT8 GEMM |
 | GPU Portability | 8/10 | NVIDIA (CUDA/cuDNN/TensorRT), AMD (ROCm/HIP/MIOpen), OpenCL (CLBlast) |
 
-### New Packages and Files (Phases 1-10)
+### Key Files for Phase 22
 
-| Package / File | Purpose | Phase |
-|---------|---------|-------|
-| log/ | Structured logging with levels | 4 |
-| metrics/runtime/ | Runtime metrics collection | 4 |
-| config/ | File-based configuration loading | 4 |
-| shutdown/ | Graceful shutdown coordinator | 4 |
-| health/ | HTTP health check server | 4 |
-| cmd/coverage-gate/ | CI coverage enforcement script | 4 |
-| cmd/bench-compare/ | CI benchmark regression detection | 4 |
-| distributed/worker_service.go | DistributedServiceServer (AllReduce, Barrier, Broadcast) | 5 |
-| distributed/grpc_strategy.go | GrpcStrategy[T] over gRPC | 5 |
-| distributed/integration_test.go | Multi-worker integration tests | 5 |
-| distributed/worker_node.go | WorkerNode lifecycle management | 5 |
-| cmd/cli/worker.go | Worker CLI subcommand | 5 |
-| layers/activations/{softmax,erf}.go | Softmax, Erf layer nodes | 6 |
-| layers/normalization/batch_norm.go | BatchNormalization inference mode | 6 |
-| layers/core/{slice,pad,topk,conv2d,global_avg_pool,resize,moe,constant}.go | Core operators | 6 |
-| tests/parity/{gemma3,siglip}_test.go | Model parity tests | 6 |
-| pkg/tokenizer/{bpe,loader}.go | Production BPE tokenizer | 8 |
-| generate/{kvcache,context,generator,sampling,stream}.go | Generation pipeline | 8 |
-| registry/{registry,pull}.go | Model registry + HuggingFace download | 8 |
-| inference/{inference,chat,embed}.go | High-level API | 8 |
-| serve/server.go | OpenAI-compatible HTTP server | 8 |
-| cmd/cli/{pull,run,serve}.go | CLI commands | 8 |
-| inference/arch_config.go | Multi-architecture config parsing | 9 |
-| model/param_resolver.go | Architecture-specific param resolution | 9 |
-| layers/attention/{multi_head_latent_attention,mla_registry}.go | MLA for DeepSeek | 9 |
-| tests/parity/{llama3,mistral,qwen,phi4,deepseek}_test.go | Parity tests | 9 |
-| internal/nccl/{doc,nccl}.go | NCCL CGo bindings | 10 |
-| distributed/nccl_strategy.go | NcclStrategy[T] | 10 |
-| inference/{engine_cuda,engine_nocuda}.go | Build-tag-gated engine creation | 10 |
-| tests/parity/multigpu_test.go | Multi-GPU integration test | 10 |
-
-### New Packages and Files (Phases 11-13)
-
-| Package / File | Purpose | Epic |
-|---------|---------|------|
-| internal/cudnn/{doc,cudnn}.go | cuDNN CGo bindings | E77 |
-| compute/gpu_cudnn.go | cuDNN operations on GPUEngine | E78 |
-| internal/tensorrt/{doc,tensorrt}.go | TensorRT CGo bindings | E80 |
-| internal/tensorrt/cshim/{trt_capi.h,trt_capi.cpp} | C shim for TensorRT C++ API | E80 |
-| inference/{tensorrt_convert,tensorrt_cache,tensorrt_pipeline}.go | TRT converter, cache, pipeline | E81-E82 |
-| internal/cuda/kernels/{flash_attention.h,flash_attention.cu,flash_attention.go} | Flash attention kernel + bindings | E84 |
-| layers/attention/{flash_cuda,flash_nocuda}.go | Flash attention dispatch | E85 |
-| tests/parity/flash_attention_test.go | Flash attention benchmark + parity | E85 |
+| File | Purpose | Epic |
+|------|---------|------|
+| internal/cublas/cublas.go | cuBLAS CGo bindings (add GemmEx) | E117 |
+| internal/gpuapi/blas.go | BLAS interface (add BFloat16Gemm) | E117 |
+| internal/gpuapi/cuda_blas.go | CUDA BLAS adapter (implement BFloat16Gemm) | E117 |
+| compute/gpu_engine.go | GPUEngine MatMul (add BF16 dispatch) | E117 |
+| compute/gpu_kernels.go | GPU kernel helpers (fix elemSize) | E117 |
+| internal/cuda/cuda.go | CUDA runtime (add MallocManaged) | E118 |
+| internal/cuda/mempool.go | MemPool (add AllocManaged) | E118 |
+| internal/gpuapi/mempool.go | MemPool interface (add AllocManaged) | E118 |
+| internal/gpuapi/cuda_mempool.go | CUDA pool adapter (add AllocManaged) | E118 |
+| tensor/gpu_storage.go | GPUStorage (add managed mode) | E118 |
+| layers/core/concat.go | Concat layer (fix or trace) | E119 |
+| compute/cpu_engine.go | Concat shape validation (possible fix) | E119 |
+| tests/parity/siglip_test.go | SigLIP parity test | E119 |
