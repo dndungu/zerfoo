@@ -49,6 +49,18 @@ func LoadModelFromZMF[T tensor.Numeric](
 		return nil, err
 	}
 
+	return BuildModelFromProto(engine, ops, zmfModel, buildOpts...)
+}
+
+// BuildModelFromProto builds a Model from an already-parsed ZMF protobuf.
+// This is useful when the caller has obtained the *zmf.Model through a
+// different loading mechanism (e.g., mmap).
+func BuildModelFromProto[T tensor.Numeric](
+	engine compute.Engine[T],
+	ops numeric.Arithmetic[T],
+	zmfModel *zmf.Model,
+	buildOpts ...BuildOption,
+) (*Model[T], error) {
 	g, err := BuildFromZMF(engine, ops, zmfModel, buildOpts...)
 	if err != nil {
 		return nil, err
