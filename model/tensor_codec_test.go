@@ -678,3 +678,172 @@ func TestDecodeTensor_UINT8_InvalidDataLength(t *testing.T) {
 		t.Error("expected error for invalid uint8 data length")
 	}
 }
+
+// --- Q4_0 / Q8_0 quantized decode tests ---
+
+// encodeQ4Block creates raw Q4_0 block bytes (18 bytes) for testing.
+func encodeQ4Block(scale float16.Float16, nibbles [16]byte) []byte {
+	b := make([]byte, 18)
+	binary.LittleEndian.PutUint16(b[0:2], scale.Bits())
+	copy(b[2:], nibbles[:])
+	return b
+}
+
+// encodeQ8Block creates raw Q8_0 block bytes (36 bytes) for testing.
+func encodeQ8Block(scale float32, data [32]int8) []byte {
+	b := make([]byte, 36)
+	binary.LittleEndian.PutUint32(b[0:4], math.Float32bits(scale))
+	for i, v := range data {
+		b[4+i] = byte(v)
+	}
+	return b
+}
+
+func TestDecodeTensor_Q4_0_ToFloat32(t *testing.T) {
+	// Build a single Q4_0 block: scale=0.5, all nibbles encode value 0 (offset 8).
+	scale := float16.FromFloat32(0.5)
+	var nibbles [16]byte
+	for i := range nibbles {
+		nibbles[i] = 0x88 // two zeros: (0+8) | ((0+8)<<4)
+	}
+	rawData := encodeQ4Block(scale, nibbles)
+
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q4_0,
+		Shape: []int64{32},
+		Data:  rawData,
+	}
+
+	decoded, err := DecodeTensor[float32](proto)
+	if err != nil {
+		t.Fatalf("DecodeTensor Q4_0 failed: %v", err)
+	}
+	if decoded.Size() != 32 {
+		t.Errorf("expected size 32, got %d", decoded.Size())
+	}
+	// All values should be 0 (q=0, scale=0.5, result=0*0.5=0).
+	for i, v := range decoded.Data() {
+		if v != 0 {
+			t.Errorf("element %d: got %v, want 0", i, v)
+		}
+	}
+}
+
+func TestDecodeTensor_Q4_0_NonZeroValues(t *testing.T) {
+	scale := float16.FromFloat32(1.0)
+	var nibbles [16]byte
+	// First pair: q0=1 (1+8=9), q1=-1 (-1+8=7). packed = 9 | (7<<4) = 0x79
+	nibbles[0] = 0x79
+	// Rest: zeros.
+	for i := 1; i < 16; i++ {
+		nibbles[i] = 0x88
+	}
+	rawData := encodeQ4Block(scale, nibbles)
+
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q4_0,
+		Shape: []int64{32},
+		Data:  rawData,
+	}
+
+	decoded, err := DecodeTensor[float32](proto)
+	if err != nil {
+		t.Fatalf("DecodeTensor Q4_0 failed: %v", err)
+	}
+	data := decoded.Data()
+	if data[0] != 1.0 {
+		t.Errorf("element 0: got %v, want 1.0", data[0])
+	}
+	if data[1] != -1.0 {
+		t.Errorf("element 1: got %v, want -1.0", data[1])
+	}
+}
+
+func TestDecodeTensor_Q4_0_TooShort(t *testing.T) {
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q4_0,
+		Shape: []int64{32},
+		Data:  []byte{0x01, 0x02}, // only 2 bytes, need 18
+	}
+	_, err := DecodeTensor[float32](proto)
+	if err == nil {
+		t.Error("expected error for too-short Q4_0 data")
+	}
+}
+
+func TestDecodeTensor_Q4_0_UnsupportedDestType(t *testing.T) {
+	scale := float16.FromFloat32(1.0)
+	var nibbles [16]byte
+	for i := range nibbles {
+		nibbles[i] = 0x88
+	}
+	rawData := encodeQ4Block(scale, nibbles)
+
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q4_0,
+		Shape: []int64{32},
+		Data:  rawData,
+	}
+
+	_, err := DecodeTensor[int8](proto)
+	if err == nil {
+		t.Error("expected error for unsupported dest type for Q4_0")
+	}
+}
+
+func TestDecodeTensor_Q8_0_ToFloat32(t *testing.T) {
+	var data [32]int8
+	data[0] = 127  // max positive
+	data[1] = -128 // max negative
+	// rest are 0
+	rawData := encodeQ8Block(0.5, data)
+
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q8_0,
+		Shape: []int64{32},
+		Data:  rawData,
+	}
+
+	decoded, err := DecodeTensor[float32](proto)
+	if err != nil {
+		t.Fatalf("DecodeTensor Q8_0 failed: %v", err)
+	}
+	d := decoded.Data()
+	if d[0] != 127*0.5 {
+		t.Errorf("element 0: got %v, want %v", d[0], 127*0.5)
+	}
+	if d[1] != -128*0.5 {
+		t.Errorf("element 1: got %v, want %v", d[1], -128*0.5)
+	}
+	if d[2] != 0 {
+		t.Errorf("element 2: got %v, want 0", d[2])
+	}
+}
+
+func TestDecodeTensor_Q8_0_TooShort(t *testing.T) {
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q8_0,
+		Shape: []int64{32},
+		Data:  []byte{0x01, 0x02, 0x03, 0x04}, // only 4 bytes, need 36
+	}
+	_, err := DecodeTensor[float32](proto)
+	if err == nil {
+		t.Error("expected error for too-short Q8_0 data")
+	}
+}
+
+func TestDecodeTensor_Q8_0_UnsupportedDestType(t *testing.T) {
+	var data [32]int8
+	rawData := encodeQ8Block(1.0, data)
+
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q8_0,
+		Shape: []int64{32},
+		Data:  rawData,
+	}
+
+	_, err := DecodeTensor[int8](proto)
+	if err == nil {
+		t.Error("expected error for unsupported dest type for Q8_0")
+	}
+}
