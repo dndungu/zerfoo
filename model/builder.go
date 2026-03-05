@@ -599,8 +599,6 @@ func resolveOutputSuffix[T tensor.Numeric](name string, nodeMap map[string]graph
 }
 
 // getNodeNames returns a slice of all node names for debugging.
-//
-//nolint:unused // helper retained for debugging/logging during development
 func getNodeNames[T tensor.Numeric](nodes map[string]graph.Node[T]) []string {
 	names := make([]string, 0, len(nodes))
 	for name := range nodes {
