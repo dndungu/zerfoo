@@ -77,7 +77,9 @@ Skipped tests (expected, single-GPU device):
 - TestMemPoolNoCrossDeviceReuse, TestMemPoolMultiDeviceStats
 - TestTwoGPUAllReduce, TestTwoGPUBroadcast
 - TestMultiGPU_DualDeviceInference
-- Model parity tests (no ZMF model files on device)
+
+Model parity tests were resolved in Phase 21 (see E114 and ADR-018). 17 PASS,
+5 SKIP remaining (DeepSeek too large, SigLIP graph issue, MultiGPU 1 device).
 
 ### Performance Benchmarks (E111)
 
@@ -192,6 +194,14 @@ skip on this hardware:
 **Acceptance criteria:** When a second DGX Spark unit is connected and
 configured, all 6 tests should pass. The test automation script
 `scripts/dgx-spark-multigpu.sh` provides the exact commands.
+
+### Model Parity Testing (E114, Phase 21)
+
+Phase 21 resolved the model parity skip gap by downloading, converting, and
+deploying ZMF model files for 7 model families on DGX Spark. 18 ONNX-
+compatibility bugs were fixed. Results: 17 PASS, 5 SKIP (DeepSeek too large,
+SigLIP graph issue, MultiGPU single device). See
+[ADR-018](018-model-parity-testing.md) for detailed results and bug fix list.
 
 ## Consequences
 

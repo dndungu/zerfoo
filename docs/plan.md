@@ -39,7 +39,7 @@ O29-O31: COMPLETE (Phase 20). ARM64 build compatibility, Blackwell GPU
 validation, feature gap assessment.
 
 - O32: Run all model parity tests on GPU by downloading, converting, and
-  deploying ZMF model files for all 7 model families on DGX Spark. **(IN PROGRESS)**
+  deploying ZMF model files for all 7 model families on DGX Spark. **(COMPLETE)**
 - O33: Document multi-GPU test coverage gap and define the conditions under
   which multi-GPU tests can be validated. **(COMPLETE)**
 
@@ -232,16 +232,12 @@ variants are preferred to fit within DGX Spark memory.
 
 #### E114: Model Parity Test Coverage on GPU
 
-- [ ] T114.1 Install zonnx CLI on DGX Spark  Owner: TBD  Est: 30m
-  - Dependencies: None
-  - Steps on DGX Spark (ndungu@192.168.86.250):
-    1. Clone zonnx repo: `git clone` to ~/zonnx
-    2. Build: `cd ~/zonnx && go build -o ~/bin/zonnx .`
-    3. Verify: `~/bin/zonnx --help`
+- [x] T114.1 Install zonnx CLI on DGX Spark  2026-03-04
+  - Cloned zonnx repo, built binary, verified CLI on DGX Spark.
   - Acceptance: `zonnx download --help` and `zonnx convert --help` succeed.
-  - [ ] S114.1.1 Clone zonnx repo on DGX Spark  Est: 5m
-  - [ ] S114.1.2 Build zonnx binary  Est: 15m
-  - [ ] S114.1.3 Verify CLI works  Est: 5m
+  - [x] S114.1.1 Clone zonnx repo on DGX Spark  Est: 5m
+  - [x] S114.1.2 Build zonnx binary  Est: 15m
+  - [x] S114.1.3 Verify CLI works  Est: 5m
 
 - [x] T114.2 Download and convert Gemma 3 model  2026-03-04
   - Downloaded google/gemma-3-1b-it via optimum-cli ONNX export on DGX Spark.
@@ -596,7 +592,7 @@ Run the full quality gate suite after all Phase 10 work is complete.
 
 #### E116: Phase 21 Final Verification
 
-- [ ] T116.1 Update documentation  Owner: TBD  Est: 30m
+- [x] T116.1 Update documentation  2026-03-04
   - Dependencies: E114, E115
   - Files: docs/plan.md, docs/design.md, docs/adr/017-dgx-spark-hardware-validation.md
   - Steps:
