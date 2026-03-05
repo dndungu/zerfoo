@@ -12,14 +12,16 @@ import (
 // avoiding the overhead of cudaMalloc/cudaFree on every operation and
 // preventing cross-device pointer reuse in multi-GPU setups.
 type MemPool struct {
-	mu    sync.Mutex
-	cache map[int]map[int][]unsafe.Pointer // deviceID -> byteSize -> list of free device pointers
+	mu           sync.Mutex
+	cache        map[int]map[int][]unsafe.Pointer // deviceID -> byteSize -> list of free device pointers
+	managedCache map[int]map[int][]unsafe.Pointer // same structure for managed (unified) memory
 }
 
 // NewMemPool creates a new empty memory pool.
 func NewMemPool() *MemPool {
 	return &MemPool{
-		cache: make(map[int]map[int][]unsafe.Pointer),
+		cache:        make(map[int]map[int][]unsafe.Pointer),
+		managedCache: make(map[int]map[int][]unsafe.Pointer),
 	}
 }
 
@@ -61,6 +63,41 @@ func (p *MemPool) Free(deviceID int, ptr unsafe.Pointer, byteSize int) {
 	p.mu.Unlock()
 }
 
+// AllocManaged returns a unified memory pointer of the given byte size.
+// If a cached managed allocation of the exact (deviceID, byteSize) exists,
+// it is reused. Otherwise SetDevice is called and cudaMallocManaged is used.
+func (p *MemPool) AllocManaged(deviceID, byteSize int) (unsafe.Pointer, error) {
+	p.mu.Lock()
+	if devCache := p.managedCache[deviceID]; devCache != nil {
+		if ptrs := devCache[byteSize]; len(ptrs) > 0 {
+			ptr := ptrs[len(ptrs)-1]
+			devCache[byteSize] = ptrs[:len(ptrs)-1]
+			p.mu.Unlock()
+
+			return ptr, nil
+		}
+	}
+	p.mu.Unlock()
+
+	if err := SetDevice(deviceID); err != nil {
+		return nil, err
+	}
+
+	return MallocManaged(byteSize)
+}
+
+// FreeManaged returns a managed memory pointer to the pool for later reuse.
+func (p *MemPool) FreeManaged(deviceID int, ptr unsafe.Pointer, byteSize int) {
+	p.mu.Lock()
+	devCache := p.managedCache[deviceID]
+	if devCache == nil {
+		devCache = make(map[int][]unsafe.Pointer)
+		p.managedCache[deviceID] = devCache
+	}
+	devCache[byteSize] = append(devCache[byteSize], ptr)
+	p.mu.Unlock()
+}
+
 // Drain releases all cached device memory back to CUDA. Iterates all
 // devices, calling SetDevice before freeing each device's pointers.
 // Returns the first error encountered, but attempts to free all pointers.
@@ -86,6 +123,25 @@ func (p *MemPool) Drain() error {
 		}
 
 		delete(p.cache, deviceID)
+	}
+
+	// Drain managed cache (cudaFree works for managed memory).
+	for deviceID, devCache := range p.managedCache {
+		if err := SetDevice(deviceID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+
+		for size, ptrs := range devCache {
+			for _, ptr := range ptrs {
+				if err := Free(ptr); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+
+			delete(devCache, size)
+		}
+
+		delete(p.managedCache, deviceID)
 	}
 
 	return firstErr
