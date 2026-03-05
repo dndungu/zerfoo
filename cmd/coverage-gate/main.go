@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -27,32 +28,41 @@ func main() {
 		excludePrefixes = strings.Split(*exclude, ",")
 	}
 
-	results, err := parseCoverageProfile(*profile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	if err := run(*profile, *threshold, excludePrefixes, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+// run contains the core logic: parse coverage profile, check each package
+// against the threshold, and report results. Returns an error if any package
+// is below the threshold.
+func run(profilePath string, threshold float64, excludePrefixes []string, w io.Writer) error {
+	results, err := parseCoverageProfile(profilePath)
+	if err != nil {
+		return fmt.Errorf("error: %w", err)
 	}
 
 	failed := false
 	for pkg, cov := range results {
 		if isExcluded(pkg, excludePrefixes) {
-			fmt.Printf("%-60s %5.1f%%  SKIP\n", pkg, cov)
+			_, _ = fmt.Fprintf(w, "%-60s %5.1f%%  SKIP\n", pkg, cov)
 			continue
 		}
 		status := "PASS"
-		if cov < *threshold {
+		if cov < threshold {
 			status = "FAIL"
 			failed = true
 		}
-		fmt.Printf("%-60s %5.1f%%  %s\n", pkg, cov, status)
+		_, _ = fmt.Fprintf(w, "%-60s %5.1f%%  %s\n", pkg, cov, status)
 	}
 
 	if failed {
-		fmt.Fprintf(os.Stderr, "\ncoverage gate failed: one or more packages below %.1f%%\n", *threshold)
-		os.Exit(1)
+		return fmt.Errorf("coverage gate failed: one or more packages below %.1f%%", threshold)
 	}
 
-	fmt.Printf("\nAll packages at or above %.1f%% coverage.\n", *threshold)
+	_, _ = fmt.Fprintf(w, "\nAll packages at or above %.1f%% coverage.\n", threshold)
+	return nil
 }
 
 // packageCoverage tracks statement counts for a single package.
