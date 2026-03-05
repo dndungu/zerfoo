@@ -115,8 +115,14 @@ func (q *Q4Storage) Slice() []float32 {
 	return dst
 }
 
+// Set is not supported on quantized storage (weights are immutable).
+func (q *Q4Storage) Set(_ []float32) { panic("Q4Storage is immutable") }
+
 // DeviceType returns device.CPU.
 func (q *Q4Storage) DeviceType() device.Type { return device.CPU }
+
+// Ensure Q4Storage implements Storage[float32].
+var _ Storage[float32] = (*Q4Storage)(nil)
 
 // ---------------------------------------------------------------------------
 // Q8_0 format: 32 values per block.
@@ -209,8 +215,14 @@ func (q *Q8Storage) Slice() []float32 {
 	return dst
 }
 
+// Set is not supported on quantized storage (weights are immutable).
+func (q *Q8Storage) Set(_ []float32) { panic("Q8Storage is immutable") }
+
 // DeviceType returns device.CPU.
 func (q *Q8Storage) DeviceType() device.Type { return device.CPU }
+
+// Ensure Q8Storage implements Storage[float32].
+var _ Storage[float32] = (*Q8Storage)(nil)
 
 func clampInt(v, lo, hi int) int {
 	if v < lo {
