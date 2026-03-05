@@ -90,6 +90,109 @@ func TestSgemm(t *testing.T) {
 	}
 }
 
+func TestGemmEx(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        []float32
+		b        []float32
+		m, n, k  int
+		aType    CudaDataType
+		bType    CudaDataType
+		cType    CudaDataType
+		expected []float32
+		tol      float32
+	}{
+		{
+			name:     "FP32_2x2",
+			a:        []float32{1, 2, 3, 4},
+			b:        []float32{5, 6, 7, 8},
+			m:        2, n: 2, k: 2,
+			aType:    CudaR32F,
+			bType:    CudaR32F,
+			cType:    CudaR32F,
+			expected: []float32{19, 22, 43, 50},
+			tol:      0,
+		},
+		{
+			name:     "FP32_identity",
+			a:        []float32{1, 0, 0, 1},
+			b:        []float32{3, 7, 11, 13},
+			m:        2, n: 2, k: 2,
+			aType:    CudaR32F,
+			bType:    CudaR32F,
+			cType:    CudaR32F,
+			expected: []float32{3, 7, 11, 13},
+			tol:      0,
+		},
+	}
+
+	h, err := CreateHandle()
+	if err != nil {
+		t.Fatalf("CreateHandle: %v", err)
+	}
+	defer func() { _ = h.Destroy() }()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			elemSize := 4 // float32
+			aBytes := len(tc.a) * elemSize
+			bBytes := len(tc.b) * elemSize
+			cBytes := tc.m * tc.n * elemSize
+
+			devA, err := cuda.Malloc(aBytes)
+			if err != nil {
+				t.Fatalf("Malloc A: %v", err)
+			}
+			defer func() { _ = cuda.Free(devA) }()
+
+			devB, err := cuda.Malloc(bBytes)
+			if err != nil {
+				t.Fatalf("Malloc B: %v", err)
+			}
+			defer func() { _ = cuda.Free(devB) }()
+
+			devC, err := cuda.Malloc(cBytes)
+			if err != nil {
+				t.Fatalf("Malloc C: %v", err)
+			}
+			defer func() { _ = cuda.Free(devC) }()
+
+			if err := cuda.Memcpy(devA, unsafe.Pointer(&tc.a[0]), aBytes, cuda.MemcpyHostToDevice); err != nil {
+				t.Fatalf("Memcpy A: %v", err)
+			}
+			if err := cuda.Memcpy(devB, unsafe.Pointer(&tc.b[0]), bBytes, cuda.MemcpyHostToDevice); err != nil {
+				t.Fatalf("Memcpy B: %v", err)
+			}
+
+			err = GemmEx(h, tc.m, tc.n, tc.k, 1.0,
+				devA, tc.aType,
+				devB, tc.bType,
+				0.0,
+				devC, tc.cType,
+				CublasCompute32F,
+			)
+			if err != nil {
+				t.Fatalf("GemmEx: %v", err)
+			}
+
+			result := make([]float32, tc.m*tc.n)
+			if err := cuda.Memcpy(unsafe.Pointer(&result[0]), devC, cBytes, cuda.MemcpyDeviceToHost); err != nil {
+				t.Fatalf("Memcpy C D2H: %v", err)
+			}
+
+			for i, want := range tc.expected {
+				diff := result[i] - want
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > tc.tol {
+					t.Errorf("C[%d] = %f, want %f (tol %f)", i, result[i], want, tc.tol)
+				}
+			}
+		})
+	}
+}
+
 func TestSgemmNonSquare(t *testing.T) {
 	// A = [[1, 2, 3]]    (1x3)
 	// B = [[4], [5], [6]] (3x1)
