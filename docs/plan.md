@@ -42,6 +42,13 @@ Phase 22 addresses three gaps identified during Phase 20-21 validation:
    tensors at a Concat input. Root cause is likely a missing Unsqueeze or
    incorrect shape propagation in a preceding node.
 
+Phase 23 raises test coverage across all packages toward 100%. Coverage
+baseline measured on 2026-03-04 shows 8 packages at 100%, 24 packages at
+95-99%, 12 packages at 90-94%, and 6 packages below 90%. The worst offenders
+are `layers/core` (76.0%), `cmd/bench-compare` (52.6%), and
+`cmd/coverage-gate` (53.5%). The `layers/core` package has ~15 ONNX operator
+implementations with zero test coverage.
+
 Architecture, design, GPU details, operations, and troubleshooting are
 documented in docs/design.md (the single reference document). Stable design
 decisions are extracted into docs/adr/ (see [ADR index](design.md#14-architectural-decision-records)).
@@ -57,6 +64,9 @@ O32-O33: COMPLETE (Phase 21). See ADR-018.
   loading on DGX Spark GB10 unified memory. **(IN PROGRESS)**
 - O36: Fix SigLIP vision model Concat shape mismatch so the SigLIP parity test
   passes. **(IN PROGRESS)**
+- O37: Raise test coverage to 100% where possible across all packages, with a
+  floor of 95% for packages that have hard-to-test paths (main functions, GPU
+  build tags, external dependencies). **(NOT STARTED)**
 
 ### Non-Goals
 
@@ -79,6 +89,8 @@ O32-O33: COMPLETE (Phase 21). See ADR-018.
 - ROCm or OpenCL BF16 GEMM (CUDA only for Phase 22).
 - Unified memory for ROCm or OpenCL (CUDA only for Phase 22).
 - Full FP16 GPU kernel support (only MatMul via cuBLAS for Phase 22).
+- Testing GPU-tagged code on macOS (no CUDA/ROCm/OpenCL available locally).
+- Refactoring code solely to improve testability (test the code as-is).
 
 ### Constraints and Assumptions
 
@@ -123,6 +135,16 @@ Phase 22 metrics:
 | Unified memory model load | Model loaded via managed memory skips explicit H2D copy | NOT STARTED |
 | SigLIP parity test | TestSigLIPForwardPass PASS on DGX Spark | NOT STARTED |
 
+Phase 23 metrics:
+
+| Metric | Target | Status |
+|--------|--------|--------|
+| Packages at 100% coverage | >= 20 (up from 8) | NOT STARTED |
+| Packages below 90% coverage | 0 (down from 6) | NOT STARTED |
+| Overall minimum coverage | >= 95% for every testable package | NOT STARTED |
+| layers/core coverage | >= 95% (up from 76.0%) | NOT STARTED |
+| model coverage | >= 95% (up from 81.4%) | NOT STARTED |
+
 ---
 
 ## 2. Scope and Deliverables
@@ -134,6 +156,10 @@ D11-D55: COMPLETE. See ADRs 007-018.
 | D56 | BF16 cuBLAS GEMM | cublasGemmEx binding + GPUEngine BF16 MatMul dispatch |
 | D57 | Unified memory allocator | cudaMallocManaged in MemPool + GPUStorage integration |
 | D58 | SigLIP Concat fix | Concat handles rank-mismatched inputs; SigLIP parity PASS |
+| D59 | layers/core 100% coverage | Tests for all 15+ untested ONNX operators |
+| D60 | model 95%+ coverage | Tests for BuildFromZMF paths, builder helpers, adapters |
+| D61 | CLI tools 95%+ coverage | Extract testable logic from cmd/bench-compare and cmd/coverage-gate |
+| D62 | All packages 95%+ floor | Every testable package at >= 95% statement coverage |
 
 ---
 
@@ -361,6 +387,334 @@ test passes.
     4. Update ADR-018 results table (SigLIP SKIP -> PASS)
   - Acceptance: All docs reflect actual results. ADR-019 written.
 
+### Phase 23: Test Coverage to 100%
+
+#### Phase 23 Context
+
+Coverage baseline measured 2026-03-04 (no GPU build tags, macOS):
+
+**Already at 100% (8 packages):**
+data, device, internal/xblas, layers/components, layers/registry,
+layers/tokenizers, metrics, shutdown.
+
+**95-99% (24 packages):**
+config (95.8%), distributed (96.0%), distributed/coordinator (98.3%),
+features (99.0%), generate (95.0%), graph (97.3%), layers/activations (97.4%),
+layers/hrm (95.5%), layers/normalization (95.7%), layers/recurrent (97.0%),
+layers/reducesum (95.9%), layers/regularization (97.6%),
+layers/transformer (96.4%), layers/transpose (97.6%), log (97.7%),
+metrics/runtime (96.5%), model/hrm (98.1%), numeric (98.5%), serve (96.4%),
+tensor (97.9%), training (95.9%), training/optimizer (96.6%),
+tests/internal/testutil (98.5%), testing/testutils (94.5%).
+
+**90-94% (12 packages):**
+cmd/cli (92.5%), compute (93.7%), health (90.0%), inference (91.8%),
+layers/attention (91.8%), layers/embeddings (92.5%), layers/features (93.8%),
+layers/gather (91.6%), layers/sequence (94.0%), pkg/tokenizer (90.3%),
+registry (91.2%), testing/testutils (94.5%).
+
+**Below 90% (6 packages):**
+cmd/bench-compare (52.6%), cmd/coverage-gate (53.5%), layers/core (76.0%),
+model (81.4%), training/loss (87.3%), cmd/zerfoo-tokenize (0.0%).
+
+Key coverage gaps identified by per-function analysis:
+- `layers/core`: 15 ONNX operators at 0% (ConstantOfShape, Div, Equal, Expand,
+  Greater, Neg, Pow, Range, ReduceMean, ScatterND, Sqrt, Trilu, Where,
+  LessOrEqual, Mod, Or). Several more operators partially tested.
+- `model/builder.go`: `BuildFromZMF` at 60.7%; `resolveParam`,
+  `rebuildWithPromotedAxes`, `isConstantPromotedAttr`, `getNodeNames` at 0%.
+- `cmd/bench-compare`: `main()` at 0%; `parseBenchmarks` at 92.6%.
+- `cmd/coverage-gate`: `main()` at 0%; `isExcluded` at 0%.
+- `training/loss/corr.go`: Forward at 78.3%, Backward at 79.4%.
+- `layers/attention`: MLA Backward at 0%, MLA Forward at 70.3%.
+- `health`: EngineCheck at 75%, EngineCheckGeneric at 72.7%.
+- `inference`: WithBackend/WithPrecision/NewTestModel at 0%, Close at 66.7%.
+
+#### E121: Critical Coverage Gaps (below 80%)
+
+##### T121.1 layers/core ONNX operators -- zero-coverage batch 1  Owner: TBD  Est: 2h
+
+Write table-driven tests for the first batch of untested ONNX operators in
+`layers/core`. Each test must create a node, call Forward with known inputs,
+and verify outputs against hand-computed expected values.
+
+- [ ] T121.1 layers/core zero-coverage operators batch 1  Owner: TBD  Est: 2h
+  - Dependencies: None
+  - Files: layers/core/*_test.go (new or existing test files)
+  - Operators: ConstantOfShape, Div, Equal, Expand, Greater, Neg, Pow, Sqrt
+  - Acceptance: Each operator has >= 1 table-driven test exercising Forward
+    with at least 2 test cases (normal case + edge case). Coverage for each
+    operator file >= 90%.
+  - [ ] S121.1.1 Write tests for ConstantOfShape: scalar fill, multi-dim shape  Est: 15m
+  - [ ] S121.1.2 Write tests for Div: element-wise, broadcast, divide-by-zero  Est: 15m
+  - [ ] S121.1.3 Write tests for Equal: matching, non-matching, different shapes  Est: 10m
+  - [ ] S121.1.4 Write tests for Expand: broadcast to larger shape  Est: 10m
+  - [ ] S121.1.5 Write tests for Greater: element-wise comparison  Est: 10m
+  - [ ] S121.1.6 Write tests for Neg: negate positive, negative, zero  Est: 10m
+  - [ ] S121.1.7 Write tests for Pow: integer exponent, fractional exponent  Est: 10m
+  - [ ] S121.1.8 Write tests for Sqrt: positive values, zero  Est: 10m
+  - [ ] S121.1.9 Run golangci-lint and go test -cover ./layers/core/  Est: 10m
+
+- [ ] T121.2 layers/core zero-coverage operators batch 2  Owner: TBD  Est: 2h
+  - Dependencies: None (parallel with T121.1)
+  - Files: layers/core/*_test.go
+  - Operators: Range, ReduceMean, ScatterND, Trilu, Where, LessOrEqual, Mod, Or
+  - Acceptance: Each operator has >= 1 table-driven test exercising Forward.
+    Coverage for each operator file >= 90%.
+  - [ ] S121.2.1 Write tests for Range: int range, float range, negative step  Est: 15m
+  - [ ] S121.2.2 Write tests for ReduceMean: single axis, multiple axes, keepdims  Est: 15m
+  - [ ] S121.2.3 Write tests for ScatterND: basic scatter, update values  Est: 15m
+  - [ ] S121.2.4 Write tests for Trilu: upper triangular, lower triangular  Est: 10m
+  - [ ] S121.2.5 Write tests for Where: condition-based selection  Est: 10m
+  - [ ] S121.2.6 Write tests for LessOrEqual: element-wise comparison  Est: 10m
+  - [ ] S121.2.7 Write tests for Mod: integer mod, float mod  Est: 10m
+  - [ ] S121.2.8 Write tests for Or: boolean or  Est: 10m
+  - [ ] S121.2.9 Run golangci-lint and go test -cover ./layers/core/  Est: 10m
+
+- [ ] T121.3 layers/core partially-tested operators  Owner: TBD  Est: 1.5h
+  - Dependencies: None (parallel with T121.1, T121.2)
+  - Files: layers/core/*_test.go
+  - Targets: Cos (69.2%), Sin (69.2%), Where (77.1%), Constant Attributes
+    (55.6%), Conv2d NewConv2d (75.0%), FFN WithSwiGLU (0%), FFN Backward
+    (71.4%), FiLM NewFiLM (77.8%), Gemm Forward (82.6%), Gemm Backward (0%),
+    Linear NewLinear (81.8%), Pad BuildPad (57.1%), Resize NewResize (66.7%),
+    Slice Forward (75.5%), Slice tensorToInt64 (0%), Tile Backward (0%),
+    Max Backward (0%), Squeeze Forward (89.7%)
+  - Acceptance: Each function reaches >= 95% coverage. Add tests for uncovered
+    branches (error paths, edge-case shapes, attribute combinations).
+  - [ ] S121.3.1 Add Cos/Sin tests: known angle values, gradient checks  Est: 15m
+  - [ ] S121.3.2 Add Constant Attributes test: all attribute types  Est: 10m
+  - [ ] S121.3.3 Add Conv2d test: non-default padding, dilation, groups  Est: 15m
+  - [ ] S121.3.4 Add FFN SwiGLU test + Backward error paths  Est: 15m
+  - [ ] S121.3.5 Add Gemm Backward test + FiLM constructor edge cases  Est: 10m
+  - [ ] S121.3.6 Add Linear test: bias/no-bias variants  Est: 10m
+  - [ ] S121.3.7 Add Pad BuildPad test: all padding modes  Est: 10m
+  - [ ] S121.3.8 Add Resize test: different interpolation modes  Est: 10m
+  - [ ] S121.3.9 Add Slice tensorToInt64 + Tile Backward + Max Backward + Squeeze edge cases  Est: 15m
+  - [ ] S121.3.10 Run golangci-lint and go test -cover ./layers/core/  Est: 10m
+
+- [ ] T121.4 cmd/bench-compare coverage  Owner: TBD  Est: 45m
+  - Dependencies: None
+  - Files: cmd/bench-compare/main.go, cmd/bench-compare/main_test.go
+  - Current: 52.6%. Gap: `main()` at 0%.
+  - Acceptance: Extract core logic from `main()` into a testable `run(args
+    []string, stdout io.Writer) error` function. Test `run` with table-driven
+    cases: valid input, missing file, malformed benchmarks. Coverage >= 95%.
+  - [ ] S121.4.1 Extract run() function from main()  Est: 15m
+  - [ ] S121.4.2 Write table-driven tests for run()  Est: 20m
+  - [ ] S121.4.3 Run golangci-lint and go test -cover ./cmd/bench-compare/  Est: 10m
+
+- [ ] T121.5 cmd/coverage-gate coverage  Owner: TBD  Est: 45m
+  - Dependencies: None
+  - Files: cmd/coverage-gate/main.go, cmd/coverage-gate/main_test.go
+  - Current: 53.5%. Gap: `main()` at 0%, `isExcluded` at 0%.
+  - Acceptance: Extract `run()` from `main()`. Test `run` and `isExcluded`
+    with table-driven cases. Coverage >= 95%.
+  - [ ] S121.5.1 Extract run() function from main()  Est: 15m
+  - [ ] S121.5.2 Write table-driven tests for run() and isExcluded  Est: 20m
+  - [ ] S121.5.3 Run golangci-lint and go test -cover ./cmd/coverage-gate/  Est: 10m
+
+- [ ] T121.6 layers/core coverage verification  Owner: TBD  Est: 15m
+  - Dependencies: T121.1, T121.2, T121.3
+  - Acceptance: `go test -cover ./layers/core/` reports >= 95%. golangci-lint
+    0 issues. All tests pass with -race.
+  - [ ] S121.6.1 Run go test -cover -race ./layers/core/ and verify >= 95%  Est: 10m
+  - [ ] S121.6.2 Fix any remaining gaps  Est: 5m
+
+#### E122: Below-90% Packages
+
+- [ ] T122.1 model package coverage  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: model/*_test.go
+  - Current: 81.4%. Gaps: BuildFromZMF (60.7%), resolveParam (0%),
+    rebuildWithPromotedAxes (0%), isConstantPromotedAttr (0%),
+    getNodeNames (0%), WithGlobalAttributes (0%), stub layer types (0%),
+    SetLogger (0%), ExportToPath (87.5%), marshalModel (81.8%),
+    ValidateArchitecture (83.3%).
+  - Acceptance: model package coverage >= 95%.
+  - [ ] S122.1.1 Write test for WithGlobalAttributes + SetLogger  Est: 10m
+  - [ ] S122.1.2 Write test for resolveParam with various param types  Est: 15m
+  - [ ] S122.1.3 Write test for getNodeNames and isConstantPromotedAttr  Est: 15m
+  - [ ] S122.1.4 Write test for rebuildWithPromotedAxes  Est: 15m
+  - [ ] S122.1.5 Add test cases to BuildFromZMF: error paths, missing fields  Est: 20m
+  - [ ] S122.1.6 Add test cases for ExportToPath, marshalModel, ValidateArchitecture error branches  Est: 15m
+  - [ ] S122.1.7 Run golangci-lint and go test -cover ./model/  Est: 10m
+
+- [ ] T122.2 training/loss coverage  Owner: TBD  Est: 45m
+  - Dependencies: None
+  - Files: training/loss/*_test.go
+  - Current: 87.3%. Gaps: CorrLoss Forward (78.3%), CorrLoss Backward (79.4%).
+  - Acceptance: training/loss coverage >= 95%.
+  - [ ] S122.2.1 Identify uncovered branches in corr.go Forward/Backward  Est: 10m
+  - [ ] S122.2.2 Write tests: zero-variance input, single-element, negative correlation  Est: 20m
+  - [ ] S122.2.3 Run golangci-lint and go test -cover ./training/loss/  Est: 10m
+
+- [ ] T122.3 cmd/zerfoo-tokenize coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: cmd/zerfoo-tokenize/main.go, cmd/zerfoo-tokenize/main_test.go (new)
+  - Current: 0.0%. No test files.
+  - Acceptance: Extract run() from main(). Write tests. Coverage >= 90%.
+  - [ ] S122.3.1 Extract run() function from main()  Est: 10m
+  - [ ] S122.3.2 Write table-driven tests for run()  Est: 15m
+  - [ ] S122.3.3 Run golangci-lint and go test -cover ./cmd/zerfoo-tokenize/  Est: 5m
+
+#### E123: 90-94% Packages (push to 98%+)
+
+- [ ] T123.1 health package coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: health/*_test.go
+  - Current: 90.0%. Gaps: EngineCheck (75%), EngineCheckGeneric (72.7%).
+  - Acceptance: health coverage >= 98%.
+  - [ ] S123.1.1 Add tests for EngineCheck/EngineCheckGeneric error paths  Est: 20m
+  - [ ] S123.1.2 Run golangci-lint and go test -cover ./health/  Est: 10m
+
+- [ ] T123.2 inference package coverage  Owner: TBD  Est: 45m
+  - Dependencies: None
+  - Files: inference/*_test.go
+  - Current: 91.8%. Gaps: WithBackend (0%), WithPrecision (0%),
+    NewTestModel (0%), Close (66.7%), Load (83.7%), createEngine (70%),
+    getInt/getFloat (75%).
+  - Acceptance: inference coverage >= 98%.
+  - [ ] S123.2.1 Write tests for WithBackend and WithPrecision options  Est: 10m
+  - [ ] S123.2.2 Write tests for Close: normal close, double close, close with error  Est: 10m
+  - [ ] S123.2.3 Add test cases for Load error paths: missing model, bad config  Est: 15m
+  - [ ] S123.2.4 Add tests for getInt/getFloat edge cases  Est: 10m
+  - [ ] S123.2.5 Run golangci-lint and go test -cover ./inference/  Est: 5m
+
+- [ ] T123.3 layers/attention coverage  Owner: TBD  Est: 1h
+  - Dependencies: None
+  - Files: layers/attention/*_test.go
+  - Current: 91.8%. Gaps: MLA Backward (0%), MLA Forward (70.3%),
+    buildGlobalAttention (0%), SetLayerIndex (0%), AttentionHead NewAttentionHead
+    (82.4%), GQA NewGroupedQueryAttention (81.5%), LocalAttention Forward (83.3%).
+  - Acceptance: layers/attention coverage >= 98%.
+  - [ ] S123.3.1 Write MLA Backward test with gradient verification  Est: 20m
+  - [ ] S123.3.2 Add MLA Forward test cases for uncovered branches  Est: 15m
+  - [ ] S123.3.3 Write tests for buildGlobalAttention and SetLayerIndex  Est: 10m
+  - [ ] S123.3.4 Add constructor edge-case tests for AttentionHead and GQA  Est: 10m
+  - [ ] S123.3.5 Run golangci-lint and go test -cover ./layers/attention/  Est: 5m
+
+- [ ] T123.4 layers/embeddings coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: layers/embeddings/*_test.go
+  - Current: 92.5%.
+  - Acceptance: layers/embeddings coverage >= 98%.
+  - [ ] S123.4.1 Identify uncovered branches with go test -coverprofile  Est: 10m
+  - [ ] S123.4.2 Write tests for uncovered branches  Est: 15m
+  - [ ] S123.4.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T123.5 layers/gather coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: layers/gather/*_test.go
+  - Current: 91.6%.
+  - Acceptance: layers/gather coverage >= 98%.
+  - [ ] S123.5.1 Identify uncovered branches  Est: 10m
+  - [ ] S123.5.2 Write tests for uncovered branches  Est: 15m
+  - [ ] S123.5.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T123.6 pkg/tokenizer coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: pkg/tokenizer/*_test.go
+  - Current: 90.3%.
+  - Acceptance: pkg/tokenizer coverage >= 98%.
+  - [ ] S123.6.1 Identify uncovered branches  Est: 10m
+  - [ ] S123.6.2 Write tests for uncovered branches  Est: 15m
+  - [ ] S123.6.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T123.7 registry coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: registry/*_test.go
+  - Current: 91.2%.
+  - Acceptance: registry coverage >= 98%.
+  - [ ] S123.7.1 Identify uncovered branches  Est: 10m
+  - [ ] S123.7.2 Write tests for uncovered branches  Est: 15m
+  - [ ] S123.7.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T123.8 compute coverage  Owner: TBD  Est: 45m
+  - Dependencies: None
+  - Files: compute/*_test.go
+  - Current: 93.7%.
+  - Acceptance: compute coverage >= 98%.
+  - [ ] S123.8.1 Identify uncovered branches with coverprofile  Est: 10m
+  - [ ] S123.8.2 Write tests for uncovered CPU engine branches  Est: 25m
+  - [ ] S123.8.3 Run golangci-lint and go test -cover  Est: 10m
+
+- [ ] T123.9 layers/sequence and layers/features coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: layers/sequence/*_test.go, layers/features/*_test.go
+  - Current: sequence 94.0%, features 93.8%.
+  - Acceptance: Both packages >= 98%.
+  - [ ] S123.9.1 Identify uncovered branches in both packages  Est: 10m
+  - [ ] S123.9.2 Write tests for uncovered branches  Est: 15m
+  - [ ] S123.9.3 Run golangci-lint and go test -cover  Est: 5m
+
+- [ ] T123.10 cmd/cli and testing/testutils coverage  Owner: TBD  Est: 30m
+  - Dependencies: None
+  - Files: cmd/cli/*_test.go, testing/testutils/*_test.go
+  - Current: cli 92.5%, testutils 94.5%.
+  - Acceptance: Both packages >= 98%.
+  - [ ] S123.10.1 Identify uncovered branches in both packages  Est: 10m
+  - [ ] S123.10.2 Write tests for uncovered branches  Est: 15m
+  - [ ] S123.10.3 Run golangci-lint and go test -cover  Est: 5m
+
+#### E124: 95-99% Packages (push to 100%)
+
+- [ ] T124.1 Push near-100% packages to 100% -- batch 1  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: Various *_test.go files
+  - Packages: features (99.0%), numeric (98.5%), tests/internal/testutil (98.5%),
+    distributed/coordinator (98.3%), model/hrm (98.1%), tensor (97.9%),
+    log (97.7%), layers/transpose (97.6%), layers/regularization (97.6%)
+  - Acceptance: Each package reaches 100% or documents why 100% is not
+    achievable (e.g., OS-dependent branch, unreachable defensive code).
+  - [ ] S124.1.1 Run coverprofile for each package and identify gaps  Est: 15m
+  - [ ] S124.1.2 Write tests for features, numeric, testutil gaps  Est: 15m
+  - [ ] S124.1.3 Write tests for coordinator, model/hrm, tensor gaps  Est: 15m
+  - [ ] S124.1.4 Write tests for log, transpose, regularization gaps  Est: 15m
+  - [ ] S124.1.5 Run golangci-lint and verify 100%  Est: 10m
+
+- [ ] T124.2 Push near-100% packages to 100% -- batch 2  Owner: TBD  Est: 1.5h
+  - Dependencies: None
+  - Files: Various *_test.go files
+  - Packages: graph (97.3%), layers/activations (97.4%),
+    layers/recurrent (97.0%), training/optimizer (96.6%),
+    metrics/runtime (96.5%), serve (96.4%), layers/transformer (96.4%),
+    distributed (96.0%)
+  - Acceptance: Each package reaches 100% or documents why not.
+  - [ ] S124.2.1 Run coverprofile for each package and identify gaps  Est: 15m
+  - [ ] S124.2.2 Write tests for graph, activations, recurrent gaps  Est: 15m
+  - [ ] S124.2.3 Write tests for optimizer, metrics/runtime, serve gaps  Est: 15m
+  - [ ] S124.2.4 Write tests for transformer, distributed gaps  Est: 15m
+  - [ ] S124.2.5 Run golangci-lint and verify 100%  Est: 10m
+
+- [ ] T124.3 Push near-100% packages to 100% -- batch 3  Owner: TBD  Est: 1h
+  - Dependencies: None
+  - Files: Various *_test.go files
+  - Packages: layers/reducesum (95.9%), training (95.9%), config (95.8%),
+    layers/normalization (95.7%), layers/hrm (95.5%), generate (95.0%)
+  - Acceptance: Each package reaches 100% or documents why not.
+  - [ ] S124.3.1 Run coverprofile for each package and identify gaps  Est: 10m
+  - [ ] S124.3.2 Write tests for reducesum, training, config gaps  Est: 15m
+  - [ ] S124.3.3 Write tests for normalization, hrm, generate gaps  Est: 15m
+  - [ ] S124.3.4 Run golangci-lint and verify 100%  Est: 10m
+
+#### E125: Phase 23 Final Verification
+
+- [ ] T125.1 Full coverage report and documentation  Owner: TBD  Est: 30m
+  - Dependencies: E121, E122, E123, E124
+  - Files: docs/plan.md, docs/QUALITY.md
+  - Steps:
+    1. Run `go test ./... -cover` and capture full report
+    2. Verify no package is below 95%
+    3. Count packages at 100%
+    4. Update docs/QUALITY.md with coverage table
+    5. Mark all Phase 23 tasks complete
+  - Acceptance: Coverage report shows >= 95% floor for all testable packages.
+    >= 20 packages at 100%. docs/QUALITY.md updated.
+  - [ ] S125.1.1 Generate coverage report  Est: 10m
+  - [ ] S125.1.2 Update QUALITY.md  Est: 10m
+  - [ ] S125.1.3 Update plan.md  Est: 10m
+
 ---
 
 ## 4. Timeline and Milestones
@@ -373,6 +727,10 @@ M72-M96: All ACHIEVED (Phases 10-21). See ADRs 007-018.
 | M98 | Unified memory allocator | E118 | cudaMallocManaged available in MemPool; managed GPUStorage works |
 | M99 | SigLIP parity PASS | E119 | TestSigLIPForwardPass PASS on DGX Spark |
 | M100 | Phase 22 complete | E120 | All three features implemented, tested, benchmarked, documented |
+| M101 | Critical coverage gaps closed | E121 | layers/core >= 95%, cmd tools >= 95% |
+| M102 | All packages >= 95% | E122, E123 | No package below 95% coverage |
+| M103 | Maximum coverage achieved | E124 | >= 20 packages at 100% coverage |
+| M104 | Phase 23 complete | E125 | Full coverage report, QUALITY.md updated |
 
 Sequencing:
 - E117, E118, and E119 are independent and can proceed in parallel.
@@ -381,6 +739,10 @@ Sequencing:
 - E118 T118.1-T118.4 can be developed locally. T118.5 requires DGX Spark.
 - E119 T119.1 and T119.3 require DGX Spark. T119.2 may be doable locally
   depending on the root cause.
+- Phase 23 (E121-E125) is independent of Phase 22 and can proceed in parallel.
+- Within Phase 23, E121-E124 are all independent and can proceed in parallel.
+- E125 depends on E121-E124 completing.
+- All Phase 23 tasks can run locally on macOS (no GPU required).
 
 ---
 
@@ -409,6 +771,8 @@ Active risks only. Resolved/mitigated risks (R1-R13, R26) removed.
 | R36 | cublasGemmEx BF16 compute precision differs from CPU | Numerical mismatches in BF16 MatMul parity | Medium | Use CUBLAS_COMPUTE_32F (accumulate in FP32) for maximum precision. Document tolerance. |
 | R37 | cudaMallocManaged slower than cudaMalloc on PCIe GPUs | Performance regression on non-unified-memory hardware | Low | Managed memory is opt-in, not default. Only beneficial on NVLink-C2C (DGX Spark). Document. |
 | R38 | SigLIP Concat fix may require zonnx converter changes | Fix spans two repositories | Medium | Check if root cause is in zerfoo (shape propagation) or zonnx (ONNX import). Fix in the correct repo. |
+| R39 | Some code paths unreachable without GPU hardware | Cannot achieve 100% on GPU-tagged files locally | Medium | Accept 95% floor for packages with GPU build-tag code. Validate on DGX Spark. |
+| R40 | Large number of test files may slow CI | Longer CI run times | Low | Tests are fast (most under 1s). Monitor CI duration. |
 
 ---
 
@@ -460,6 +824,7 @@ A task is done when:
 
 | Date | Phase | Summary |
 |------|-------|---------|
+| 2026-03-04 | 23 | Change Summary: Added Phase 23 (E121-E125) to raise test coverage to 100% where possible. Coverage baseline: 8 packages at 100%, 6 below 90%. Added O37, D59-D62, M101-M104, R39-R40. 5 epics, 20 tasks covering all 42 packages below 100%. |
 | 2026-03-04 | 22 | Change Summary: Created Phase 22 plan with 3 epics (E117-E119) and final verification (E120). Added BF16 cuBLAS GEMM (5 tasks), unified memory allocator (6 tasks), SigLIP Concat fix (4 tasks). Added risks R36-R38. New deliverables D56-D58, milestones M97-M100. |
 | 2026-03-04 | 21 | Phase 21 COMPLETE. T116.1 docs updated (27a94c8). All tasks marked complete. O32 COMPLETE. |
 | 2026-03-04 | 21 | Gemma 3 parity PASS (FP/GD/Gen). Fixes: tokenizer merges format, Gather embedded-indices, Slice hybrid mode, zonnx initializer promotion. Model parity now 11 PASS, 10 SKIP. |
@@ -480,6 +845,10 @@ A task is done when:
 - **Phases 1-21:** Complete. See ADRs 001-018.
 - **Phase 22 (Current):** BF16 GEMM + unified memory + SigLIP fix. Three
   independent epics (E117, E118, E119) that can proceed in parallel.
+  T117.1-T117.3 and T118.1-T118.4 are complete. Remaining tasks require DGX Spark.
+- **Phase 23 (Current):** Test coverage push to 100%. All tasks can run locally.
+  Start with E121 (critical gaps) as it has the highest impact per test written.
+  The layers/core package alone has 15 untested ONNX operators.
 - **BF16 context:** The `float16` package (../float16) has a complete BFloat16
   type. `tensor.Numeric` includes it. `model/tensor_decoder.go` decodes it from
   ZMF files. What is missing: GPU compute dispatch in `compute/gpu_engine.go`
@@ -534,6 +903,61 @@ A task is done when:
 | CI/CD | 9/10 | Blocking tests, coverage gate, benchmark gate |
 | GPU Performance | 10/10 | cuBLAS + cuDNN + TensorRT (dynamic shapes) + CUTLASS flash attention + INT4/INT8 GEMM |
 | GPU Portability | 8/10 | NVIDIA (CUDA/cuDNN/TensorRT), AMD (ROCm/HIP/MIOpen), OpenCL (CLBlast) |
+
+### Coverage Baseline (2026-03-04)
+
+| Package | Coverage | Phase 23 Target |
+|---------|----------|-----------------|
+| cmd/bench-compare | 52.6% | >= 95% (E121) |
+| cmd/cli | 92.5% | >= 98% (E123) |
+| cmd/coverage-gate | 53.5% | >= 95% (E121) |
+| cmd/zerfoo-tokenize | 0.0% | >= 90% (E122) |
+| compute | 93.7% | >= 98% (E123) |
+| config | 95.8% | 100% (E124) |
+| data | 100.0% | -- |
+| device | 100.0% | -- |
+| distributed | 96.0% | 100% (E124) |
+| distributed/coordinator | 98.3% | 100% (E124) |
+| features | 99.0% | 100% (E124) |
+| generate | 95.0% | 100% (E124) |
+| graph | 97.3% | 100% (E124) |
+| health | 90.0% | >= 98% (E123) |
+| inference | 91.8% | >= 98% (E123) |
+| internal/gpuapi | [stubs] | -- |
+| internal/xblas | 100.0% | -- |
+| layers/activations | 97.4% | 100% (E124) |
+| layers/attention | 91.8% | >= 98% (E123) |
+| layers/components | 100.0% | -- |
+| layers/core | 76.0% | >= 95% (E121) |
+| layers/embeddings | 92.5% | >= 98% (E123) |
+| layers/features | 93.8% | >= 98% (E123) |
+| layers/gather | 91.6% | >= 98% (E123) |
+| layers/hrm | 95.5% | 100% (E124) |
+| layers/normalization | 95.7% | 100% (E124) |
+| layers/recurrent | 97.0% | 100% (E124) |
+| layers/reducesum | 95.9% | 100% (E124) |
+| layers/registry | 100.0% | -- |
+| layers/regularization | 97.6% | 100% (E124) |
+| layers/sequence | 94.0% | >= 98% (E123) |
+| layers/tokenizers | 100.0% | -- |
+| layers/transformer | 96.4% | 100% (E124) |
+| layers/transpose | 97.6% | 100% (E124) |
+| log | 97.7% | 100% (E124) |
+| metrics | 100.0% | -- |
+| metrics/runtime | 96.5% | 100% (E124) |
+| model | 81.4% | >= 95% (E122) |
+| model/hrm | 98.1% | 100% (E124) |
+| numeric | 98.5% | 100% (E124) |
+| pkg/tokenizer | 90.3% | >= 98% (E123) |
+| registry | 91.2% | >= 98% (E123) |
+| serve | 96.4% | 100% (E124) |
+| shutdown | 100.0% | -- |
+| tensor | 97.9% | 100% (E124) |
+| testing/testutils | 94.5% | >= 98% (E123) |
+| tests/internal/testutil | 98.5% | 100% (E124) |
+| training | 95.9% | 100% (E124) |
+| training/loss | 87.3% | >= 95% (E122) |
+| training/optimizer | 96.6% | 100% (E124) |
 
 ### Key Files for Phase 22
 
