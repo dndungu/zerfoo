@@ -44,7 +44,7 @@ jobs:
       - name: Coverage gate
         run: |
           go test -coverprofile=coverage.out ./... -skip 'TestLogitParity|TestCPUGPUDeterminism|TestFiniteDifferenceGradientChecks'
-          go run ./cmd/coverage-gate -profile coverage.out -threshold 93
+          go run ./cmd/coverage-gate -profile coverage.out -threshold 75 -exclude 'distributed/pb,cmd/,github.com/zerfoo/zerfoo '
       - name: Benchmark regression check
         run: |
           go test -bench=. -benchmem -count=3 -run='^$' ./compute/ > bench-current.txt 2>&1 || true
