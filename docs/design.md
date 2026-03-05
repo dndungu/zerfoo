@@ -322,11 +322,12 @@ make CUDA_ARCH=sm_70        # V100
 
 This produces `libkernels.a` from `elementwise.cu` using `nvcc -O2 -arch=$(CUDA_ARCH)`.
 
-### 4.2 GPU-Accelerated Operations (float32 only)
+### 4.2 GPU-Accelerated Operations
 
 | Category | Operations | Backend |
 |----------|-----------|---------|
-| Matrix | MatMul (2D and batched) | cuBLAS Sgemm |
+| Matrix | MatMul (2D and batched, float32) | cuBLAS Sgemm |
+| Matrix | MatMul (2D and batched, BFloat16) | cuBLAS GemmEx (CUDA_R_16BF) |
 | Element-wise | Add, Sub, Mul, Div, Pow | Custom CUDA kernels |
 | Scalar | AddScalar, MulScalar, DivScalar | Custom CUDA kernels |
 | Activation | Tanh, TanhPrime | Custom CUDA kernels |
@@ -369,6 +370,13 @@ Key helpers:
 `internal/cuda/mempool.go`: Size-bucketed free-list allocator. Reuses
 previously freed device memory, avoiding per-operation cudaMalloc/cudaFree.
 Mutex-synchronized. Drained on `GPUEngine.Close()`.
+
+Supports two allocation modes:
+- `Alloc` / `Free`: Standard cudaMalloc (discrete device memory).
+- `AllocManaged` / `FreeManaged`: cudaMallocManaged (unified memory). On
+  NVLink-C2C hardware (DGX Spark GB10), managed memory avoids explicit H2D
+  copies and is 200-5000x faster to allocate (demand paging). Use
+  `tensor.NewManagedGPUStorage` to create tensors with managed memory.
 
 ### 4.6 CUDA Stream
 
@@ -1096,7 +1104,8 @@ ADR files in `docs/adr/`.
 | [015](adr/015-cutlass-quantized-gemm.md) | CUTLASS Quantized GEMM | 18 | INT8/INT4 CUDA kernels, right-multiply variant, MatMulNBits GPU dispatch |
 | [016](adr/016-tensorrt-dynamic-shapes.md) | TensorRT Dynamic Shapes | 19 | Optimization profiles, min/opt/max dims, SetInputShape, dynamic cache keys |
 | [017](adr/017-dgx-spark-hardware-validation.md) | DGX Spark Hardware Validation | 20 | ARM64 build fixes, sm_121 BLOCK_SIZE=32, TRT 10 API, benchmark results |
-| [018](adr/018-model-parity-testing.md) | Model Parity Testing | 21 | 10 ONNX fixes, 8 PASS (Llama3+Qwen25), 13 SKIP, parity automation script |
+| [018](adr/018-model-parity-testing.md) | Model Parity Testing | 21 | 18 ONNX fixes, 18 PASS (6 model families), 4 SKIP, parity automation script |
+| [019](adr/019-phase22-bf16-unified-siglip.md) | BF16 GEMM, Unified Memory, SigLIP Fix | 22 | BF16 cuBLAS GemmEx, cudaMallocManaged, Squeeze scalar fix |
 
 ---
 
@@ -1177,13 +1186,45 @@ See [ADR-018](adr/018-model-parity-testing.md) for full details.
 | Mistral (7B) | FP / GD / Gen | PASS | mistralai/Mistral-7B-Instruct-v0.3 |
 | Phi-3 (mini) | FP / GD / Gen | PASS | microsoft/Phi-3-mini-4k-instruct |
 | DeepSeek V3 (671B) | — | SKIP | Exceeds 128GB DGX Spark memory |
-| SigLIP (base) | — | SKIP | Concat shape mismatch in vision graph |
+| SigLIP (base) | FP | PASS | Fixed in Phase 22 (Squeeze scalar + Concat rank alignment) |
 | FlashAttentionGQA | 1 | PASS | GQA kernel parity test |
 | MultiGPU DualDevice | 1 | SKIP | Requires >= 2 CUDA devices |
 
-**Summary:** 17 PASS, 5 SKIP. FP = ForwardPass, GD = GreedyDecode, Gen = Generation.
+**Summary:** 18 PASS, 4 SKIP. FP = ForwardPass, GD = GreedyDecode, Gen = Generation.
 
-### 15.4 Multi-GPU Test Coverage Gap
+### 15.4 BF16 GEMM and Unified Memory (Phase 22)
+
+Phase 22 added BFloat16 GPU compute, unified memory allocation, and fixed the
+SigLIP Concat shape mismatch. See [ADR-019](adr/019-phase22-bf16-unified-siglip.md).
+
+#### BF16 vs FP32 GEMM (cuBLAS)
+
+| Size | BF16 (us) | FP32 (us) | Speedup |
+|------|-----------|-----------|---------|
+| 128  | 123       | 109       | 0.9x    |
+| 512  | 212       | 349       | 1.6x    |
+| 1024 | 412       | 631       | 1.5x    |
+| 2048 | 1262      | --        | --      |
+
+At 512+, BF16 is 1.5-1.6x faster due to doubled Blackwell tensor core throughput.
+
+#### Unified Memory Allocation
+
+| Size | cudaMalloc (us) | cudaMallocManaged (ns) | Speedup |
+|------|-----------------|------------------------|---------|
+| 1 MB | 132             | 600                    | 220x    |
+| 16 MB | 702            | 658                    | 1067x   |
+| 64 MB | 3370           | 668                    | 5045x   |
+
+### 15.5 Test Coverage (Phases 23-24)
+
+Phase 23 raised coverage from 8 packages at 100% to 9, and from 6 packages
+below 90% to 2. 42 of 50 packages are at >= 95%. See docs/QUALITY.md.
+
+Phase 24 fixed FFN bias detection heuristic, embedding layer loading in
+LoadModelFromZMF, and refactored cmd/zerfoo-predict for testability (0% -> 76.6%).
+
+### 15.6 Multi-GPU Test Coverage Gap
 
 Six tests require >= 2 CUDA devices and skip on the single-GPU DGX Spark GB10.
 See [ADR-017](adr/017-dgx-spark-hardware-validation.md) Section "Multi-GPU Test
