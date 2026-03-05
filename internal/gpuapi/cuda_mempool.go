@@ -31,6 +31,14 @@ func (p *CUDAMemPool) Free(deviceID int, ptr unsafe.Pointer, byteSize int) {
 	p.inner.Free(deviceID, ptr, byteSize)
 }
 
+func (p *CUDAMemPool) AllocManaged(deviceID, byteSize int) (unsafe.Pointer, error) {
+	return p.inner.AllocManaged(deviceID, byteSize)
+}
+
+func (p *CUDAMemPool) FreeManaged(deviceID int, ptr unsafe.Pointer, byteSize int) {
+	p.inner.FreeManaged(deviceID, ptr, byteSize)
+}
+
 func (p *CUDAMemPool) Drain() error {
 	return p.inner.Drain()
 }

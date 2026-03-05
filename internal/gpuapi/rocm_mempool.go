@@ -3,6 +3,7 @@
 package gpuapi
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/internal/hip"
@@ -30,6 +31,12 @@ func (p *ROCmMemPool) Alloc(deviceID, byteSize int) (unsafe.Pointer, error) {
 func (p *ROCmMemPool) Free(deviceID int, ptr unsafe.Pointer, byteSize int) {
 	p.inner.Free(deviceID, ptr, byteSize)
 }
+
+func (p *ROCmMemPool) AllocManaged(_, _ int) (unsafe.Pointer, error) {
+	return nil, fmt.Errorf("AllocManaged: not supported on ROCm backend")
+}
+
+func (p *ROCmMemPool) FreeManaged(_ int, _ unsafe.Pointer, _ int) {}
 
 func (p *ROCmMemPool) Drain() error {
 	return p.inner.Drain()
