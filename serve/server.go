@@ -17,11 +17,27 @@ import (
 type Server struct {
 	model *inference.Model
 	mux   *http.ServeMux
+	batch *BatchScheduler // optional; nil means direct calls
+}
+
+// ServerOption configures the server.
+type ServerOption func(*Server)
+
+// WithBatchScheduler attaches a batch scheduler for non-streaming requests.
+// When set, incoming completion requests are routed through the scheduler
+// to be grouped into batches for higher throughput.
+func WithBatchScheduler(bs *BatchScheduler) ServerOption {
+	return func(s *Server) {
+		s.batch = bs
+	}
 }
 
 // NewServer creates a Server for the given model.
-func NewServer(m *inference.Model) *Server {
+func NewServer(m *inference.Model, opts ...ServerOption) *Server {
 	s := &Server{model: m, mux: http.NewServeMux()}
+	for _, opt := range opts {
+		opt(s)
+	}
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	s.mux.HandleFunc("POST /v1/completions", s.handleCompletions)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
@@ -148,7 +164,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.model.Chat(r.Context(), messages, opts...)
+	var resp inference.Response
+	var err error
+
+	if s.batch != nil {
+		// Build prompt from messages for batching.
+		var prompt strings.Builder
+		for _, m := range messages {
+			prompt.WriteString(m.Content)
+			prompt.WriteString(" ")
+		}
+		var br BatchResult
+		br, err = s.batch.Submit(r.Context(), BatchRequest{Prompt: prompt.String()})
+		if err == nil {
+			resp = inference.Response{Content: br.Value}
+		}
+	} else {
+		resp, err = s.model.Chat(r.Context(), messages, opts...)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -198,7 +231,17 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.model.Generate(r.Context(), req.Prompt, opts...)
+	var result string
+	var err error
+
+	if s.batch != nil {
+		var br BatchResult
+		br, err = s.batch.Submit(r.Context(), BatchRequest{Prompt: req.Prompt})
+		result = br.Value
+	} else {
+		result, err = s.model.Generate(r.Context(), req.Prompt, opts...)
+	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -331,5 +374,8 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 // Close implements shutdown.Closer for graceful shutdown integration.
 func (s *Server) Close(_ context.Context) error {
+	if s.batch != nil {
+		s.batch.Stop()
+	}
 	return nil
 }
