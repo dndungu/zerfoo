@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -15,27 +16,32 @@ func main() {
 	vocabPath := flag.String("vocab", "", "Path to vocabulary file (one token per line)")
 	flag.Parse()
 
-	if *text == "" {
-		fmt.Println("Please provide text to tokenize using the -text flag.")
+	if err := run(*text, *vocabPath, os.Stdout); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func run(text, vocabPath string, w io.Writer) error {
+	if text == "" {
+		return fmt.Errorf("error: -text flag is required")
 	}
 
 	t := tokenizer.NewWhitespaceTokenizer()
 
-	// Load vocabulary from file if provided
-	if *vocabPath != "" {
-		if err := loadVocab(t, *vocabPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to load vocabulary: %v\n", err)
-			os.Exit(1)
+	if vocabPath != "" {
+		if err := loadVocab(t, vocabPath); err != nil {
+			return fmt.Errorf("failed to load vocabulary: %w", err)
 		}
 	}
 
-	tokenIDs, err := t.Encode(*text)
+	tokenIDs, err := t.Encode(text)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Tokenization failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("tokenization failed: %w", err)
 	}
-	fmt.Printf("Token IDs for '%s': %v\n", *text, tokenIDs)
+
+	_, _ = fmt.Fprintf(w, "Token IDs for '%s': %v\n", text, tokenIDs)
+	return nil
 }
 
 func loadVocab(t *tokenizer.WhitespaceTokenizer, path string) error {
