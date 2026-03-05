@@ -6,7 +6,7 @@ import (
 )
 
 func TestWithKVCache_GetKVCache(t *testing.T) {
-	cache := NewKVCache[float32](4)
+	cache := NewKVCache[float32](4, 128)
 	ctx := WithKVCache(context.Background(), cache)
 
 	got, ok := GetKVCache[float32](ctx)
