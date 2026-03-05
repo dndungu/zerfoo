@@ -32,13 +32,14 @@ Minimum threshold: 75% (enforced by coverage-gate CI)
   layers/gather (93.5%), layers/sequence (94.0%), registry (93.2%)
 
 ### Below 90%
-- cmd/coverage-gate (84.9%), cmd/zerfoo-tokenize (74.1%)
+- cmd/coverage-gate (84.9%), cmd/zerfoo-predict (76.6%), cmd/zerfoo-tokenize (74.1%)
 
 ### Known Untestable Gaps
 - health: EngineCheck takes concrete *CPUEngine type, preventing mock testing
 - Most remaining gaps are tensor.New unreachable error paths or engine error
   paths that require mock infrastructure
 - layers/attention: dupl linter blocks MLA Forward engine error test
+- cmd/zerfoo-predict: main(), runNewCLI (requires cli framework), os.Exit paths
 - cmd/zerfoo-tokenize: main() and os.Exit paths
 
 ## Linting
