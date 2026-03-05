@@ -1022,6 +1022,32 @@ func TestCreateEngine_InvalidDevice(t *testing.T) {
 	}
 }
 
+func TestCreateEngine_GPUDevices(t *testing.T) {
+	tests := []struct {
+		device  string
+		wantErr string
+	}{
+		{"cuda", "CUDA"},
+		{"cuda:0", "CUDA"},
+		{"rocm", "ROCm"},
+		{"rocm:0", "ROCm"},
+		{"opencl", "OpenCL"},
+		{"opencl:0", "OpenCL"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.device, func(t *testing.T) {
+			_, err := createEngine(tc.device)
+			if err == nil {
+				t.Errorf("expected error for %s device", tc.device)
+				return
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestCreateEngine_Default(t *testing.T) {
 	// Empty string should default to CPU.
 	eng, err := createEngine("")
@@ -1047,6 +1073,70 @@ func TestModel_Close_NilEngine(t *testing.T) {
 	m := &Model{}
 	if err := m.Close(); err != nil {
 		t.Errorf("Close() error with nil engine: %v", err)
+	}
+}
+
+type closableEngine struct {
+	compute.Engine[float32]
+	closed bool
+}
+
+func (c *closableEngine) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestModel_Close_WithCloser(t *testing.T) {
+	ce := &closableEngine{Engine: compute.NewCPUEngine[float32](numeric.Float32Ops{})}
+	m := &Model{engine: ce}
+	if err := m.Close(); err != nil {
+		t.Errorf("Close() error: %v", err)
+	}
+	if !ce.closed {
+		t.Error("expected engine Close() to be called")
+	}
+}
+
+func TestGetInt_EdgeCases(t *testing.T) {
+	raw := map[string]interface{}{
+		"float_val":   float64(42),
+		"int_val":     7,
+		"string_val":  "hello",
+		"missing_key": nil,
+	}
+
+	if v := getInt(raw, "float_val"); v != 42 {
+		t.Errorf("getInt(float_val) = %d, want 42", v)
+	}
+	if v := getInt(raw, "int_val"); v != 7 {
+		t.Errorf("getInt(int_val) = %d, want 7", v)
+	}
+	if v := getInt(raw, "string_val"); v != 0 {
+		t.Errorf("getInt(string_val) = %d, want 0", v)
+	}
+	if v := getInt(raw, "nonexistent"); v != 0 {
+		t.Errorf("getInt(nonexistent) = %d, want 0", v)
+	}
+}
+
+func TestGetFloat_EdgeCases(t *testing.T) {
+	raw := map[string]interface{}{
+		"float_val":  float64(3.14),
+		"int_val":    7,
+		"string_val": "hello",
+	}
+
+	if v := getFloat(raw, "float_val"); v != 3.14 {
+		t.Errorf("getFloat(float_val) = %f, want 3.14", v)
+	}
+	if v := getFloat(raw, "int_val"); v != 7.0 {
+		t.Errorf("getFloat(int_val) = %f, want 7.0", v)
+	}
+	if v := getFloat(raw, "string_val"); v != 0 {
+		t.Errorf("getFloat(string_val) = %f, want 0", v)
+	}
+	if v := getFloat(raw, "nonexistent"); v != 0 {
+		t.Errorf("getFloat(nonexistent) = %f, want 0", v)
 	}
 }
 
