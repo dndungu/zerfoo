@@ -1,6 +1,7 @@
 package tensor
 
 import (
+	"encoding/binary"
 	"math"
 
 	"github.com/zerfoo/float16"
@@ -120,6 +121,18 @@ func (q *Q4Storage) Set(_ []float32) { panic("Q4Storage is immutable") }
 
 // DeviceType returns device.CPU.
 func (q *Q4Storage) DeviceType() device.Type { return device.CPU }
+
+// RawBytes serializes Q4_0 blocks as contiguous bytes for GPU upload.
+// Each block is 18 bytes: 2 bytes little-endian float16 scale + 16 bytes packed data.
+func (q *Q4Storage) RawBytes() []byte {
+	out := make([]byte, len(q.blocks)*18)
+	for i, blk := range q.blocks {
+		off := i * 18
+		binary.LittleEndian.PutUint16(out[off:off+2], blk.scale.Bits())
+		copy(out[off+2:off+18], blk.data[:])
+	}
+	return out
+}
 
 // Ensure Q4Storage implements Storage[float32].
 var _ Storage[float32] = (*Q4Storage)(nil)
