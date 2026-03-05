@@ -2,7 +2,6 @@ package xblas
 
 import (
 	"gonum.org/v1/gonum/blas"
-	"gonum.org/v1/gonum/blas/blas32"
 	"gonum.org/v1/gonum/blas/blas64"
 
 	float16 "github.com/zerfoo/float16"
@@ -12,12 +11,9 @@ import (
 // GemmF32 computes C = A * B for row-major contiguous matrices.
 // A has shape (m, k), B has shape (k, n), C has shape (m, n).
 // Strides are assumed to be k for A and n for B and C.
+// Uses SIMD-accelerated kernel (AVX2 on amd64, NEON on arm64) when available.
 func GemmF32(m, n, k int, a, b, c []float32) {
-	alpha, beta := float32(1), float32(0)
-	A := blas32.General{Rows: m, Cols: k, Data: a, Stride: k}
-	B := blas32.General{Rows: k, Cols: n, Data: b, Stride: n}
-	C := blas32.General{Rows: m, Cols: n, Data: c, Stride: n}
-	blas32.Gemm(blas.NoTrans, blas.NoTrans, alpha, A, B, beta, C)
+	SgemmSimd(m, n, k, a, b, c)
 }
 
 // GemmF64 computes C = A * B for row-major contiguous matrices.
