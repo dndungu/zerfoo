@@ -3,6 +3,7 @@
 package gpuapi
 
 import (
+	"fmt"
 	"sync"
 	"unsafe"
 )
@@ -47,6 +48,12 @@ func (p *OpenCLMemPool) Free(_ int, ptr unsafe.Pointer, byteSize int) {
 	p.allocs++
 	p.totalSz += byteSize
 }
+
+func (p *OpenCLMemPool) AllocManaged(_, _ int) (unsafe.Pointer, error) {
+	return nil, fmt.Errorf("AllocManaged: not supported on OpenCL backend")
+}
+
+func (p *OpenCLMemPool) FreeManaged(_ int, _ unsafe.Pointer, _ int) {}
 
 func (p *OpenCLMemPool) Drain() error {
 	p.mu.Lock()

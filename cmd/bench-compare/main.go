@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strconv"
@@ -24,28 +25,35 @@ func main() {
 	threshold := flag.Float64("threshold", 10.0, "regression threshold percentage")
 	flag.Parse()
 
-	if *currentPath == "" {
-		fmt.Fprintln(os.Stderr, "error: -current flag is required")
+	if err := run(*baselinePath, *currentPath, *threshold, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
 
-	baseline, err := parseBenchmarks(*baselinePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading baseline: %v\n", err)
-		os.Exit(1)
+// run contains the core logic: parse baseline and current benchmarks, compare,
+// and report regressions. It returns an error if a regression is detected or
+// if inputs are invalid.
+func run(baselinePath, currentPath string, threshold float64, w io.Writer) error {
+	if currentPath == "" {
+		return fmt.Errorf("error: -current flag is required")
 	}
 
-	current, err := parseBenchmarks(*currentPath)
+	baseline, err := parseBenchmarks(baselinePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading current: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error reading baseline: %w", err)
+	}
+
+	current, err := parseBenchmarks(currentPath)
+	if err != nil {
+		return fmt.Errorf("error reading current: %w", err)
 	}
 
 	failed := false
 	for name, baseNS := range baseline {
 		curNS, ok := current[name]
 		if !ok {
-			fmt.Printf("%-50s  SKIP (not in current)\n", name)
+			_, _ = fmt.Fprintf(w, "%-50s  SKIP (not in current)\n", name)
 			continue
 		}
 
@@ -55,22 +63,22 @@ func main() {
 
 		pctChange := (curNS - baseNS) / baseNS * 100
 		status := "OK"
-		if pctChange > *threshold {
+		if pctChange > threshold {
 			status = fmt.Sprintf("REGRESSION +%.1f%%", pctChange)
 			failed = true
-		} else if pctChange < -*threshold {
+		} else if pctChange < -threshold {
 			status = fmt.Sprintf("IMPROVED %.1f%%", pctChange)
 		}
 
-		fmt.Printf("%-50s  base=%10.0f ns  cur=%10.0f ns  %s\n", name, baseNS, curNS, status)
+		_, _ = fmt.Fprintf(w, "%-50s  base=%10.0f ns  cur=%10.0f ns  %s\n", name, baseNS, curNS, status)
 	}
 
 	if failed {
-		fmt.Fprintf(os.Stderr, "\nbenchmark regression detected: one or more benchmarks regressed by more than %.1f%%\n", *threshold)
-		os.Exit(1)
+		return fmt.Errorf("benchmark regression detected: one or more benchmarks regressed by more than %.1f%%", threshold)
 	}
 
-	fmt.Println("\nNo regressions detected.")
+	_, _ = fmt.Fprintln(w, "\nNo regressions detected.")
+	return nil
 }
 
 // parseBenchmarks reads Go benchmark output and returns a map of benchmark name -> ns/op.

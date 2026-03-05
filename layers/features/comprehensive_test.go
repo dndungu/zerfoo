@@ -130,5 +130,36 @@ func TestSpectralFingerprint_Parameters_IsNil(t *testing.T) {
 	}
 }
 
+func TestSpectralFingerprint_Forward_NilInput(t *testing.T) {
+	layer := NewSpectralFingerprint[float32](4)
+	ctx := context.Background()
+
+	_, err := layer.Forward(ctx, nil)
+	if err == nil {
+		t.Error("expected error for nil input")
+	}
+}
+
+func TestSpectralFingerprint_Forward_EmptyInput(t *testing.T) {
+	layer := NewSpectralFingerprint[float32](4)
+	ctx := context.Background()
+
+	empty, _ := tensor.New[float32]([]int{0}, nil)
+	out, err := layer.Forward(ctx, empty)
+	if err != nil {
+		t.Fatalf("Forward with empty input: %v", err)
+	}
+	if out.Size() != 4 {
+		t.Errorf("output size = %d, want 4", out.Size())
+	}
+	// All magnitudes should be zero for empty input.
+	for i, v := range out.Data() {
+		if v != 0 {
+			t.Errorf("data[%d] = %v, want 0", i, v)
+			break
+		}
+	}
+}
+
 // Statically assert graph.Node implementation
 var _ graph.Node[float32] = (*SpectralFingerprint[float32])(nil)

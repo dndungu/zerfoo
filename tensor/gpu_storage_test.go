@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/zerfoo/zerfoo/device"
+	"github.com/zerfoo/zerfoo/internal/gpuapi"
 )
 
 func TestGPUStorageInterfaceCompliance(t *testing.T) {
@@ -239,4 +240,120 @@ func TestGPUStorageTrySetSameLength(t *testing.T) {
 			t.Errorf("TrySlice()[%d] = %f, want %f", i, got[i], newData[i])
 		}
 	}
+}
+
+func TestManagedGPUStorageRoundTrip(t *testing.T) {
+	pool := newTestPool(t)
+
+	s, err := NewManagedGPUStorage[float32](pool, 5)
+	if err != nil {
+		t.Fatalf("NewManagedGPUStorage failed: %v", err)
+	}
+
+	defer func() { _ = s.Free() }()
+
+	if !s.Managed() {
+		t.Error("Managed() = false, want true")
+	}
+
+	if s.Len() != 5 {
+		t.Errorf("Len() = %d, want 5", s.Len())
+	}
+
+	// Write data directly via TrySet (no Memcpy for managed)
+	data := []float32{1.0, 2.0, 3.0, 4.0, 5.0}
+	if err := s.TrySet(data); err != nil {
+		t.Fatalf("TrySet failed: %v", err)
+	}
+
+	// Read data back via TrySlice (no Memcpy for managed)
+	got, err := s.TrySlice()
+	if err != nil {
+		t.Fatalf("TrySlice failed: %v", err)
+	}
+
+	for i := range data {
+		if data[i] != got[i] {
+			t.Errorf("TrySlice()[%d] = %f, want %f", i, got[i], data[i])
+		}
+	}
+}
+
+func TestManagedGPUStorageTrySetResize(t *testing.T) {
+	pool := newTestPool(t)
+
+	s, err := NewManagedGPUStorage[float32](pool, 2)
+	if err != nil {
+		t.Fatalf("NewManagedGPUStorage failed: %v", err)
+	}
+
+	defer func() { _ = s.Free() }()
+
+	// Resize from 2 to 4 elements
+	data := []float32{10.0, 20.0, 30.0, 40.0}
+	if err := s.TrySet(data); err != nil {
+		t.Fatalf("TrySet resize failed: %v", err)
+	}
+
+	if s.Len() != 4 {
+		t.Errorf("after TrySet resize, Len() = %d, want 4", s.Len())
+	}
+
+	got, err := s.TrySlice()
+	if err != nil {
+		t.Fatalf("TrySlice failed: %v", err)
+	}
+
+	for i := range data {
+		if data[i] != got[i] {
+			t.Errorf("TrySlice()[%d] = %f, want %f", i, got[i], data[i])
+		}
+	}
+}
+
+func TestManagedGPUStorageFree(t *testing.T) {
+	pool := newTestPool(t)
+
+	s, err := NewManagedGPUStorage[float32](pool, 4)
+	if err != nil {
+		t.Fatalf("NewManagedGPUStorage failed: %v", err)
+	}
+
+	err = s.Free()
+	if err != nil {
+		t.Errorf("Free failed: %v", err)
+	}
+
+	if s.Ptr() != nil {
+		t.Error("after Free, Ptr() should return nil")
+	}
+
+	if s.Len() != 0 {
+		t.Errorf("after Free, Len() = %d, want 0", s.Len())
+	}
+
+	// Double free should be safe
+	err = s.Free()
+	if err != nil {
+		t.Errorf("double Free should not error, got: %v", err)
+	}
+}
+
+func TestManagedGPUStorageNotManagedByDefault(t *testing.T) {
+	s, err := NewGPUStorage[float32](4)
+	if err != nil {
+		t.Fatalf("NewGPUStorage failed: %v", err)
+	}
+
+	defer func() { _ = s.Free() }()
+
+	if s.Managed() {
+		t.Error("regular GPUStorage should not be managed")
+	}
+}
+
+// newTestPool returns a CUDAMemPool for testing.
+func newTestPool(t *testing.T) *gpuapi.CUDAMemPool {
+	t.Helper()
+	return gpuapi.NewCUDAMemPool()
 }

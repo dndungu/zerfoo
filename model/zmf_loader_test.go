@@ -190,4 +190,58 @@ func TestLoadModelFromZMF(t *testing.T) {
 	if loadedModel.ZMFVersion != "0.2.0" {
 		t.Errorf("Expected ZMFVersion '0.2.0', got '%s'", loadedModel.ZMFVersion)
 	}
+
+	// No embed_tokens parameter, so Embedding should be nil.
+	if loadedModel.Embedding != nil {
+		t.Error("Expected nil Embedding when no embed_tokens parameter exists")
+	}
+}
+
+func TestLoadModelFromZMF_WithEmbedTokens(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "model_with_embed.zmf")
+
+	// Create a ZMF model with an embed_tokens parameter [4, 8] (vocabSize=4, embeddingDim=8).
+	embedData := make([]byte, 4*8*4) // 4*8 float32 values = 128 bytes
+	for i := range embedData {
+		embedData[i] = 0 // zeroed weights
+	}
+
+	sampleModel := &zmf.Model{
+		ZmfVersion: "0.3.0",
+		Graph: &zmf.Graph{
+			Inputs: []*zmf.ValueInfo{
+				{Name: "input", Dtype: zmf.Tensor_FLOAT32, Shape: []int64{1, 10}},
+			},
+			Outputs: []*zmf.ValueInfo{
+				{Name: "input", Dtype: zmf.Tensor_FLOAT32, Shape: []int64{1, 10}},
+			},
+			Parameters: map[string]*zmf.Tensor{
+				"model.embed_tokens.weight": {
+					Dtype: zmf.Tensor_FLOAT32,
+					Shape: []int64{4, 8},
+					Data:  embedData,
+				},
+			},
+		},
+	}
+
+	data, err := proto.Marshal(sampleModel)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	ops := numeric.Float32Ops{}
+	engine := compute.NewCPUEngine[float32](ops)
+	loadedModel, err := LoadModelFromZMF[float32](engine, ops, filePath)
+	if err != nil {
+		t.Fatalf("LoadModelFromZMF failed: %v", err)
+	}
+
+	if loadedModel.Embedding == nil {
+		t.Fatal("Expected non-nil Embedding when embed_tokens parameter exists")
+	}
 }

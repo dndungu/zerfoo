@@ -114,7 +114,6 @@ func optionalBias[T tensor.Numeric](
 	return core.NewBiasFromParam(engine, ops, p)
 }
 
-//nolint:unused // retained for completeness; may be used by future registry wiring
 func buildGlobalAttention[T tensor.Numeric](
 	engine compute.Engine[T],
 	ops numeric.Arithmetic[T],

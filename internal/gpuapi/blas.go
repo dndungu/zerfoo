@@ -15,6 +15,17 @@ type BLAS interface {
 		beta float32, c unsafe.Pointer,
 	) error
 
+	// BFloat16Gemm performs BFloat16 general matrix multiplication:
+	//   C = alpha * A * B + beta * C
+	// where A is m x k, B is k x n, and C is m x n.
+	// All matrices are contiguous row-major BFloat16 elements.
+	// Computation is performed in float32 for precision (CUBLAS_COMPUTE_32F).
+	// Returns an error on backends that do not support BFloat16 GEMM.
+	BFloat16Gemm(m, n, k int, alpha float32,
+		a unsafe.Pointer, b unsafe.Pointer,
+		beta float32, c unsafe.Pointer,
+	) error
+
 	// SetStream associates the BLAS handle with an asynchronous stream.
 	SetStream(stream Stream) error
 

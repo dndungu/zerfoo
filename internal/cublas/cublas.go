@@ -13,6 +13,22 @@ import (
 	"unsafe"
 )
 
+// CudaDataType identifies the element data type for cublasGemmEx.
+type CudaDataType int
+
+const (
+	CudaR32F  CudaDataType = 0  // CUDA_R_32F  (float32)
+	CudaR16F  CudaDataType = 2  // CUDA_R_16F  (float16)
+	CudaR16BF CudaDataType = 14 // CUDA_R_16BF (bfloat16)
+)
+
+// CublasComputeType identifies the compute precision for cublasGemmEx.
+type CublasComputeType int
+
+const (
+	CublasCompute32F CublasComputeType = 68 // CUBLAS_COMPUTE_32F
+)
+
 // Handle wraps a cuBLAS handle.
 type Handle struct {
 	h C.cublasHandle_t
@@ -104,6 +120,59 @@ func Sgemm(h *Handle, m, n, k int, alpha float32,
 
 	if status != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasSgemm failed with status %d", int(status))
+	}
+
+	return nil
+}
+
+// GemmEx performs mixed-precision general matrix multiplication using
+// cublasGemmEx. Supports BFloat16, Float16, and Float32 element types.
+//
+// Row-major to column-major conversion uses the same swap-A-B trick as Sgemm.
+//
+// Parameters (in row-major terms):
+//
+//	m           - rows of A and C
+//	n           - columns of B and C
+//	k           - columns of A / rows of B
+//	alpha       - scalar multiplier for A*B
+//	a           - device pointer to A (m x k, row-major)
+//	aType       - element data type of A
+//	b           - device pointer to B (k x n, row-major)
+//	bType       - element data type of B
+//	beta        - scalar multiplier for C
+//	c           - device pointer to C (m x n, row-major), output
+//	cType       - element data type of C
+//	computeType - compute precision (e.g. CublasCompute32F)
+func GemmEx(h *Handle, m, n, k int, alpha float32,
+	a unsafe.Pointer, aType CudaDataType,
+	b unsafe.Pointer, bType CudaDataType,
+	beta float32,
+	c unsafe.Pointer, cType CudaDataType,
+	computeType CublasComputeType,
+) error {
+	cAlpha := C.float(alpha)
+	cBeta := C.float(beta)
+
+	// Row-major to column-major: swap A and B, swap m and n (same trick as Sgemm).
+	status := C.cublasGemmEx(
+		h.h,
+		C.CUBLAS_OP_N,
+		C.CUBLAS_OP_N,
+		C.int(n),
+		C.int(m),
+		C.int(k),
+		unsafe.Pointer(&cAlpha),
+		b, C.cudaDataType(bType), C.int(n),
+		a, C.cudaDataType(aType), C.int(k),
+		unsafe.Pointer(&cBeta),
+		c, C.cudaDataType(cType), C.int(n),
+		C.cublasComputeType_t(computeType),
+		C.CUBLAS_GEMM_DEFAULT,
+	)
+
+	if status != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasGemmEx failed with status %d", int(status))
 	}
 
 	return nil

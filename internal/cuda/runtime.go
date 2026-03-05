@@ -38,7 +38,21 @@ func Malloc(size int) (unsafe.Pointer, error) {
 	return devPtr, nil
 }
 
-// Free releases device memory previously allocated with Malloc.
+// MallocManaged allocates size bytes of unified memory accessible from both
+// host and device. The pointer can be read/written from CPU code and used in
+// GPU kernels without explicit Memcpy. Free with Free().
+func MallocManaged(size int) (unsafe.Pointer, error) {
+	var devPtr unsafe.Pointer
+
+	err := C.cudaMallocManaged(&devPtr, C.size_t(size), C.cudaMemAttachGlobal)
+	if err != C.cudaSuccess {
+		return nil, fmt.Errorf("cudaMallocManaged failed: %s", C.GoString(C.cudaGetErrorString(err)))
+	}
+
+	return devPtr, nil
+}
+
+// Free releases device memory previously allocated with Malloc or MallocManaged.
 func Free(devPtr unsafe.Pointer) error {
 	err := C.cudaFree(devPtr)
 	if err != C.cudaSuccess {

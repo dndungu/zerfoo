@@ -1162,3 +1162,29 @@ Hardware: 20-core ARM Cortex-A78AE, Blackwell GPU (sm_121), 128GB LPDDR5X.
 
 TensorRT 10.15.1 engine build, serialization, deserialization, and inference all
 work on Blackwell. 15 tests pass in 5.6 seconds (including engine build time).
+
+### 15.3 Model Parity Results (Phase 21)
+
+Phase 21 downloaded, converted (ONNX -> ZMF via zonnx), and validated 7 model
+families on DGX Spark. 18 ONNX-compatibility bugs were fixed during the process.
+See [ADR-018](adr/018-model-parity-testing.md) for full details.
+
+| Model | Tests | Status | Notes |
+|-------|-------|--------|-------|
+| Llama 3 (1B) | FP / GD / Gen | PASS | onnx-community/Llama-3.2-1B |
+| Qwen 2.5 (0.5B) | FP / GD / Gen | PASS | Qwen/Qwen2.5-0.5B |
+| Gemma 3 (1B) | FP / GD / Gen | PASS | google/gemma-3-1b-it (optimum export) |
+| Mistral (7B) | FP / GD / Gen | PASS | mistralai/Mistral-7B-Instruct-v0.3 |
+| Phi-3 (mini) | FP / GD / Gen | PASS | microsoft/Phi-3-mini-4k-instruct |
+| DeepSeek V3 (671B) | — | SKIP | Exceeds 128GB DGX Spark memory |
+| SigLIP (base) | — | SKIP | Concat shape mismatch in vision graph |
+| FlashAttentionGQA | 1 | PASS | GQA kernel parity test |
+| MultiGPU DualDevice | 1 | SKIP | Requires >= 2 CUDA devices |
+
+**Summary:** 17 PASS, 5 SKIP. FP = ForwardPass, GD = GreedyDecode, Gen = Generation.
+
+### 15.4 Multi-GPU Test Coverage Gap
+
+Six tests require >= 2 CUDA devices and skip on the single-GPU DGX Spark GB10.
+See [ADR-017](adr/017-dgx-spark-hardware-validation.md) Section "Multi-GPU Test
+Coverage Gap" for the full inventory and hardware/software prerequisites.

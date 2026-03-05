@@ -12,6 +12,11 @@ type MemPool interface {
 	Alloc(deviceID, byteSize int) (unsafe.Pointer, error)
 	// Free returns a device pointer to the pool for reuse.
 	Free(deviceID int, ptr unsafe.Pointer, byteSize int)
+	// AllocManaged returns a unified memory pointer accessible from both host
+	// and device. Returns an error on backends that do not support managed memory.
+	AllocManaged(deviceID, byteSize int) (unsafe.Pointer, error)
+	// FreeManaged returns a managed memory pointer to the pool for reuse.
+	FreeManaged(deviceID int, ptr unsafe.Pointer, byteSize int)
 	// Drain frees all cached pointers back to the device.
 	Drain() error
 	// Stats returns the number of cached allocations and their total bytes.

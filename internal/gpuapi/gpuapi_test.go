@@ -42,6 +42,9 @@ type stubBLAS struct{}
 func (stubBLAS) Sgemm(_, _, _ int, _ float32, _, _ unsafe.Pointer, _ float32, _ unsafe.Pointer) error {
 	return nil
 }
+func (stubBLAS) BFloat16Gemm(_, _, _ int, _ float32, _, _ unsafe.Pointer, _ float32, _ unsafe.Pointer) error {
+	return nil
+}
 func (stubBLAS) SetStream(gpuapi.Stream) error { return nil }
 func (stubBLAS) Destroy() error                { return nil }
 
@@ -129,10 +132,12 @@ var _ gpuapi.KernelRunner = stubKernelRunner{}
 // stubMemPool implements gpuapi.MemPool for compile-time interface verification.
 type stubMemPool struct{}
 
-func (stubMemPool) Alloc(int, int) (unsafe.Pointer, error) { return nil, nil }
-func (stubMemPool) Free(int, unsafe.Pointer, int)          {}
-func (stubMemPool) Drain() error                           { return nil }
-func (stubMemPool) Stats() (int, int)                      { return 0, 0 }
+func (stubMemPool) Alloc(int, int) (unsafe.Pointer, error)        { return nil, nil }
+func (stubMemPool) Free(int, unsafe.Pointer, int)                 {}
+func (stubMemPool) AllocManaged(int, int) (unsafe.Pointer, error) { return nil, nil }
+func (stubMemPool) FreeManaged(int, unsafe.Pointer, int)          {}
+func (stubMemPool) Drain() error                                  { return nil }
+func (stubMemPool) Stats() (int, int)                             { return 0, 0 }
 
 var _ gpuapi.MemPool = stubMemPool{}
 

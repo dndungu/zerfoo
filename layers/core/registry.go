@@ -58,7 +58,9 @@ func BuildFFN[T tensor.Numeric](
 	}
 
 	var opts []FFNOpt[T]
-	// TODO: Implement bias disable option for withBias parameter
+	if !withBias {
+		opts = append(opts, WithFFNNoBias[T]())
+	}
 
 	ffn, err := NewFFN[T](name, engine, ops, inputDim, hiddenDim, outputDim, opts...)
 	if err != nil {
@@ -86,9 +88,15 @@ func BuildFFN[T tensor.Numeric](
 			return nil, fmt.Errorf("missing required parameter: %s_w3_biases", name)
 		}
 
-		ffn.w1.bias.biases = w1Bias
-		ffn.w2.bias.biases = w2Bias
-		ffn.w3.bias.biases = w3Bias
+		if ffn.w1.bias != nil {
+			ffn.w1.bias.biases = w1Bias
+		}
+		if ffn.w2.bias != nil {
+			ffn.w2.bias.biases = w2Bias
+		}
+		if ffn.w3.bias != nil {
+			ffn.w3.bias.biases = w3Bias
+		}
 	}
 
 	return ffn, nil

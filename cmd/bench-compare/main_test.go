@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +95,106 @@ func TestParseBenchmarks_EmptyFile(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("expected empty results, got %d", len(results))
+	}
+}
+
+func TestRun(t *testing.T) {
+	dir := t.TempDir()
+
+	baseContent := `BenchmarkAdd-10    10000    15000 ns/op
+BenchmarkMul-10    10000    20000 ns/op
+BenchmarkDiv-10    10000    25000 ns/op
+`
+	basePath := filepath.Join(dir, "baseline.txt")
+	if err := os.WriteFile(basePath, []byte(baseContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		baseline    string
+		current     string
+		curContent  string
+		threshold   float64
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "missing current flag",
+			baseline:    basePath,
+			current:     "",
+			threshold:   10,
+			wantErr:     true,
+			errContains: "-current flag is required",
+		},
+		{
+			name:        "missing baseline file",
+			baseline:    "/nonexistent/baseline.txt",
+			current:     basePath,
+			threshold:   10,
+			wantErr:     true,
+			errContains: "error reading baseline",
+		},
+		{
+			name:        "missing current file",
+			baseline:    basePath,
+			current:     "/nonexistent/current.txt",
+			threshold:   10,
+			wantErr:     true,
+			errContains: "error reading current",
+		},
+		{
+			name:     "no regression",
+			baseline: basePath,
+			curContent: `BenchmarkAdd-10    10000    15000 ns/op
+BenchmarkMul-10    10000    20000 ns/op
+`,
+			threshold: 10,
+			wantErr:   false,
+		},
+		{
+			name:     "regression detected",
+			baseline: basePath,
+			curContent: `BenchmarkAdd-10    10000    30000 ns/op
+`,
+			threshold:   10,
+			wantErr:     true,
+			errContains: "regression detected",
+		},
+		{
+			name:     "improvement",
+			baseline: basePath,
+			curContent: `BenchmarkAdd-10    10000    5000 ns/op
+`,
+			threshold: 10,
+			wantErr:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			curPath := tt.current
+			if tt.curContent != "" {
+				curPath = filepath.Join(dir, tt.name+".txt")
+				if err := os.WriteFile(curPath, []byte(tt.curContent), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var buf bytes.Buffer
+			runErr := run(tt.baseline, curPath, tt.threshold, &buf)
+			if tt.wantErr && runErr == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tt.wantErr && runErr != nil {
+				t.Errorf("unexpected error: %v", runErr)
+			}
+			if tt.errContains != "" && runErr != nil {
+				if !strings.Contains(runErr.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", runErr.Error(), tt.errContains)
+				}
+			}
+		})
 	}
 }
 

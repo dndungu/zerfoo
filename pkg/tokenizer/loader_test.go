@@ -234,6 +234,112 @@ func TestLoadFromJSON_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildNormalizer_AllTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		norm     *normalizerJSON
+		input    string
+		expected string
+		isNil    bool
+	}{
+		{"nil", nil, "", "", true},
+		{"NFC", &normalizerJSON{Type: "NFC"}, "\u00e9", "\u00e9", false},
+		{"NFD", &normalizerJSON{Type: "NFD"}, "\u00e9", "e\u0301", false},
+		{"Lowercase", &normalizerJSON{Type: "Lowercase"}, "HELLO", "hello", false},
+		{"Strip", &normalizerJSON{Type: "Strip"}, "  hello  ", "hello", false},
+		{"Unknown", &normalizerJSON{Type: "FooBar"}, "", "", true},
+		{
+			"Sequence",
+			&normalizerJSON{
+				Type: "Sequence",
+				Normalizers: []normalizerJSON{
+					{Type: "Lowercase"},
+					{Type: "Strip"},
+				},
+			},
+			"  HELLO  ",
+			"hello",
+			false,
+		},
+		{
+			"Sequence empty",
+			&normalizerJSON{
+				Type:        "Sequence",
+				Normalizers: []normalizerJSON{},
+			},
+			"",
+			"",
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fn := buildNormalizer(tt.norm)
+			if tt.isNil {
+				if fn != nil {
+					t.Error("expected nil normalizer")
+				}
+				return
+			}
+			if fn == nil {
+				t.Fatal("expected non-nil normalizer")
+			}
+			got := fn(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizer(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestByteLevelPreTokenize(t *testing.T) {
+	// Create a minimal byte-level BPE tokenizer.
+	fixture := `{
+  "model": {
+    "type": "BPE",
+    "vocab": {"<unk>": 0, "<s>": 1, "</s>": 2},
+    "merges": []
+  },
+  "added_tokens": [],
+  "pre_tokenizer": {
+    "type": "ByteLevel"
+  }
+}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokenizer.json")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, err := LoadFromJSON(path)
+	if err != nil {
+		t.Fatalf("LoadFromJSON error: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		input string
+		want  int // minimum number of tokens
+	}{
+		{"single word", "hello", 1},
+		{"two words", "hello world", 2},
+		{"leading space", " hello", 2},
+		{"multiple spaces", "a  b", 3},
+		{"tab and newline", "a\tb\nc", 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			words := tok.byteLevelPreTokenize(tt.input)
+			if len(words) < tt.want {
+				t.Errorf("byteLevelPreTokenize(%q) produced %d tokens, want >= %d: %v",
+					tt.input, len(words), tt.want, words)
+			}
+		})
+	}
+}
+
 func TestLoadFromJSON_EncodeWithSpecialTokens(t *testing.T) {
 	tok, err := LoadFromJSON(filepath.Join("testdata", "tokenizer.json"))
 	if err != nil {

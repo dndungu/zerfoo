@@ -400,6 +400,15 @@ func TestBuildFFN(t *testing.T) {
 			},
 		},
 		{
+			name:  "success_with_bias_false",
+			attrs: map[string]any{"input_dim": 4, "hidden_dim": 8, "output_dim": 4, "with_bias": false},
+			params: map[string]*graph.Parameter[float32]{
+				"test_w1_weights": makeParam("test_w1_weights", []int{4, 8}),
+				"test_w2_weights": makeParam("test_w2_weights", []int{8, 4}),
+				"test_w3_weights": makeParam("test_w3_weights", []int{4, 8}),
+			},
+		},
+		{
 			name:  "missing_w1_biases",
 			attrs: map[string]any{"input_dim": 4, "hidden_dim": 8, "output_dim": 4, "with_bias": true},
 			params: map[string]*graph.Parameter[float32]{

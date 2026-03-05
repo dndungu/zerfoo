@@ -4,8 +4,11 @@ package model
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/zerfoo/zerfoo/compute"
+	"github.com/zerfoo/zerfoo/graph"
+	"github.com/zerfoo/zerfoo/layers/embeddings"
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
 	"github.com/zerfoo/zmf"
@@ -46,16 +49,33 @@ func LoadModelFromZMF[T tensor.Numeric](
 		return nil, err
 	}
 
-	graph, err := BuildFromZMF(engine, ops, zmfModel, buildOpts...)
+	g, err := BuildFromZMF(engine, ops, zmfModel, buildOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: Handle embedding layer loading.
-	// For now, we'll leave it as nil.
+	// Search for embed_tokens parameter to create the embedding layer.
+	var embedding *embeddings.TokenEmbedding[T]
+	if zmfModel.Graph != nil && zmfModel.Graph.Parameters != nil {
+		for name, tensorProto := range zmfModel.Graph.Parameters {
+			if strings.Contains(name, "embed_tokens") {
+				tv, err := DecodeTensor[T](tensorProto)
+				if err != nil {
+					break
+				}
+				param, err := graph.NewParameter[T](name, tv, tensor.New[T])
+				if err != nil {
+					break
+				}
+				embedding, _ = embeddings.NewTokenEmbeddingFromParam(engine, param)
+				break
+			}
+		}
+	}
 
 	model := &Model[T]{
-		Graph:      graph,
+		Embedding:  embedding,
+		Graph:      g,
 		ZMFVersion: zmfModel.ZmfVersion,
 	}
 

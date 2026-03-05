@@ -15,6 +15,7 @@ import (
 // FFN is a feed-forward network.
 type FFN[T tensor.Numeric] struct {
 	name         string
+	noBias       bool
 	w1           *Dense[T]
 	w2           *Dense[T]
 	w3           *Dense[T]
@@ -43,7 +44,7 @@ type FFNConfig[T tensor.Numeric] struct {
 // WithFFNNoBias disables bias for all layers in the FFN.
 func WithFFNNoBias[T tensor.Numeric]() FFNOpt[T] {
 	return func(f *FFN[T]) {
-		// Marker for no bias - actual logic handled in NewFFN
+		f.noBias = true
 	}
 }
 
@@ -55,62 +56,21 @@ func NewFFN[T tensor.Numeric](
 	inputDim, hiddenDim, outputDim int,
 	opts ...FFNOpt[T],
 ) (*FFN[T], error) {
-	// Default to bias enabled
-	biasEnabled := true
-
-	// Check if WithFFNNoBias option is present
-	for _, opt := range opts {
-		if opt != nil {
-			// Use reflection-like approach to detect no-bias option
-			// Create a test FFN with a special marker
-			testFFN := &FFN[T]{name: "test_bias_detection"}
-			opt(testFFN)
-			// If the name is unchanged, it's likely WithFFNNoBias
-			if testFFN.name == "test_bias_detection" {
-				// This could be WithFFNNoBias - we'll assume it is if it's not SwiGLU
-				// Simple heuristic: if we have exactly one option, assume it's bias-related
-				if len(opts) == 1 {
-					biasEnabled = false
-				}
-			}
-		}
+	// Create Dense layers with bias by default (NewDense creates bias by default).
+	w1, err := NewDense[T](name+"_w1", engine, ops, inputDim, hiddenDim)
+	if err != nil {
+		return nil, err
 	}
 
-	var w1, w2, w3 *Dense[T]
-	var err error
+	// W2 takes SwiGLU output, which is hiddenDim (SwiGLU halves the concatenated input)
+	w2, err := NewDense[T](name+"_w2", engine, ops, hiddenDim, outputDim)
+	if err != nil {
+		return nil, err
+	}
 
-	if biasEnabled {
-		w1, err = NewDense[T](name+"_w1", engine, ops, inputDim, hiddenDim, WithBias[T](engine, ops, hiddenDim))
-		if err != nil {
-			return nil, err
-		}
-
-		// W2 takes SwiGLU output, which is hiddenDim (SwiGLU halves the concatenated input)
-		w2, err = NewDense[T](name+"_w2", engine, ops, hiddenDim, outputDim, WithBias[T](engine, ops, outputDim))
-		if err != nil {
-			return nil, err
-		}
-
-		w3, err = NewDense[T](name+"_w3", engine, ops, inputDim, hiddenDim, WithBias[T](engine, ops, hiddenDim))
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		w1, err = NewDense[T](name+"_w1", engine, ops, inputDim, hiddenDim, WithoutBias[T]())
-		if err != nil {
-			return nil, err
-		}
-
-		// W2 takes SwiGLU output, which is hiddenDim (SwiGLU halves the concatenated input)
-		w2, err = NewDense[T](name+"_w2", engine, ops, hiddenDim, outputDim, WithoutBias[T]())
-		if err != nil {
-			return nil, err
-		}
-
-		w3, err = NewDense[T](name+"_w3", engine, ops, inputDim, hiddenDim, WithoutBias[T]())
-		if err != nil {
-			return nil, err
-		}
+	w3, err := NewDense[T](name+"_w3", engine, ops, inputDim, hiddenDim)
+	if err != nil {
+		return nil, err
 	}
 
 	f := &FFN[T]{
@@ -118,11 +78,18 @@ func NewFFN[T tensor.Numeric](
 		w1:     w1,
 		w2:     w2,
 		w3:     w3,
-		swiglu: activations.NewSwiGLU[T](engine, ops), // Initialize SwiGLU by default
+		swiglu: activations.NewSwiGLU[T](engine, ops),
 	}
 
 	for _, opt := range opts {
 		opt(f)
+	}
+
+	// If WithFFNNoBias was applied, disable bias on all Dense layers.
+	if f.noBias {
+		f.w1.bias = nil
+		f.w2.bias = nil
+		f.w3.bias = nil
 	}
 
 	return f, nil
