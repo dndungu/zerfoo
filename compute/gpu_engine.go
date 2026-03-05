@@ -160,9 +160,15 @@ func (e *GPUEngine[T]) OOMFallbackCount() int64 {
 func (e *GPUEngine[T]) Ops() numeric.Arithmetic[T] { return e.cpu.Ops() }
 
 // MatMul performs matrix multiplication using GPU BLAS for float32 and BFloat16
-// tensors. For other types, it falls back to the CPU implementation.
+// tensors. For Q4_0 quantized tensors, uses the Q4 dequant-GEMM kernel.
+// For other types, it falls back to the CPU implementation.
 // Supports 2D matrices and batched matmul (3D+ tensors).
 func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	// Check for Q4 quantized storage on A.
+	if qs, ok := a.GetStorage().(*tensor.Q4Storage); ok {
+		return e.matMulQ4(ctx, qs, a, b, dst...)
+	}
+
 	// float32 and BFloat16 have GPU BLAS paths; fall back for other types.
 	var zero T
 	_, isFloat32 := any(zero).(float32)
@@ -288,6 +294,65 @@ func (e *GPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	}
 
 	return makeGPUResult[T](e, outShape, devCTotal, batchSize*cMatSize, dst...)
+}
+
+// matMulQ4 handles GPU Q4_0 dequant-GEMM: C = dequant(A_q4) * B.
+// Only supports unbatched 2D for now; batched Q4 falls back to CPU.
+func (e *GPUEngine[T]) matMulQ4(ctx context.Context, qs *tensor.Q4Storage, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	aShape := a.Shape()
+	bShape := b.Shape()
+
+	if len(aShape) < 2 || len(bShape) < 2 {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+
+	m := aShape[len(aShape)-2]
+	k := aShape[len(aShape)-1]
+	n := bShape[len(bShape)-1]
+
+	// Only handle unbatched 2D for now.
+	if len(aShape) > 2 || len(bShape) > 2 {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+
+	if k%32 != 0 {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+
+	e.setDevice()
+
+	// Upload Q4 raw bytes to GPU.
+	aBytes := qs.RawBytes()
+	devA, err := e.pool.Alloc(e.deviceID, len(aBytes))
+	if err != nil {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+	defer e.pool.Free(e.deviceID, devA, len(aBytes))
+
+	if err := e.runtime.Memcpy(devA, unsafe.Pointer(&aBytes[0]), len(aBytes), gpuapi.MemcpyHostToDevice); err != nil {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+
+	// Upload B (float32) to GPU.
+	devB, cleanupB, err := getDevicePtr(e, b)
+	if err != nil {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+	defer cleanupB()
+
+	// Allocate output C.
+	cSize := m * n * int(unsafe.Sizeof(float32(0)))
+	devC, err := e.pool.Alloc(e.deviceID, cSize)
+	if err != nil {
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+
+	if err := e.kernels.GemmQ4F32(devA, devB, devC, m, k, n, e.stream); err != nil {
+		e.pool.Free(e.deviceID, devC, cSize)
+		return e.cpu.MatMul(ctx, a, b, dst...)
+	}
+
+	return makeGPUResult[T](e, []int{m, n}, devC, m*n, dst...)
 }
 
 // --- GPU-accelerated and fallback methods ---

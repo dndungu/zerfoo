@@ -3,6 +3,7 @@
 package gpuapi
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/internal/hip/kernels"
@@ -89,6 +90,10 @@ func (k *ROCmKernels) SumAxis(input, output unsafe.Pointer, outer, inner, axisSi
 
 func (k *ROCmKernels) Softmax(input, output unsafe.Pointer, outer, inner, axisSize int, s Stream) error {
 	return kernels.Softmax(input, output, outer, inner, axisSize, rocmStreamPtr(s))
+}
+
+func (k *ROCmKernels) GemmQ4F32(aQ4, b, c unsafe.Pointer, m, kk, n int, s Stream) error {
+	return fmt.Errorf("GemmQ4F32: not implemented for ROCm")
 }
 
 // Compile-time interface assertion.

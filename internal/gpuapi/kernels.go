@@ -36,4 +36,8 @@ type KernelRunner interface {
 
 	// Softmax computes softmax along one axis.
 	Softmax(input, output unsafe.Pointer, outer, inner, axisSize int, stream Stream) error
+
+	// GemmQ4F32 performs Q4_0 dequant-GEMM: C = dequant(A_q4) * B.
+	// A_q4 is packed Q4_0 blocks, B is [K,N] float32, C is [M,N] float32.
+	GemmQ4F32(aQ4, b, c unsafe.Pointer, m, k, n int, stream Stream) error
 }

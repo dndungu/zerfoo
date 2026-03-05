@@ -91,5 +91,9 @@ func (k *CUDAKernels) Softmax(input, output unsafe.Pointer, outer, inner, axisSi
 	return kernels.Softmax(input, output, outer, inner, axisSize, streamPtr(s))
 }
 
+func (k *CUDAKernels) GemmQ4F32(aQ4, b, c unsafe.Pointer, m, kk, n int, s Stream) error {
+	return kernels.GemmQ4F32(aQ4, b, c, m, kk, n, streamPtr(s))
+}
+
 // Compile-time interface assertion.
 var _ KernelRunner = (*CUDAKernels)(nil)
