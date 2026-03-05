@@ -221,7 +221,7 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
 
 ### E27: Quantized Tensor Storage (O41)
 
-- [ ] T27.1 Add Q4_0 block format to tensor/  Owner: TBD  Est: 3h
+- [x] T27.1 Add Q4_0 block format to tensor/  Owner: TBD  Est: 3h
   - Create `tensor/quantized.go` with `Q4Storage` type.
   - Q4_0 format: 32 values per block. Each block = 2 bytes scale (float16) +
     16 bytes data (32 x 4-bit packed). Total = 18 bytes per 32 values.
@@ -234,13 +234,13 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
     in [-1, 1] range. Compression ratio is 8x vs float32.
   - Dependencies: none.
 
-- [ ] S27.1.1 Unit tests for Q4_0 quantization  Owner: TBD  Est: 1.5h
+- [x] S27.1.1 Unit tests for Q4_0 quantization  Owner: TBD  Est: 1.5h
   - Test: quantize known values, dequantize, verify within tolerance.
   - Test: block boundary handling (not multiple of 32).
   - Test: extreme values (0, max float32, negative).
   - Benchmark: dequantize throughput (GB/s).
 
-- [ ] T27.2 Add Q8_0 block format to tensor/  Owner: TBD  Est: 2h
+- [x] T27.2 Add Q8_0 block format to tensor/  Owner: TBD  Est: 2h
   - Q8_0 format: 32 values per block. Each block = 4 bytes scale (float32) +
     32 bytes data (32 x int8). Total = 36 bytes per 32 values.
   - Same interface as Q4Storage.
@@ -248,9 +248,9 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
     Compression ratio is ~4.5x vs float32.
   - Dependencies: none.
 
-- [ ] S27.2.1 Unit tests for Q8_0 quantization  Owner: TBD  Est: 1h
+- [x] S27.2.1 Unit tests for Q8_0 quantization  Owner: TBD  Est: 1h
 
-- [ ] T27.3 Add quantized tensor loading to ZMF loader  Owner: TBD  Est: 2h
+- [x] T27.3 Add quantized tensor loading to ZMF loader  Owner: TBD  Est: 2h
   - Extend `model/zmf_loader.go:DecodeTensor` to detect quantized tensor data
     in the ZMF proto and construct Q4Storage or Q8Storage instead of
     regular Storage[float32].
@@ -259,9 +259,9 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
     returns dequantized values when accessed.
   - Dependencies: T27.1, T27.2.
 
-- [ ] S27.3.1 Tests for quantized ZMF loading  Owner: TBD  Est: 1h
+- [x] S27.3.1 Tests for quantized ZMF loading  Owner: TBD  Est: 1h
 
-- [ ] T27.4 Add zonnx quantization pass  Owner: TBD  Est: 2h
+- [x] T27.4 Add zonnx quantization pass  Owner: TBD  Est: 2h
   - In the zonnx CLI, add `--quantize q4_0` and `--quantize q8_0` flags
     to the convert command that quantize weights during ONNX-to-ZMF conversion.
   - Acceptance: `zonnx convert --quantize q4_0 model.onnx model-q4.zmf` produces
@@ -269,14 +269,14 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
   - Dependencies: T27.3.
   - Risk: This touches the zonnx repo, not zerfoo. Coordinate changes.
 
-- [ ] S27.4.1 Tests for zonnx quantization  Owner: TBD  Est: 1h
+- [x] S27.4.1 Tests for zonnx quantization  Owner: TBD  Est: 1h
 
-- [ ] T27.5 Run golangci-lint on tensor/ and model/  Owner: TBD  Est: 15m
+- [x] T27.5 Run golangci-lint on tensor/ and model/  Owner: TBD  Est: 15m
   - Dependencies: T27.3.
 
 ### E28: Quantized CPU MatMul Kernel (O41, O43)
 
-- [ ] T28.1 Implement Q4_0 x FP32 MatMul in Go  Owner: TBD  Est: 3h
+- [x] T28.1 Implement Q4_0 x FP32 MatMul in Go  Owner: TBD  Est: 3h
   - Create `internal/xblas/gemm_quant.go`.
   - `GemmQ4F32(m, n, k int, a *Q4Storage, b []float32, c []float32)`:
     For each output row, dequantize the Q4 row into a local float32 buffer,
@@ -287,18 +287,18 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
     2x faster than dequant-all-then-GEMM for 4096x4096 matrices.
   - Dependencies: T27.1.
 
-- [ ] S28.1.1 Unit and benchmark tests  Owner: TBD  Est: 1.5h
+- [x] S28.1.1 Unit and benchmark tests  Owner: TBD  Est: 1.5h
   - Correctness: compare against reference float32 GEMM within Q4 tolerance.
   - Benchmark: measure GFLOPS for 512, 1024, 2048, 4096 sizes.
 
-- [ ] T28.2 Implement Q8_0 x FP32 MatMul in Go  Owner: TBD  Est: 2h
+- [x] T28.2 Implement Q8_0 x FP32 MatMul in Go  Owner: TBD  Est: 2h
   - Same pattern as T28.1 but for Q8_0 blocks.
   - Acceptance: correct within Q8 tolerance, faster than dequant-all.
   - Dependencies: T27.2.
 
-- [ ] S28.2.1 Unit and benchmark tests  Owner: TBD  Est: 1h
+- [x] S28.2.1 Unit and benchmark tests  Owner: TBD  Est: 1h
 
-- [ ] T28.3 Wire quantized MatMul into CPUEngine  Owner: TBD  Est: 2h
+- [x] T28.3 Wire quantized MatMul into CPUEngine  Owner: TBD  Est: 2h
   - Modify `compute/cpu_engine.go:MatMul` to detect when input A has quantized
     storage (via type assertion or interface check) and dispatch to GemmQ4F32
     or GemmQ8F32 instead of xblas.GemmF32.
@@ -306,9 +306,9 @@ O45: Benchmark suite with tok/s metric. Measure and track performance parity.
     output and is faster than the float32 path for same logical dimensions.
   - Dependencies: T28.1, T28.2.
 
-- [ ] S28.3.1 Integration tests for quantized MatMul via Engine  Owner: TBD  Est: 1h
+- [x] S28.3.1 Integration tests for quantized MatMul via Engine  Owner: TBD  Est: 1h
 
-- [ ] T28.4 Run golangci-lint on internal/xblas/ and compute/  Owner: TBD  Est: 15m
+- [x] T28.4 Run golangci-lint on internal/xblas/ and compute/  Owner: TBD  Est: 15m
   - Dependencies: T28.3.
 
 ### E29: SIMD-Optimized CPU GEMM (O43)
