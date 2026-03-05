@@ -215,3 +215,27 @@ func TestFFN_WithBias(t *testing.T) {
 	testutils.AssertEqual(t, len(noBiasParams), 3, "FFN without bias should have 3 parameter tensors")
 	testutils.AssertEqual(t, len(withBiasParams), 6, "FFN with bias should have 6 parameter tensors")
 }
+
+// TestFFN_WithSwiGLUAndNoBias verifies that combining WithSwiGLU and WithFFNNoBias works.
+// This was broken before the noBias field fix: the old heuristic only worked with len(opts)==1.
+func TestFFN_WithSwiGLUAndNoBias(t *testing.T) {
+	engine := compute.NewCPUEngine[float32](&numeric.Float32Ops{})
+	ops := &numeric.Float32Ops{}
+
+	ffn, err := NewFFN[float32]("test", engine, ops, 4, 8, 4,
+		WithSwiGLU[float32](),
+		WithFFNNoBias[float32](),
+	)
+	testutils.AssertNoError(t, err, "NewFFN with SwiGLU+NoBias")
+	testutils.AssertNotNil(t, ffn, "FFN should not be nil")
+
+	// Should have 3 parameters (weights only, no bias)
+	testutils.AssertEqual(t, len(ffn.Parameters()), 3, "SwiGLU+NoBias should have 3 params")
+
+	// Verify forward pass works
+	input, _ := tensor.New[float32]([]int{1, 4}, []float32{1, 2, 3, 4})
+	output, err := ffn.Forward(context.Background(), input)
+	testutils.AssertNoError(t, err, "Forward with SwiGLU+NoBias")
+	testutils.AssertNotNil(t, output, "Output should not be nil")
+	testutils.AssertEqual(t, output.Shape()[1], 4, "Output dim should be 4")
+}
