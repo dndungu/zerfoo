@@ -118,6 +118,100 @@ func (q *Q4Storage) Slice() []float32 {
 // DeviceType returns device.CPU.
 func (q *Q4Storage) DeviceType() device.Type { return device.CPU }
 
+// ---------------------------------------------------------------------------
+// Q8_0 format: 32 values per block.
+// Each block = 4 bytes float32 scale + 32 bytes int8 data = 36 bytes per 32 values.
+// ---------------------------------------------------------------------------
+
+const q8BlockSize = 32
+
+type q8Block struct {
+	scale float32
+	data  [32]int8
+}
+
+// Q8Storage holds Q8_0 quantized tensor data on CPU.
+type Q8Storage struct {
+	blocks []q8Block
+	len    int
+}
+
+// QuantizeQ8 quantizes a float32 slice into Q8_0 format.
+func QuantizeQ8(src []float32) *Q8Storage {
+	n := len(src)
+	nBlocks := (n + q8BlockSize - 1) / q8BlockSize
+	blocks := make([]q8Block, nBlocks)
+
+	for bi := range nBlocks {
+		offset := bi * q8BlockSize
+
+		var absMax float32
+		for j := range q8BlockSize {
+			idx := offset + j
+			var v float32
+			if idx < n {
+				v = src[idx]
+			}
+			if av := float32(math.Abs(float64(v))); av > absMax {
+				absMax = av
+			}
+		}
+
+		var scale float32
+		if absMax > 0 {
+			scale = absMax / 127.0
+		}
+		blocks[bi].scale = scale
+
+		var invScale float32
+		if scale > 0 {
+			invScale = 1.0 / scale
+		}
+		for j := range q8BlockSize {
+			var v float32
+			if offset+j < n {
+				v = src[offset+j]
+			}
+			blocks[bi].data[j] = int8(clampInt(int(math.Round(float64(v*invScale))), -128, 127))
+		}
+	}
+
+	return &Q8Storage{blocks: blocks, len: n}
+}
+
+// Dequantize unpacks Q8_0 blocks into dst.
+func (q *Q8Storage) Dequantize(dst []float32) {
+	for bi, blk := range q.blocks {
+		offset := bi * q8BlockSize
+		for j := range q8BlockSize {
+			idx := offset + j
+			if idx >= q.len {
+				break
+			}
+			dst[idx] = float32(blk.data[j]) * blk.scale
+		}
+	}
+}
+
+// Len returns the number of logical float32 elements.
+func (q *Q8Storage) Len() int { return q.len }
+
+// NumBlocks returns the number of Q8_0 blocks.
+func (q *Q8Storage) NumBlocks() int { return len(q.blocks) }
+
+// ByteSize returns the raw byte size of the quantized data.
+func (q *Q8Storage) ByteSize() int { return len(q.blocks) * 36 }
+
+// Slice returns a dequantized float32 copy of the data.
+func (q *Q8Storage) Slice() []float32 {
+	dst := make([]float32, q.len)
+	q.Dequantize(dst)
+	return dst
+}
+
+// DeviceType returns device.CPU.
+func (q *Q8Storage) DeviceType() device.Type { return device.CPU }
+
 func clampInt(v, lo, hi int) int {
 	if v < lo {
 		return lo
