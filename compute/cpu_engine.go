@@ -855,6 +855,11 @@ func (e *CPUEngine[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T]
 	k := aShape[len(aShape)-1]
 	n := bShape[len(bShape)-1]
 
+	// Check for quantized storage on A before dequantizing via Data().
+	if dispatched := e.tryQuantizedMatMul(a, b, result, batchSize, m, n, k, aShape, bShape); dispatched {
+		return result, nil
+	}
+
 	aData := a.Data()
 	bData := b.Data()
 	rData := result.Data()
@@ -1559,6 +1564,60 @@ func (e *CPUEngine[T]) Softmax(_ context.Context, a *tensor.TensorNumeric[T], ax
 	}
 
 	return out, nil
+}
+
+// tryQuantizedMatMul checks if tensor A uses quantized storage and dispatches
+// to the appropriate quantized GEMM kernel. Returns true if handled.
+func (e *CPUEngine[T]) tryQuantizedMatMul(
+	a, b, result *tensor.TensorNumeric[T],
+	batchSize, m, n, k int,
+	aShape, bShape []int,
+) bool {
+	stor := a.GetStorage()
+	switch qs := any(stor).(type) {
+	case *tensor.Q4Storage:
+		bF := any(b.Data()).([]float32)
+		rF := any(result.Data()).([]float32)
+		if batchSize == 1 {
+			xblas.GemmQ4F32(m, n, k, qs, bF, rF)
+		} else {
+			// For batched Q4, dequantize per batch and use quantized GEMM.
+			// Q4Storage is flat; compute per-batch quantized A.
+			af32 := qs.Slice()
+			for i := range batchSize {
+				aOff := i * m * k
+				cOff := i * m * n
+				bOff := 0
+				if len(aShape) == len(bShape) {
+					bOff = i * k * n
+				}
+				batchA := tensor.QuantizeQ4(af32[aOff : aOff+m*k])
+				xblas.GemmQ4F32(m, n, k, batchA, bF[bOff:bOff+k*n], rF[cOff:cOff+m*n])
+			}
+		}
+		return true
+	case *tensor.Q8Storage:
+		bF := any(b.Data()).([]float32)
+		rF := any(result.Data()).([]float32)
+		if batchSize == 1 {
+			xblas.GemmQ8F32(m, n, k, qs, bF, rF)
+		} else {
+			af32 := qs.Slice()
+			for i := range batchSize {
+				aOff := i * m * k
+				cOff := i * m * n
+				bOff := 0
+				if len(aShape) == len(bShape) {
+					bOff = i * k * n
+				}
+				batchA := tensor.QuantizeQ8(af32[aOff : aOff+m*k])
+				xblas.GemmQ8F32(m, n, k, batchA, bF[bOff:bOff+k*n], rF[cOff:cOff+m*n])
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // Statically assert that the type implements the Engine interface.
