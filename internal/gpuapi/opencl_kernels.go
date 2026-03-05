@@ -3,6 +3,7 @@
 package gpuapi
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/internal/opencl/kernels"
@@ -97,6 +98,10 @@ func (k *OpenCLKernels) SumAxis(input, output unsafe.Pointer, outer, inner, axis
 
 func (k *OpenCLKernels) Softmax(input, output unsafe.Pointer, outer, inner, axisSize int, _ Stream) error {
 	return k.prog.Softmax(input, output, outer, inner, axisSize)
+}
+
+func (k *OpenCLKernels) GemmQ4F32(aQ4, b, c unsafe.Pointer, m, kk, n int, _ Stream) error {
+	return fmt.Errorf("GemmQ4F32: not implemented for OpenCL")
 }
 
 // Compile-time interface assertion.

@@ -126,6 +126,9 @@ func (stubKernelRunner) SumAxis(_, _ unsafe.Pointer, _, _, _ int, _ gpuapi.Strea
 func (stubKernelRunner) Softmax(_, _ unsafe.Pointer, _, _, _ int, _ gpuapi.Stream) error {
 	return nil
 }
+func (stubKernelRunner) GemmQ4F32(_, _, _ unsafe.Pointer, _, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
 
 var _ gpuapi.KernelRunner = stubKernelRunner{}
 
