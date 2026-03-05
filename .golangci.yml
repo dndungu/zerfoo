@@ -273,6 +273,8 @@ linters:
       excludes:
         - G404   # Allow math/rand in tests is still blocked by depguard in prod code
         - G115   # Int conv false positives in generics-heavy code
+        - G704   # SSRF taint false positives on internal API/CDN URLs
+        - G705   # XSS taint false positives on %q-escaped SSE error responses
       # Tune paths where security checks are too noisy:
       # Note: gosec is still run in tests, but we often skip specific rules via issues.exclude-rules.
 
