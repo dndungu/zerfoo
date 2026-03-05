@@ -20,11 +20,26 @@ type Graph[T tensor.Numeric] struct {
 	inputs       []Node[T]
 	output       Node[T]
 	memo         map[Node[T]]*tensor.TensorNumeric[T]
+	parallel     bool
+}
+
+// WithParallel enables or disables parallel execution of independent nodes.
+// When enabled, Forward delegates to ParallelForward for concurrent execution.
+// Default is false (sequential) for backward compatibility.
+func (g *Graph[T]) WithParallel(enabled bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.parallel = enabled
 }
 
 // Forward executes the forward pass of the entire graph.
 // It is safe for concurrent use; callers will be serialized.
+// When parallel mode is enabled via WithParallel(true), independent nodes
+// are executed concurrently using a goroutine pool.
 func (g *Graph[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	if g.parallel {
+		return ParallelForward(ctx, g, inputs...)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
