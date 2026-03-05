@@ -3,6 +3,7 @@
 package gpuapi
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/internal/clblast"
@@ -23,6 +24,12 @@ func NewOpenCLBlas(queue, context unsafe.Pointer) *OpenCLBlas {
 
 func (b *OpenCLBlas) Sgemm(m, n, k int, alpha float32, a, bPtr unsafe.Pointer, beta float32, c unsafe.Pointer) error {
 	return b.handle.Sgemm(m, n, k, alpha, a, bPtr, beta, c)
+}
+
+func (b *OpenCLBlas) BFloat16Gemm(_, _, _ int, _ float32,
+	_, _ unsafe.Pointer, _ float32, _ unsafe.Pointer,
+) error {
+	return fmt.Errorf("BFloat16Gemm: not supported on OpenCL backend")
 }
 
 func (b *OpenCLBlas) SetStream(s Stream) error {

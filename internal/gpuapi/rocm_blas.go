@@ -3,6 +3,7 @@
 package gpuapi
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/internal/rocblas"
@@ -33,6 +34,12 @@ func (b *ROCmBlas) Sgemm(m, n, k int, alpha float32,
 	beta float32, c unsafe.Pointer,
 ) error {
 	return rocblas.Sgemm(b.handle, m, n, k, alpha, a, bPtr, beta, c)
+}
+
+func (b *ROCmBlas) BFloat16Gemm(_, _, _ int, _ float32,
+	_, _ unsafe.Pointer, _ float32, _ unsafe.Pointer,
+) error {
+	return fmt.Errorf("BFloat16Gemm: not supported on ROCm backend")
 }
 
 func (b *ROCmBlas) SetStream(stream Stream) error {

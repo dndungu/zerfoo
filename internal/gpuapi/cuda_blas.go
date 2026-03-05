@@ -36,6 +36,19 @@ func (b *CUDABlas) Sgemm(m, n, k int, alpha float32,
 	return cublas.Sgemm(b.handle, m, n, k, alpha, a, bPtr, beta, c)
 }
 
+func (b *CUDABlas) BFloat16Gemm(m, n, k int, alpha float32,
+	a unsafe.Pointer, bPtr unsafe.Pointer,
+	beta float32, c unsafe.Pointer,
+) error {
+	return cublas.GemmEx(b.handle, m, n, k, alpha,
+		a, cublas.CudaR16BF,
+		bPtr, cublas.CudaR16BF,
+		beta,
+		c, cublas.CudaR16BF,
+		cublas.CublasCompute32F,
+	)
+}
+
 func (b *CUDABlas) SetStream(stream Stream) error {
 	var ptr unsafe.Pointer
 	if stream != nil {
