@@ -83,6 +83,60 @@ func TestGemmQ8F32_Correctness(t *testing.T) {
 	}
 }
 
+func TestGemmQ4F32Fused_Correctness(t *testing.T) {
+	for _, tt := range gemmSizes {
+		tt.maxErr = 0.15
+		t.Run(tt.name, func(t *testing.T) {
+			aF32, b := makeTestInputs(tt.m, tt.k, tt.n)
+			aQ4 := tensor.QuantizeQ4(aF32)
+
+			got := make([]float32, tt.m*tt.n)
+			GemmQ4F32Fused(tt.m, tt.n, tt.k, aQ4, b, got)
+
+			// Reference: dequantize then float32 GEMM.
+			af32Full := make([]float32, tt.m*tt.k)
+			aQ4.Dequantize(af32Full)
+			want := make([]float32, tt.m*tt.n)
+			GemmF32(tt.m, tt.n, tt.k, af32Full, b, want)
+
+			assertClose(t, got, want, tt.maxErr)
+		})
+	}
+}
+
+func TestGemmQ4F32Fused_GEMV(t *testing.T) {
+	// M=1 is the critical decode path (memory-bound).
+	m, n, k := 1, 64, 256
+	aF32, b := makeTestInputs(m, k, n)
+	aQ4 := tensor.QuantizeQ4(aF32)
+
+	got := make([]float32, m*n)
+	GemmQ4F32Fused(m, n, k, aQ4, b, got)
+
+	af32Full := make([]float32, m*k)
+	aQ4.Dequantize(af32Full)
+	want := make([]float32, m*n)
+	GemmF32(m, n, k, af32Full, b, want)
+
+	assertClose(t, got, want, 0.15)
+}
+
+func TestGemmQ4F32Fused_LargeMatrix(t *testing.T) {
+	m, n, k := 32, 64, 256
+	aF32, b := makeTestInputs(m, k, n)
+	aQ4 := tensor.QuantizeQ4(aF32)
+
+	got := make([]float32, m*n)
+	GemmQ4F32Fused(m, n, k, aQ4, b, got)
+
+	af32Full := make([]float32, m*k)
+	aQ4.Dequantize(af32Full)
+	want := make([]float32, m*n)
+	GemmF32(m, n, k, af32Full, b, want)
+
+	assertClose(t, got, want, 0.15)
+}
+
 func BenchmarkGemmQ4F32(b *testing.B) {
 	for _, size := range []int{512, 1024} {
 		b.Run(benchLabel(size), func(b *testing.B) {
@@ -96,6 +150,40 @@ func BenchmarkGemmQ4F32(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkGemmQ4F32Fused(b *testing.B) {
+	for _, size := range []int{512, 1024} {
+		b.Run(benchLabel(size), func(b *testing.B) {
+			aF32, bf32 := makeTestInputs(size, size, size)
+			aQ4 := tensor.QuantizeQ4(aF32)
+			c := make([]float32, size*size)
+
+			b.ResetTimer()
+			for range b.N {
+				GemmQ4F32Fused(size, size, size, aQ4, bf32, c)
+			}
+		})
+	}
+}
+
+func BenchmarkGemmQ4F32_GEMV(b *testing.B) {
+	// Decode-path: M=1, large K and N.
+	k, n := 4096, 4096
+	aF32, bf32 := makeTestInputs(1, k, n)
+	aQ4 := tensor.QuantizeQ4(aF32)
+	c := make([]float32, n)
+
+	b.Run("dequant+sgemm", func(b *testing.B) {
+		for range b.N {
+			GemmQ4F32(1, n, k, aQ4, bf32, c)
+		}
+	})
+	b.Run("fused", func(b *testing.B) {
+		for range b.N {
+			GemmQ4F32Fused(1, n, k, aQ4, bf32, c)
+		}
+	})
 }
 
 func BenchmarkGemmQ8F32(b *testing.B) {
