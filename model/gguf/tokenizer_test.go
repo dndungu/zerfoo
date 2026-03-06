@@ -1,0 +1,155 @@
+package gguf
+
+import (
+	"testing"
+)
+
+func TestExtractTokenizer_Basic(t *testing.T) {
+	// Build a minimal GGUF File with tokenizer metadata.
+	tokens := make([]any, 10)
+	tokens[0] = "<unk>"
+	tokens[1] = "<s>"
+	tokens[2] = "</s>"
+	tokens[3] = "<pad>"
+	tokens[4] = "h"
+	tokens[5] = "e"
+	tokens[6] = "l"
+	tokens[7] = "o"
+	tokens[8] = "he"
+	tokens[9] = "lo"
+
+	merges := []any{"h e", "l o"}
+
+	f := &File{
+		Metadata: map[string]any{
+			"tokenizer.ggml.model":            "gpt2",
+			"tokenizer.ggml.tokens":           tokens,
+			"tokenizer.ggml.merges":           merges,
+			"tokenizer.ggml.bos_token_id":     uint32(1),
+			"tokenizer.ggml.eos_token_id":     uint32(2),
+			"tokenizer.ggml.unknown_token_id": uint32(0),
+			"tokenizer.ggml.padding_token_id": uint32(3),
+		},
+	}
+
+	tok, err := ExtractTokenizer(f)
+	if err != nil {
+		t.Fatalf("ExtractTokenizer: %v", err)
+	}
+
+	if tok.VocabSize() != 10 {
+		t.Errorf("VocabSize = %d, want 10", tok.VocabSize())
+	}
+
+	special := tok.SpecialTokens()
+	if special.BOS != 1 {
+		t.Errorf("BOS = %d, want 1", special.BOS)
+	}
+	if special.EOS != 2 {
+		t.Errorf("EOS = %d, want 2", special.EOS)
+	}
+	if special.UNK != 0 {
+		t.Errorf("UNK = %d, want 0", special.UNK)
+	}
+	if special.PAD != 3 {
+		t.Errorf("PAD = %d, want 3", special.PAD)
+	}
+}
+
+func TestExtractTokenizer_EncodeDecode(t *testing.T) {
+	// Build vocab: characters plus merged tokens.
+	tokens := make([]any, 10)
+	tokens[0] = "<unk>"
+	tokens[1] = "<s>"
+	tokens[2] = "</s>"
+	tokens[3] = "h"
+	tokens[4] = "e"
+	tokens[5] = "l"
+	tokens[6] = "o"
+	tokens[7] = "he"
+	tokens[8] = "ll"
+	tokens[9] = "hello"
+
+	merges := []any{"h e", "l l", "he ll", "hell o"}
+
+	f := &File{
+		Metadata: map[string]any{
+			"tokenizer.ggml.model":            "gpt2",
+			"tokenizer.ggml.tokens":           tokens,
+			"tokenizer.ggml.merges":           merges,
+			"tokenizer.ggml.bos_token_id":     uint32(1),
+			"tokenizer.ggml.eos_token_id":     uint32(2),
+			"tokenizer.ggml.unknown_token_id": uint32(0),
+		},
+	}
+
+	tok, err := ExtractTokenizer(f)
+	if err != nil {
+		t.Fatalf("ExtractTokenizer: %v", err)
+	}
+
+	// Encode "hello" -- BPE should merge to single token.
+	ids, err := tok.Encode("hello")
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != 9 {
+		t.Errorf("Encode(\"hello\") = %v, want [9]", ids)
+	}
+
+	// Decode back.
+	decoded, err := tok.Decode(ids)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded != "hello" {
+		t.Errorf("Decode(%v) = %q, want %q", ids, decoded, "hello")
+	}
+}
+
+func TestExtractTokenizer_MissingTokens(t *testing.T) {
+	f := &File{
+		Metadata: map[string]any{
+			"tokenizer.ggml.model": "gpt2",
+			// No tokens array.
+		},
+	}
+
+	_, err := ExtractTokenizer(f)
+	if err == nil {
+		t.Fatal("expected error for missing tokens")
+	}
+}
+
+func TestExtractTokenizer_NoMerges(t *testing.T) {
+	// A tokenizer with tokens but no merges should still work (character-level).
+	tokens := make([]any, 4)
+	tokens[0] = "<unk>"
+	tokens[1] = "a"
+	tokens[2] = "b"
+	tokens[3] = "c"
+
+	f := &File{
+		Metadata: map[string]any{
+			"tokenizer.ggml.model":            "gpt2",
+			"tokenizer.ggml.tokens":           tokens,
+			"tokenizer.ggml.bos_token_id":     uint32(0),
+			"tokenizer.ggml.eos_token_id":     uint32(0),
+			"tokenizer.ggml.unknown_token_id": uint32(0),
+		},
+	}
+
+	tok, err := ExtractTokenizer(f)
+	if err != nil {
+		t.Fatalf("ExtractTokenizer: %v", err)
+	}
+
+	ids, err := tok.Encode("abc")
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	// Should encode as individual characters.
+	if len(ids) != 3 {
+		t.Errorf("Encode(\"abc\") = %v, want 3 tokens", ids)
+	}
+}
