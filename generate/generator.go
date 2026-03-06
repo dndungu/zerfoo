@@ -103,6 +103,18 @@ func NewGenerator[T tensor.Numeric](
 	return gen
 }
 
+// Graph returns the underlying computation graph.
+func (gen *Generator[T]) Graph() *graph.Graph[T] { return gen.graph }
+
+// Tokenizer returns the tokenizer.
+func (gen *Generator[T]) Tokenizer() tokenizer.Tokenizer { return gen.tokenizer }
+
+// Engine returns the compute engine.
+func (gen *Generator[T]) Engine() compute.Engine[T] { return gen.engine }
+
+// Config returns the model configuration.
+func (gen *Generator[T]) Config() ModelConfig { return gen.config }
+
 // Generate produces text from a prompt using the given sampling configuration.
 // It tokenizes the prompt, runs the autoregressive loop with KV caching, and
 // returns the generated text (excluding the prompt).
