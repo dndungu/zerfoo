@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"sync/atomic"
 	"time"
 
@@ -41,17 +42,36 @@ func (r *dirRegistry) List() []registry.ModelInfo { return nil }
 func (r *dirRegistry) Delete(_ string) error { return nil }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	layerreg.RegisterAll()
 
 	modelDir := flag.String("model", "", "path to model directory (config.json, tokenizer.json, model.zmf)")
 	prompt := flag.String("prompt", "The meaning of life is", "prompt text")
 	maxTokens := flag.Int("tokens", 64, "max tokens to generate")
 	useMmap := flag.Bool("mmap", false, "use memory-mapped loading")
+	cpuprofile := flag.String("cpuprofile", "", "write CPU profile to file")
 	flag.Parse()
 
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			return fmt.Errorf("cpuprofile: %w", err)
+		}
+		defer func() { _ = f.Close() }()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			return fmt.Errorf("cpuprofile start: %w", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
+
 	if *modelDir == "" {
-		fmt.Fprintln(os.Stderr, "usage: bench_tps -model /path/to/model/dir")
-		os.Exit(1)
+		return fmt.Errorf("usage: bench_tps -model /path/to/model/dir")
 	}
 
 	reg := &dirRegistry{path: *modelDir}
@@ -60,8 +80,7 @@ func main() {
 	t0 := time.Now()
 	mdl, err := inference.Load("bench", inference.WithRegistry(reg), inference.WithMmap(*useMmap))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("load error: %w", err)
 	}
 	fmt.Printf("Loaded in %.1fs\n", time.Since(t0).Seconds())
 
@@ -88,8 +107,7 @@ func main() {
 	err = mdl.GenerateStream(context.Background(), *prompt, handler, inference.WithMaxTokens(*maxTokens))
 	elapsed := time.Since(t1)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "generate error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("generate error: %w", err)
 	}
 
 	genTokens := tokenCount.Load()
@@ -100,4 +118,5 @@ func main() {
 	fmt.Printf("Generated tokens: %d\n", genTokens)
 	fmt.Printf("Time: %.3fs\n", elapsed.Seconds())
 	fmt.Printf("Throughput: %.2f tok/s\n", tps)
+	return nil
 }
