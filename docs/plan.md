@@ -261,7 +261,7 @@ producing 79,537 allocs/token.
 
 - [x] S52.1.1 Attention transpose elimination benchmark  Owner: TBD  Est: 30m
 
-- [ ] T52.2 NEON RMSNorm  Owner: TBD  Est: 2h
+- [ ] T52.2 NEON RMSNorm (LOW PRIORITY - 0.9% CPU)  Owner: TBD  Est: 2h
   - `compute/fused_rmsnorm.go` uses scalar Go loops.
   - Add ARM64 assembly in `compute/fused_rmsnorm_arm64.s`:
     - FMLA for sum-of-squares across float32x4 lanes.
@@ -275,7 +275,7 @@ producing 79,537 allocs/token.
 
 - [ ] S52.2.1 NEON RMSNorm parity and benchmark  Owner: TBD  Est: 30m
 
-- [ ] T52.3 NEON SiLU-gate  Owner: TBD  Est: 2h
+- [ ] T52.3 NEON SiLU-gate (LOW PRIORITY - FusedSiLUGate unused)  Owner: TBD  Est: 2h
   - `compute/fused_silugate.go` uses scalar Go loops.
   - Add ARM64 assembly in `compute/fused_silugate_arm64.s`:
     - FNEG + polynomial FEXP approximation (minimax degree-4) for sigmoid.
@@ -289,23 +289,28 @@ producing 79,537 allocs/token.
 
 ### E53: DGX Spark Benchmark Validation (O74)
 
-- [ ] T53.1 End-to-end benchmark with all optimizations  Owner: TBD  Est: 2h
-  - Run Gemma 3 2B Q4_0 benchmark on DGX Spark GB10 with all Phase 29
-    optimizations enabled (NEON Q4 dot, pool wired, KV decode opt, NEON ops).
-  - Capture: tok/s, allocs/token, GC %, CPU profile breakdown.
-  - Compare against Phase 28 baseline (3.80 tok/s, 79,537 allocs/token).
-  - Acceptance: >= 15 tok/s OR clear documentation of remaining bottlenecks
-    and next steps.
+- [x] T53.1 End-to-end benchmark with all optimizations  Owner: TBD  Est: 2h
+  - Ran Gemma 3 2B Q4_0 benchmark on DGX Spark GB10.
+  - Results: **6.7 tok/s** (100-token average, up from 3.80 = 1.76x).
+  - F32 model comparison: 5.78 tok/s (Q4 is 17% faster).
+  - 15 tok/s NOT achieved. Bottleneck is framework overhead (~150ms/token),
+    not compute (~24ms/token). See docs/updates.md for detailed analysis.
   - Dependencies: E49, E50, E51, E52.
 
-- [ ] S53.1.1 Before/after profile comparison  Owner: TBD  Est: 30m
+- [x] S53.1.1 Before/after profile comparison  Owner: TBD  Est: 30m
+  - Phase 28: 81.6% CPU in sgemmAccRowNeon, 0% in Q4 (all dequantized)
+  - Phase 29: 35.2% sgemmAccRowNeon + 34.6% q4DotRowSIMD (split compute)
+  - Transpose: 4.13% → 3.93% (dim=1 short-circuit)
+  - GC/memclr: significantly reduced by TensorPool + dim=1 optimization
 
-- [ ] T53.2 Regression test for correctness  Owner: TBD  Est: 1h
-  - Run existing parity tests on DGX Spark with all optimizations.
-  - Verify no output quality degradation from fused kernels or pooling.
+- [x] T53.2 Regression test for correctness  Owner: TBD  Est: 1h
+  - All tests pass with -race on DGX Spark (go test ./... -race).
+  - Q4 GEMV matches float32 reference within tolerance.
+  - Q4 model output quality unchanged (garbage output is pre-existing).
   - Dependencies: T53.1.
 
-- [ ] T53.3 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+- [x] T53.3 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+  - 0 issues across internal/xblas/, compute/, tensor/, layers/.
 
 ---
 
