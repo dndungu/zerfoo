@@ -300,6 +300,14 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 		return nil, err
 	}
 
+	// Set RoPE position offset from cached sequence length so that decode
+	// tokens get the correct absolute position rotation.
+	if hasCache {
+		gqa.rope.SetPositionOffset(cache.SeqLen())
+	} else {
+		gqa.rope.SetPositionOffset(0)
+	}
+
 	qHeadsRoPE, err := gqa.rope.Forward(ctx, qForRoPE)
 	if err != nil {
 		return nil, err
