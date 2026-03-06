@@ -452,6 +452,52 @@ func (m *Model) Close() error {
 	return firstErr
 }
 
+// Generator returns the underlying generator.
+func (m *Model) Generator() *generate.Generator[float32] {
+	return m.generator
+}
+
+// SpeculativeGenerate runs speculative decoding using this model as the target
+// and the draft model for token proposal. draftLen controls how many tokens
+// are proposed per verification step.
+func (m *Model) SpeculativeGenerate(
+	ctx context.Context,
+	draft *Model,
+	prompt string,
+	draftLen int,
+	opts ...GenerateOption,
+) (string, error) {
+	sc := buildSamplingConfig(opts)
+	sc.Temperature = 0 // speculative decode is greedy-only for now
+
+	draftCfg := generate.ModelConfig{
+		VocabSize:  draft.config.VocabSize,
+		MaxSeqLen:  draft.config.MaxPositionEmbeddings,
+		EOSTokenID: draft.config.EOSTokenID,
+		BOSTokenID: draft.config.BOSTokenID,
+		NumLayers:  draft.config.NumLayers,
+	}
+	targetCfg := generate.ModelConfig{
+		VocabSize:  m.config.VocabSize,
+		MaxSeqLen:  m.config.MaxPositionEmbeddings,
+		EOSTokenID: m.config.EOSTokenID,
+		BOSTokenID: m.config.BOSTokenID,
+		NumLayers:  m.config.NumLayers,
+	}
+
+	sg := generate.NewSpeculativeGenerator(
+		draft.generator.Graph(),
+		m.generator.Graph(),
+		m.tokenizer,
+		m.engine,
+		draftCfg,
+		targetCfg,
+		draftLen,
+	)
+
+	return sg.Generate(ctx, prompt, sc)
+}
+
 // Config returns the model metadata.
 func (m *Model) Config() ModelMetadata {
 	return m.config
