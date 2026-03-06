@@ -21,7 +21,8 @@ type MatMul[T tensor.Numeric] struct {
 	// transposition (constant weight case). Set on first Forward call
 	// and reused on subsequent calls to avoid transposing every time.
 	cachedBTranspose *tensor.TensorNumeric[T]
-	cachedBPtr       uintptr // data pointer of the B tensor that was transposed
+	cachedBPtr       uintptr                  // data pointer of the B tensor that was transposed
+	cachedB          *tensor.TensorNumeric[T] // the B tensor that was transposed
 }
 
 // NewMatMul creates a new MatMul layer.
@@ -91,16 +92,22 @@ func (m *MatMul[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 // when the same B tensor (identified by data pointer) is passed on subsequent calls.
 // This avoids re-transposing constant weight matrices on every forward pass.
 func (m *MatMul[T]) getCachedTranspose(ctx context.Context, b *tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	bPtr := uintptr(unsafe.Pointer(&b.Data()[0]))
-	if m.cachedBTranspose != nil && m.cachedBPtr == bPtr {
-		return m.cachedBTranspose, nil
+	if m.cachedBTranspose != nil {
+		if m.cachedB == b {
+			return m.cachedBTranspose, nil
+		}
+		bPtr := uintptr(unsafe.Pointer(&b.Data()[0]))
+		if m.cachedBPtr == bPtr {
+			return m.cachedBTranspose, nil
+		}
 	}
 	transposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
 	if err != nil {
 		return nil, err
 	}
 	m.cachedBTranspose = transposed
-	m.cachedBPtr = bPtr
+	m.cachedB = b
+	m.cachedBPtr = uintptr(unsafe.Pointer(&b.Data()[0]))
 	return transposed, nil
 }
 

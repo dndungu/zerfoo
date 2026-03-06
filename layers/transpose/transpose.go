@@ -17,10 +17,13 @@ type Transpose[T tensor.Numeric] struct {
 	perm        []int
 	outputShape []int
 
-	// Cache for constant inputs: when the same input data pointer is seen
-	// on consecutive calls, return the cached result instead of re-transposing.
+	// Cache for constant inputs: return cached result when either the
+	// same data pointer or same tensor object is seen. Data pointer
+	// handles the common case (Go allocator reuse). Tensor pointer
+	// handles Q4-backed tensors whose Data() allocates a new slice.
 	cachedResult *tensor.TensorNumeric[T]
 	cachedInPtr  uintptr
+	cachedInput  *tensor.TensorNumeric[T]
 }
 
 // OpType returns the operation type.
@@ -75,11 +78,18 @@ func (t *Transpose[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNume
 
 	t.outputShape = outputShape
 
-	// Cache hit: if input data pointer matches the previous call, return cached result.
-	data := input.Data()
-	inPtr := uintptr(unsafe.Pointer(&data[0]))
-	if t.cachedResult != nil && t.cachedInPtr == inPtr {
-		return t.cachedResult, nil
+	// Cache hit: check both data pointer (for dense tensors where Go may
+	// reuse memory) and tensor identity (for Q4-backed tensors where Data()
+	// allocates a new slice on each call).
+	if t.cachedResult != nil {
+		if t.cachedInput == input {
+			return t.cachedResult, nil
+		}
+		data := input.Data()
+		inPtr := uintptr(unsafe.Pointer(&data[0]))
+		if t.cachedInPtr == inPtr {
+			return t.cachedResult, nil
+		}
 	}
 
 	// Transpose the input tensor.
@@ -89,7 +99,9 @@ func (t *Transpose[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNume
 	}
 
 	t.cachedResult = transposed
-	t.cachedInPtr = inPtr
+	t.cachedInput = input
+	data := input.Data()
+	t.cachedInPtr = uintptr(unsafe.Pointer(&data[0]))
 	return transposed, nil
 }
 
