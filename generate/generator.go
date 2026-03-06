@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -68,9 +69,11 @@ type Generator[T tensor.Numeric] struct {
 	tokenizer tokenizer.Tokenizer
 	engine    compute.Engine[T]
 	config    ModelConfig
-	pool      *compute.TensorPool[T] // reusable intermediate buffers
-	blockPool *BlockPool[T]          // nil when using pre-allocated KV cache
-	headDim   int                    // per-head dim for paged KV
+	pool      *compute.TensorPool[T]       // reusable intermediate buffers
+	blockPool *BlockPool[T]                // nil when using pre-allocated KV cache
+	headDim   int                          // per-head dim for paged KV
+	plan      *graph.ExecutionPlan[T]      // compiled decode plan (nil until first decode)
+	planOnce  sync.Once                   // ensures compile happens once
 }
 
 // NewGenerator creates a Generator from a model graph, tokenizer, engine, and config.
@@ -189,7 +192,22 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 			return "", fmt.Errorf("create token tensor: %w", tErr)
 		}
 
-		logits, err = gen.graph.Forward(genCtx, tokenTensor)
+		if gen.plan != nil {
+			logits, err = gen.plan.Run(genCtx, tokenTensor)
+		} else {
+			logits, err = gen.graph.Forward(genCtx, tokenTensor)
+			// After the first decode Forward(), compile the graph.
+			// The graph's memo from this Forward() provides shapes
+			// without re-executing (avoids corrupting model state).
+			if err == nil {
+				gen.planOnce.Do(func() {
+					plan, cErr := gen.graph.Compile(genCtx, tokenTensor)
+					if cErr == nil {
+						gen.plan = plan
+					}
+				})
+			}
+		}
 		if err != nil {
 			return "", fmt.Errorf("decode forward: %w", err)
 		}

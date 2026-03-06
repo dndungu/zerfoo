@@ -17,10 +17,10 @@ type mockF32Node struct {
 	forwardFunc func(ctx context.Context, inputs ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error)
 }
 
-func (m *mockF32Node) OpType() string                    { return m.name }
-func (m *mockF32Node) Attributes() map[string]interface{} { return nil }
-func (m *mockF32Node) OutputShape() []int                { return m.outputShape }
-func (m *mockF32Node) Parameters() []*Parameter[float32] { return nil }
+func (m *mockF32Node) OpType() string                     { return m.name }
+func (m *mockF32Node) Attributes() map[string]any         { return nil }
+func (m *mockF32Node) OutputShape() []int                 { return m.outputShape }
+func (m *mockF32Node) Parameters() []*Parameter[float32]  { return nil }
 
 func (m *mockF32Node) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
 	if m.forwardFunc != nil {
@@ -35,42 +35,34 @@ func (m *mockF32Node) Backward(_ context.Context, _ types.BackwardMode, _ *tenso
 
 func TestExecutionPlanRun(t *testing.T) {
 	// Build a simple 2-instruction plan: input -> double -> add10
-	// Buffer 0: input, Buffer 1: doubled, Buffer 2: result
-	inputShape := []int{1, 4}
-	arena := NewBufferArena[float32]([][]int{inputShape, inputShape, inputShape})
-
-	double := func(_ context.Context, inputs []*tensor.TensorNumeric[float32], output *tensor.TensorNumeric[float32]) error {
+	double := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
 		in := inputs[0].Data()
-		out := output.Data()
+		out := make([]float32, len(in))
 		for i := range in {
 			out[i] = in[i] * 2
 		}
-		return nil
+		return tensor.New[float32](inputs[0].Shape(), out)
 	}
-	add10 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32], output *tensor.TensorNumeric[float32]) error {
+	add10 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
 		in := inputs[0].Data()
-		out := output.Data()
+		out := make([]float32, len(in))
 		for i := range in {
 			out[i] = in[i] + 10
 		}
-		return nil
+		return tensor.New[float32](inputs[0].Shape(), out)
 	}
 
 	plan := &ExecutionPlan[float32]{
 		instructions: []Instruction[float32]{
-			{Kernel: double, InputIdx: []int{0}, OutputIdx: 1},
-			{Kernel: add10, InputIdx: []int{1}, OutputIdx: 2},
+			{Forward: double, InputIdx: []int{0}, OutputIdx: 1},
+			{Forward: add10, InputIdx: []int{1}, OutputIdx: 2},
 		},
-		arena:     arena,
+		slots:     make([]*tensor.TensorNumeric[float32], 3),
 		inputIdx:  []int{0},
 		outputIdx: 2,
 	}
 
-	input, err := tensor.New[float32](inputShape, []float32{1, 2, 3, 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	input, _ := tensor.New[float32]([]int{1, 4}, []float32{1, 2, 3, 4})
 	result, err := plan.Run(context.Background(), input)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -87,43 +79,44 @@ func TestExecutionPlanRun(t *testing.T) {
 
 func TestExecutionPlanRunDiamond(t *testing.T) {
 	// Diamond: input -> branch1 (*2), input -> branch2 (*3), merge (branch1 + branch2)
-	shape := []int{1, 3}
-	arena := NewBufferArena[float32]([][]int{shape, shape, shape, shape})
-
-	mul2 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32], output *tensor.TensorNumeric[float32]) error {
-		for i, v := range inputs[0].Data() {
-			output.Data()[i] = v * 2
+	mul2 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+		in := inputs[0].Data()
+		out := make([]float32, len(in))
+		for i := range in {
+			out[i] = in[i] * 2
 		}
-		return nil
+		return tensor.New[float32](inputs[0].Shape(), out)
 	}
-	mul3 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32], output *tensor.TensorNumeric[float32]) error {
-		for i, v := range inputs[0].Data() {
-			output.Data()[i] = v * 3
+	mul3 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+		in := inputs[0].Data()
+		out := make([]float32, len(in))
+		for i := range in {
+			out[i] = in[i] * 3
 		}
-		return nil
+		return tensor.New[float32](inputs[0].Shape(), out)
 	}
-	add := func(_ context.Context, inputs []*tensor.TensorNumeric[float32], output *tensor.TensorNumeric[float32]) error {
+	add := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
 		a := inputs[0].Data()
 		b := inputs[1].Data()
-		out := output.Data()
+		out := make([]float32, len(a))
 		for i := range a {
 			out[i] = a[i] + b[i]
 		}
-		return nil
+		return tensor.New[float32](inputs[0].Shape(), out)
 	}
 
 	plan := &ExecutionPlan[float32]{
 		instructions: []Instruction[float32]{
-			{Kernel: mul2, InputIdx: []int{0}, OutputIdx: 1},
-			{Kernel: mul3, InputIdx: []int{0}, OutputIdx: 2},
-			{Kernel: add, InputIdx: []int{1, 2}, OutputIdx: 3},
+			{Forward: mul2, InputIdx: []int{0}, OutputIdx: 1},
+			{Forward: mul3, InputIdx: []int{0}, OutputIdx: 2},
+			{Forward: add, InputIdx: []int{1, 2}, OutputIdx: 3},
 		},
-		arena:     arena,
+		slots:     make([]*tensor.TensorNumeric[float32], 4),
 		inputIdx:  []int{0},
 		outputIdx: 3,
 	}
 
-	input, _ := tensor.New[float32](shape, []float32{1, 2, 3})
+	input, _ := tensor.New[float32]([]int{1, 3}, []float32{1, 2, 3})
 	result, err := plan.Run(context.Background(), input)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -134,51 +127,6 @@ func TestExecutionPlanRunDiamond(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("result[%d] = %v, want %v", i, got[i], want[i])
-		}
-	}
-}
-
-func TestExecutionPlanRunReuse(t *testing.T) {
-	// Verify multiple runs produce correct results (arena.Reset works)
-	shape := []int{1, 2}
-	arena := NewBufferArena[float32]([][]int{shape, shape})
-
-	double := func(_ context.Context, inputs []*tensor.TensorNumeric[float32], output *tensor.TensorNumeric[float32]) error {
-		for i, v := range inputs[0].Data() {
-			output.Data()[i] = v * 2
-		}
-		return nil
-	}
-
-	plan := &ExecutionPlan[float32]{
-		instructions: []Instruction[float32]{
-			{Kernel: double, InputIdx: []int{0}, OutputIdx: 1},
-		},
-		arena:     arena,
-		inputIdx:  []int{0},
-		outputIdx: 1,
-	}
-
-	ctx := context.Background()
-	tests := []struct {
-		input []float32
-		want  []float32
-	}{
-		{[]float32{1, 2}, []float32{2, 4}},
-		{[]float32{5, 10}, []float32{10, 20}},
-		{[]float32{-1, 0}, []float32{-2, 0}},
-	}
-	for _, tt := range tests {
-		in, _ := tensor.New[float32](shape, tt.input)
-		result, err := plan.Run(ctx, in)
-		if err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		got := result.Data()
-		for i := range tt.want {
-			if got[i] != tt.want[i] {
-				t.Errorf("input %v: result[%d] = %v, want %v", tt.input, i, got[i], tt.want[i])
-			}
 		}
 	}
 }
@@ -224,7 +172,6 @@ func TestGraphCompile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create input tensor for compilation.
 	input, _ := tensor.New[float32]([]int{1, 4}, []float32{1, 2, 3, 4})
 	ctx := context.Background()
 
