@@ -53,6 +53,28 @@ func (sln *SimplifiedLayerNormalization[T]) Forward(ctx context.Context, inputs 
 	input := inputs[0]
 	sln.inputShape = input.Shape()
 
+	// Fused single-pass kernel for float32 on CPUEngine (inference hot path).
+	if _, isCPU := sln.engine.(*compute.CPUEngine[T]); isCPU {
+		if f32Input, ok := any(input).(*tensor.TensorNumeric[float32]); ok {
+			f32Gain, gOk := any(sln.gain.Value).(*tensor.TensorNumeric[float32])
+			f32Eps, eOk := any(sln.epsilon).(float32)
+			if gOk && eOk && f32Gain.Size() == f32Input.Shape()[len(f32Input.Shape())-1] {
+				out, scales, err := compute.FusedRMSNorm(f32Input, f32Gain, f32Eps)
+				if err != nil {
+					return nil, err
+				}
+				sln.invStdDev = any(scales).(*tensor.TensorNumeric[T])
+				// normalizedInput = input * invStdDev (needed for backward)
+				normalized, err := sln.engine.Mul(ctx, input, sln.invStdDev)
+				if err != nil {
+					return nil, err
+				}
+				sln.normalizedInput = normalized
+				return any(out).(*tensor.TensorNumeric[T]), nil
+			}
+		}
+	}
+
 	// 1. Square the input
 	squared, err := sln.engine.Mul(ctx, input, input)
 	if err != nil {
