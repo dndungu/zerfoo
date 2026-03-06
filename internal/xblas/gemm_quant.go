@@ -1,10 +1,15 @@
 package xblas
 
 import (
+	"runtime"
+	"sync"
 	"unsafe"
 
 	"github.com/zerfoo/zerfoo/tensor"
 )
+
+// q4GemvParallelThreshold is the minimum N*K for M=1 Q4 GEMV parallelization.
+const q4GemvParallelThreshold = 256 * 256
 
 // GemmQ4F32 computes C = A * B where A is Q4_0 quantized and B, C are float32.
 // A has logical shape (m, k), B has shape (k, n), C has shape (m, n).
@@ -90,6 +95,16 @@ func GemmF32Q4NT(m, n, k int, a []float32, b *tensor.Q4Storage, c []float32) {
 
 	blocksPerRow := k / 32
 
+	// M=1 GEMV: parallelize across N (rows of B) when beneficial.
+	if m == 1 && n*k >= q4GemvParallelThreshold {
+		nCores := runtime.NumCPU()
+		nCores = min(nCores, n/4)
+		if nCores > 1 {
+			gemmF32Q4NTParallel(n, a, b, c, blocksPerRow, nCores)
+			return
+		}
+	}
+
 	// For each row i of A and each row j of B, compute C[i,j] = dot(A[i,:], B[j,:]).
 	// B[j,:] is contiguous in Q4 format starting at block j*blocksPerRow.
 	// q4DotRow processes an entire row of Q4 blocks in a single call,
@@ -100,6 +115,27 @@ func GemmF32Q4NT(m, n, k int, a []float32, b *tensor.Q4Storage, c []float32) {
 			c[i*n+j] = q4DotRow(unsafe.Pointer(b.BlockPtr(j*blocksPerRow)), &aRow[0], blocksPerRow)
 		}
 	}
+}
+
+// gemmF32Q4NTParallel splits M=1 Q4 GEMV across nCores goroutines along N.
+func gemmF32Q4NTParallel(n int, a []float32, b *tensor.Q4Storage, c []float32, blocksPerRow, nCores int) {
+	chunkSize := (n + nCores - 1) / nCores
+	var wg sync.WaitGroup
+	for t := range nCores {
+		jStart := t * chunkSize
+		jEnd := min(jStart+chunkSize, n)
+		if jStart >= n {
+			break
+		}
+		wg.Add(1)
+		go func(jStart, jEnd int) {
+			defer wg.Done()
+			for j := jStart; j < jEnd; j++ {
+				c[j] = q4DotRow(unsafe.Pointer(b.BlockPtr(j*blocksPerRow)), &a[0], blocksPerRow)
+			}
+		}(jStart, jEnd)
+	}
+	wg.Wait()
 }
 
 // dequantQ4Block unpacks 16 packed bytes into 32 float32 values.
