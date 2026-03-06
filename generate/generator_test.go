@@ -1027,6 +1027,83 @@ func TestGenerate_WithPoolCorrectness(t *testing.T) {
 	}
 }
 
+func BenchmarkGenerate_Allocs(b *testing.B) {
+	tok := buildBenchTokenizer(b)
+	vocabSize := 8
+	eng := compute.NewCPUEngine(numeric.Float32Ops{})
+
+	// Build a graph that produces 3 tokens then EOS per Generate call.
+	makeGraph := func(b *testing.B) *graph.Graph[float32] {
+		b.Helper()
+		builder := graph.NewBuilder[float32](eng)
+		in := builder.Input([]int{1, 1, 1})
+		node := &fixedLogitsNode{
+			vocabSize:     vocabSize,
+			tokenSequence: []int{6, 7, 6, 2},
+		}
+		builder.AddNode(node, in)
+		g, err := builder.Build(node)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return g
+	}
+
+	b.Run("with_pool", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			g := makeGraph(b)
+			gen := NewGenerator[float32](g, tok, eng, ModelConfig{
+				VocabSize:  vocabSize,
+				MaxSeqLen:  32,
+				EOSTokenID: 2,
+				NumLayers:  0,
+			})
+			_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+				Temperature:  0,
+				MaxNewTokens: 10,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("without_pool", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			g := makeGraph(b)
+			gen := NewGenerator[float32](g, tok, eng, ModelConfig{
+				VocabSize:  vocabSize,
+				MaxSeqLen:  32,
+				EOSTokenID: 2,
+				NumLayers:  0,
+			})
+			// Disable pool to compare.
+			gen.pool = nil
+			g.WithPool(nil)
+			_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+				Temperature:  0,
+				MaxNewTokens: 10,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// buildBenchTokenizer creates a tokenizer for benchmarks (same as buildTestTokenizer).
+func buildBenchTokenizer(b *testing.B) *tokenizer.WhitespaceTokenizer {
+	b.Helper()
+	tok := tokenizer.NewWhitespaceTokenizer()
+	tok.AddToken("hello")
+	tok.AddToken("world")
+	tok.AddToken("foo")
+	tok.AddToken("bar")
+	return tok
+}
+
 func TestNewGenerator_WithPagedKV_InvalidParams(t *testing.T) {
 	// Zero headDim should fall back to regular KV cache.
 	gen := NewGenerator[float32](nil, nil, nil, ModelConfig{
