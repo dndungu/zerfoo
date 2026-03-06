@@ -35,6 +35,9 @@ type GroupedQueryAttention[T tensor.Numeric] struct {
 	// LayerIndex identifies this layer within a model for KV cache indexing.
 	LayerIndex int
 
+	// blockTableReader optionally reads KV from paged block tables directly.
+	blockTableReader BlockTableReader[T]
+
 	// Cached tensors for backward pass
 	qProj           *tensor.TensorNumeric[T] // Projected Q
 	kProj           *tensor.TensorNumeric[T] // Projected K
@@ -200,6 +203,12 @@ func (gqa *GroupedQueryAttention[T]) ScaleRope(ctx context.Context, factor float
 	return gqa.rope.Scale(ctx, factor)
 }
 
+// SetBlockTableReader sets an optional BlockTableReader that provides KV data
+// directly from paged block tables, bypassing the standard cache gather path.
+func (gqa *GroupedQueryAttention[T]) SetBlockTableReader(r BlockTableReader[T]) {
+	gqa.blockTableReader = r
+}
+
 // Parameters returns the parameters of the GroupedQueryAttention layer.
 func (gqa *GroupedQueryAttention[T]) Parameters() []*graph.Parameter[T] {
 	var params []*graph.Parameter[T]
@@ -352,19 +361,29 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 			return nil, fmt.Errorf("kv cache update: %w", err)
 		}
 
-		// Retrieve full cached K/V.
-		lkv, ok := cache.Get(gqa.LayerIndex)
-		if !ok {
-			return nil, fmt.Errorf("kv cache: layer %d missing after update", gqa.LayerIndex)
+		// Try block-table reader first (avoids gather-to-contiguous copy).
+		var cachedK, cachedV *tensor.TensorNumeric[T]
+		if gqa.blockTableReader != nil {
+			cachedK, cachedV, _ = gqa.blockTableReader.ReadKV(gqa.LayerIndex)
+		}
+
+		if cachedK == nil || cachedV == nil {
+			// Fall back to standard cache gather path.
+			lkv, ok := cache.Get(gqa.LayerIndex)
+			if !ok {
+				return nil, fmt.Errorf("kv cache: layer %d missing after update", gqa.LayerIndex)
+			}
+			cachedK = lkv.Key
+			cachedV = lkv.Value
 		}
 
 		// Unflatten back to [batch, numKVHeads, cachedSeqLen, headDim].
-		cachedSeqLen := lkv.Key.Shape()[1]
-		kHeadsRoPE, err = gqa.engine.Reshape(ctx, lkv.Key, []int{batchSize, gqa.numKeyValueHeads, cachedSeqLen, gqa.headDim})
+		cachedSeqLen := cachedK.Shape()[1]
+		kHeadsRoPE, err = gqa.engine.Reshape(ctx, cachedK, []int{batchSize, gqa.numKeyValueHeads, cachedSeqLen, gqa.headDim})
 		if err != nil {
 			return nil, err
 		}
-		vHeads, err = gqa.engine.Reshape(ctx, lkv.Value, []int{batchSize, gqa.numKeyValueHeads, cachedSeqLen, gqa.headDim})
+		vHeads, err = gqa.engine.Reshape(ctx, cachedV, []int{batchSize, gqa.numKeyValueHeads, cachedSeqLen, gqa.headDim})
 		if err != nil {
 			return nil, err
 		}
