@@ -75,3 +75,34 @@ jobs:
           path: bench-results.json
           overwrite: true
           retention-days: 90
+  bench-gpu:
+    runs-on: [self-hosted, dgx-spark]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run GPU benchmarks
+        env:
+          PATH: /usr/local/cuda/bin:/usr/local/go/bin:${{ env.PATH }}
+          CGO_CFLAGS: -I/usr/local/cuda/include
+          CGO_LDFLAGS: -L/usr/local/cuda/lib64
+        run: |
+          go test -tags cuda -bench='BenchmarkGemmQ4F32_1024' -benchmem -count=1 -run='^$' \
+              -timeout 300s ./internal/cuda/kernels/ 2>&1 | \
+          awk '/BenchmarkGemmQ4F32_1024/ {
+              for (i=1; i<=NF; i++) {
+                  if ($(i+1) == "ns/op") ns=$i
+              }
+          } END {
+              if (ns) {
+                  flops = 2 * 1024 * 1024 * 1024
+                  gflops = flops / (ns * 1e-9) / 1e9
+                  printf "{\"metric\": \"cuda_q4_gemm_gflops_1024\", \"value\": %.2f, \"unit\": \"GFLOPS\"}\n", gflops
+              }
+          }' > gpu-bench-results.json
+          cat gpu-bench-results.json
+      - name: Upload GPU benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-benchmark-results-${{ github.sha }}
+          path: gpu-bench-results.json
+          retention-days: 90
