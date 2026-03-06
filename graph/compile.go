@@ -35,9 +35,12 @@ func (p *ExecutionPlan[T]) Run(ctx context.Context, inputs ...*tensor.TensorNume
 		return nil, fmt.Errorf("compiled plan: expected %d inputs, got %d", len(p.inputIdx), len(inputs))
 	}
 
-	// Set input tensors directly into slots (no copy needed).
+	// Use local slot copy so concurrent Run() calls are safe.
+	slots := make([]*tensor.TensorNumeric[T], len(p.slots))
+	copy(slots, p.slots) // copies frozen slot pointers (params)
+
 	for i, idx := range p.inputIdx {
-		p.slots[idx] = inputs[i]
+		slots[idx] = inputs[i]
 	}
 
 	// Execute each instruction: gather inputs by index, call Forward, store result.
@@ -45,16 +48,16 @@ func (p *ExecutionPlan[T]) Run(ctx context.Context, inputs ...*tensor.TensorNume
 		inst := &p.instructions[i]
 		ins := make([]*tensor.TensorNumeric[T], len(inst.InputIdx))
 		for j, idx := range inst.InputIdx {
-			ins[j] = p.slots[idx]
+			ins[j] = slots[idx]
 		}
 		result, err := inst.Forward(ctx, ins)
 		if err != nil {
 			return nil, fmt.Errorf("instruction %d (%s): %w", i, inst.OpName, err)
 		}
-		p.slots[inst.OutputIdx] = result
+		slots[inst.OutputIdx] = result
 	}
 
-	return p.slots[p.outputIdx], nil
+	return slots[p.outputIdx], nil
 }
 
 // Compile pre-compiles the graph into a flat ExecutionPlan. It runs one
