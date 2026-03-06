@@ -92,6 +92,24 @@ func (t *Transpose[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNume
 		}
 	}
 
+	// Q4 pass-through: when the input is a Q4-backed weight tensor and
+	// the transpose is a simple 2D swap [1,0], preserve Q4 storage with
+	// the transposed shape. The downstream MatMul detects Q4 on the B
+	// operand and uses GemmF32Q4NT, which reads packed nibbles directly
+	// without dequantization. This avoids both the O(N*K) transpose and
+	// the 4x memory overhead of dequantized float32 weights.
+	if len(shape) == 2 && len(perm) == 2 && perm[0] == 1 && perm[1] == 0 {
+		if _, ok := any(input.GetStorage()).(*tensor.Q4Storage); ok {
+			result, err := tensor.NewWithStorage[T](outputShape, input.GetStorage())
+			if err != nil {
+				return nil, err
+			}
+			t.cachedResult = result
+			t.cachedInput = input
+			return result, nil
+		}
+	}
+
 	// Transpose the input tensor.
 	transposed, err := t.engine.Transpose(ctx, input, perm)
 	if err != nil {
