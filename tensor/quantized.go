@@ -20,8 +20,9 @@ type q4Block struct {
 
 // Q4Storage holds Q4_0 quantized tensor data on CPU.
 type Q4Storage struct {
-	blocks []q4Block
-	len    int // number of logical float32 elements (before padding)
+	blocks      []q4Block
+	len         int        // number of logical float32 elements (before padding)
+	cachedSlice []float32  // lazily populated on first Slice() call
 }
 
 // QuantizeQ4 quantizes a float32 slice into Q4_0 format.
@@ -110,10 +111,17 @@ func (q *Q4Storage) NumBlocks() int { return len(q.blocks) }
 // Each block is 18 bytes (2 byte scale + 16 bytes packed data).
 func (q *Q4Storage) ByteSize() int { return len(q.blocks) * 18 }
 
-// Slice returns a dequantized float32 copy of the data.
+// Slice returns a dequantized float32 view of the data.
+// The result is cached: the first call dequantizes, subsequent calls
+// return the same slice. This avoids O(N) re-allocation and GC pressure
+// when operations like MatMul call Data() on Q4-backed weight tensors.
 func (q *Q4Storage) Slice() []float32 {
+	if q.cachedSlice != nil {
+		return q.cachedSlice
+	}
 	dst := make([]float32, q.len)
 	q.Dequantize(dst)
+	q.cachedSlice = dst
 	return dst
 }
 
