@@ -92,15 +92,12 @@ func GemmF32Q4NT(m, n, k int, a []float32, b *tensor.Q4Storage, c []float32) {
 
 	// For each row i of A and each row j of B, compute C[i,j] = dot(A[i,:], B[j,:]).
 	// B[j,:] is contiguous in Q4 format starting at block j*blocksPerRow.
+	// q4DotRow processes an entire row of Q4 blocks in a single call,
+	// eliminating per-block Go function call overhead.
 	for i := range m {
 		aRow := a[i*k:]
 		for j := range n {
-			var sum float32
-			blkBase := j * blocksPerRow
-			for bi := range blocksPerRow {
-				sum += q4DotBlock(b.BlockData(blkBase+bi), b.BlockScaleF32(blkBase+bi), &aRow[bi*32], 32)
-			}
-			c[i*n+j] = sum
+			c[i*n+j] = q4DotRow(unsafe.Pointer(b.BlockPtr(j*blocksPerRow)), &aRow[0], blocksPerRow)
 		}
 	}
 }

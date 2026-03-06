@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"unsafe"
 
 	"github.com/zerfoo/float16"
 	"github.com/zerfoo/zerfoo/device"
@@ -173,6 +174,13 @@ func NewQ4StorageFromRaw(raw []byte, numElements int) (*Q4Storage, error) {
 		copy(blocks[i].data[:], raw[off+2:off+blockBytes])
 	}
 	return &Q4Storage{blocks: blocks, len: numElements}, nil
+}
+
+// BlockPtr returns an unsafe pointer to block i's q4Block struct (18 bytes).
+// The layout is: 2 bytes float16 scale (LE) + 16 bytes packed nibble data.
+// Blocks are contiguous in memory with 18-byte stride.
+func (q *Q4Storage) BlockPtr(i int) *byte {
+	return (*byte)(unsafe.Pointer(&q.blocks[i]))
 }
 
 // Ensure Q4Storage implements Storage[float32].
