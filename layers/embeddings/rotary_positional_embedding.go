@@ -25,6 +25,10 @@ type RotaryPositionalEmbedding[T tensor.Numeric] struct {
 	outputShape []int
 	// attnScaleFactor is the YaRN attention scaling factor (1.0 when no YaRN).
 	attnScaleFactor float64
+	// posOffset shifts the cos/sin angle slicing during Forward.
+	// During autoregressive decode, set this to the current cache sequence
+	// length so the new token gets the correct positional rotation.
+	posOffset int
 }
 
 // RotaryPositionalEmbeddingOptions holds configuration options for RotaryPositionalEmbedding layers.
@@ -163,6 +167,14 @@ func NewRotaryPositionalEmbedding[T tensor.Numeric](
 	}, nil
 }
 
+// SetPositionOffset sets the position offset for the next Forward call.
+// During autoregressive decode, call this with the current cache sequence
+// length so that the new token is rotated at the correct absolute position
+// instead of always position 0.
+func (rpe *RotaryPositionalEmbedding[T]) SetPositionOffset(offset int) {
+	rpe.posOffset = offset
+}
+
 // OutputShape returns the output shape of the RoPE layer.
 func (rpe *RotaryPositionalEmbedding[T]) OutputShape() []int {
 	return rpe.outputShape
@@ -189,11 +201,23 @@ func (rpe *RotaryPositionalEmbedding[T]) Forward(ctx context.Context, inputs ...
 	seqLen := rpe.inputShape[1]
 	halfRotary := rpe.rotaryDim / 2
 
+	// Slice cos/sin angles using posOffset so decode tokens get the correct
+	// absolute position rotation instead of always position 0.
+	off := rpe.posOffset
+	cosSliced, err := rpe.cosAngles.Slice([2]int{off, off + seqLen}, [2]int{0, halfRotary})
+	if err != nil {
+		return nil, err
+	}
+	sinSliced, err := rpe.sinAngles.Slice([2]int{off, off + seqLen}, [2]int{0, halfRotary})
+	if err != nil {
+		return nil, err
+	}
+
 	// Fused single-pass kernel for float32 on CPUEngine (inference hot path).
 	if _, isCPU := rpe.engine.(*compute.CPUEngine[T]); isCPU {
 		if f32Input, ok := any(input).(*tensor.TensorNumeric[float32]); ok {
-			f32Cos, cOk := any(rpe.cosAngles).(*tensor.TensorNumeric[float32])
-			f32Sin, sOk := any(rpe.sinAngles).(*tensor.TensorNumeric[float32])
+			f32Cos, cOk := any(cosSliced).(*tensor.TensorNumeric[float32])
+			f32Sin, sOk := any(sinSliced).(*tensor.TensorNumeric[float32])
 			if cOk && sOk {
 				out, err := compute.FusedRoPE(f32Input, f32Cos, f32Sin, rpe.rotaryDim)
 				if err == nil {
@@ -208,16 +232,8 @@ func (rpe *RotaryPositionalEmbedding[T]) Forward(ctx context.Context, inputs ...
 		}
 	}
 
-	// Slice cos and sin angles to match the input sequence length
-	cosAngles, err := rpe.cosAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
-	if err != nil {
-		return nil, err
-	}
-
-	sinAngles, err := rpe.sinAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
-	if err != nil {
-		return nil, err
-	}
+	cosAngles := cosSliced
+	sinAngles := sinSliced
 
 	// Split rotary portion into two halves: x_rot0, x_rot1
 	rpe.xRot0Slice, err = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{0, halfRotary})
