@@ -7,7 +7,7 @@ import (
 	"github.com/zerfoo/zerfoo/device"
 )
 
-func TestQuantizeQ8_RoundTrip(t *testing.T) {
+func TestQuantizeQ8_RoundTrip(t *testing.T) { //nolint:dupl // Q8 and Q4 round-trip tests are structurally similar but differ in tolerance and quantizer.
 	tests := []struct {
 		name    string
 		input   []float32
@@ -141,6 +141,62 @@ func TestQ8Storage_BlockCount(t *testing.T) {
 		if q.NumBlocks() != tt.wantBlocks {
 			t.Errorf("n=%d: NumBlocks() = %d, want %d", tt.n, q.NumBlocks(), tt.wantBlocks)
 		}
+	}
+}
+
+func TestNewQ8StorageFromBlocks(t *testing.T) {
+	// Quantize known data, extract scales and quants, reconstruct, and verify.
+	input := linspace(-1, 1, 64) // 2 blocks
+	orig := QuantizeQ8(input)
+
+	// Extract block data from the original.
+	nBlocks := orig.NumBlocks()
+	scales := make([]float32, nBlocks)
+	quants := make([]int8, nBlocks*32)
+	for i := range nBlocks {
+		scales[i] = orig.BlockScale(i)
+		copy(quants[i*32:(i+1)*32], orig.BlockQuants(i))
+	}
+
+	got, err := NewQ8StorageFromBlocks(scales, quants, 64)
+	if err != nil {
+		t.Fatalf("NewQ8StorageFromBlocks: %v", err)
+	}
+	if got.Len() != 64 {
+		t.Fatalf("Len() = %d, want 64", got.Len())
+	}
+	if got.NumBlocks() != 2 {
+		t.Fatalf("NumBlocks() = %d, want 2", got.NumBlocks())
+	}
+
+	// Dequantize and compare with original.
+	origSlice := orig.Slice()
+	gotSlice := got.Slice()
+	for i := range origSlice {
+		if origSlice[i] != gotSlice[i] {
+			t.Errorf("index %d: got %v, want %v", i, gotSlice[i], origSlice[i])
+		}
+	}
+}
+
+func TestNewQ8StorageFromBlocks_Errors(t *testing.T) {
+	tests := []struct {
+		name   string
+		scales []float32
+		quants []int8
+		n      int
+	}{
+		{"mismatched lengths", []float32{1.0}, make([]int8, 64), 32},
+		{"zero elements", nil, nil, 0},
+		{"negative elements", nil, nil, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewQ8StorageFromBlocks(tt.scales, tt.quants, tt.n)
+			if err == nil {
+				t.Error("expected error")
+			}
+		})
 	}
 }
 
