@@ -76,3 +76,23 @@ longer sequences where absolute position information matters. No performance cos
 | E51 | COMPLETE | KV cache already optimal. RoPE position offset bug fixed. |
 | E52 | Not started | NEON fused ops (RMSNorm, SiLU-gate, transpose). |
 | E53 | Not started | DGX Spark benchmark validation. |
+
+## What needs DGX Spark (ssh ndungu@192.168.86.250)
+
+All remaining work requires ARM64 hardware:
+
+1. **E49 T49.2-T49.4:** Write `q4dot_arm64.s` NEON assembly. The kernel should:
+   - VLD1 16 packed bytes, VAND/USHR for nibble extraction
+   - Widen uint4->int16->int32->float32, subtract 8 (zero-point)
+   - FMLA against activation float32x4 registers
+   - Integrate into GemmQ4F32Fused M=1 decode path
+
+2. **E52 T52.1:** Profile to confirm 8.8% transpose is still a bottleneck after
+   E50/E51 optimizations. Option A (K stored transposed in cache) is simplest.
+
+3. **E52 T52.2-T52.3:** NEON RMSNorm and SiLU-gate assembly files.
+
+4. **E53:** End-to-end benchmark with all optimizations enabled.
+
+**RoPE fix (T51.3) may improve tok/s** — the position-0 bug meant decode tokens
+lacked correct positional information. Rerun benchmark before and after to measure.
