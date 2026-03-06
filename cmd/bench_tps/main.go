@@ -1,0 +1,100 @@
+// bench_tps measures tokens-per-second for a local ZMF model.
+//
+// Usage: bench_tps -model /path/to/model/dir [-prompt "text"] [-tokens 64]
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"sync/atomic"
+	"time"
+
+	"github.com/zerfoo/zerfoo/generate"
+	"github.com/zerfoo/zerfoo/inference"
+	"github.com/zerfoo/zerfoo/registry"
+)
+
+// dirRegistry is a minimal ModelRegistry that returns a fixed directory.
+type dirRegistry struct {
+	path string
+}
+
+func (r *dirRegistry) Get(modelID string) (*registry.ModelInfo, bool) {
+	if _, err := os.Stat(r.path); err != nil {
+		return nil, false
+	}
+	return &registry.ModelInfo{
+		ID:   modelID,
+		Path: r.path,
+	}, true
+}
+
+func (r *dirRegistry) Pull(_ context.Context, _ string) (*registry.ModelInfo, error) {
+	return nil, fmt.Errorf("pull not supported")
+}
+
+func (r *dirRegistry) List() []registry.ModelInfo { return nil }
+
+func (r *dirRegistry) Delete(_ string) error { return nil }
+
+func main() {
+	modelDir := flag.String("model", "", "path to model directory (config.json, tokenizer.json, model.zmf)")
+	prompt := flag.String("prompt", "The meaning of life is", "prompt text")
+	maxTokens := flag.Int("tokens", 64, "max tokens to generate")
+	useMmap := flag.Bool("mmap", false, "use memory-mapped loading")
+	flag.Parse()
+
+	if *modelDir == "" {
+		fmt.Fprintln(os.Stderr, "usage: bench_tps -model /path/to/model/dir")
+		os.Exit(1)
+	}
+
+	reg := &dirRegistry{path: *modelDir}
+
+	fmt.Printf("Loading model from %s...\n", *modelDir)
+	t0 := time.Now()
+	mdl, err := inference.Load("bench", inference.WithRegistry(reg), inference.WithMmap(*useMmap))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Loaded in %.1fs\n", time.Since(t0).Seconds())
+
+	fmt.Printf("Prompt: %q\n", *prompt)
+	fmt.Printf("Max tokens: %d\n", *maxTokens)
+
+	// Warm-up run (short).
+	fmt.Println("Warm-up...")
+	_, _ = mdl.Generate(context.Background(), *prompt, inference.WithMaxTokens(4))
+
+	// Timed run with streaming to count tokens.
+	fmt.Println("Generating...")
+	var tokenCount atomic.Int64
+	var output string
+	handler := generate.TokenStreamFunc(func(token string, done bool) error {
+		if !done {
+			tokenCount.Add(1)
+			output += token
+		}
+		return nil
+	})
+
+	t1 := time.Now()
+	err = mdl.GenerateStream(context.Background(), *prompt, handler, inference.WithMaxTokens(*maxTokens))
+	elapsed := time.Since(t1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "generate error: %v\n", err)
+		os.Exit(1)
+	}
+
+	genTokens := tokenCount.Load()
+	tps := float64(genTokens) / elapsed.Seconds()
+
+	fmt.Printf("\n--- Results ---\n")
+	fmt.Printf("Output: %s\n", output)
+	fmt.Printf("Generated tokens: %d\n", genTokens)
+	fmt.Printf("Time: %.3fs\n", elapsed.Seconds())
+	fmt.Printf("Throughput: %.2f tok/s\n", tps)
+}
