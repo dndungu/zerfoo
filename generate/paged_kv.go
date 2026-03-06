@@ -143,6 +143,23 @@ func (c *PagedKVCache[T]) GetKV(layer int) (*LayerKV[T], bool) {
 	return &LayerKV[T]{Key: kTensor, Value: vTensor}, true
 }
 
+// Update appends new key and value data for the given layer. This is an
+// alias for Append that satisfies the CacheProvider interface.
+func (c *PagedKVCache[T]) Update(layer int, newK, newV *tensor.TensorNumeric[T]) error {
+	return c.Append(layer, newK, newV)
+}
+
+// Get returns the cached KV for the given layer. This is an alias for
+// GetKV that satisfies the CacheProvider interface.
+func (c *PagedKVCache[T]) Get(layer int) (*LayerKV[T], bool) {
+	return c.GetKV(layer)
+}
+
+// Reset clears the cache and returns all blocks to the pool.
+func (c *PagedKVCache[T]) Reset() {
+	c.Free()
+}
+
 // Free returns all allocated blocks to the pool and resets the cache.
 func (c *PagedKVCache[T]) Free() {
 	for _, b := range c.blockTable {
@@ -152,4 +169,9 @@ func (c *PagedKVCache[T]) Free() {
 	for i := range c.layerCursors {
 		c.layerCursors[i] = 0
 	}
+}
+
+// NumLayers returns the number of layers in the cache.
+func (c *PagedKVCache[T]) NumLayers() int {
+	return c.numLayers
 }

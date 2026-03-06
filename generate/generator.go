@@ -42,12 +42,33 @@ func DefaultSamplingConfig() SamplingConfig {
 	}
 }
 
+// GeneratorOption configures a Generator.
+type GeneratorOption func(*generatorOptions)
+
+type generatorOptions struct {
+	pagedKVMaxMB int // when > 0, use PagedKVCache with this memory budget
+	headDim      int // required for paged KV (auto-detected from model if 0)
+}
+
+// WithPagedKV enables paged KV caching with the given memory budget in MB.
+// When enabled, the Generator allocates blocks from a shared BlockPool
+// instead of pre-allocating the full maxSeqLen per sequence. headDim must
+// be provided (the per-head dimension for the KV cache).
+func WithPagedKV(maxMemoryMB, headDim int) GeneratorOption {
+	return func(o *generatorOptions) {
+		o.pagedKVMaxMB = maxMemoryMB
+		o.headDim = headDim
+	}
+}
+
 // Generator produces text autoregressively using a loaded model graph.
 type Generator[T tensor.Numeric] struct {
 	graph     *graph.Graph[T]
 	tokenizer tokenizer.Tokenizer
 	engine    compute.Engine[T]
 	config    ModelConfig
+	blockPool *BlockPool[T] // nil when using pre-allocated KV cache
+	headDim   int           // per-head dim for paged KV
 }
 
 // NewGenerator creates a Generator from a model graph, tokenizer, engine, and config.
@@ -56,13 +77,29 @@ func NewGenerator[T tensor.Numeric](
 	tok tokenizer.Tokenizer,
 	eng compute.Engine[T],
 	cfg ModelConfig,
+	opts ...GeneratorOption,
 ) *Generator[T] {
-	return &Generator[T]{
+	var gopts generatorOptions
+	for _, o := range opts {
+		o(&gopts)
+	}
+
+	gen := &Generator[T]{
 		graph:     g,
 		tokenizer: tok,
 		engine:    eng,
 		config:    cfg,
 	}
+
+	if gopts.pagedKVMaxMB > 0 && gopts.headDim > 0 {
+		pool, err := NewBlockPool[T](cfg.NumLayers, 16, gopts.headDim, gopts.pagedKVMaxMB)
+		if err == nil {
+			gen.blockPool = pool
+			gen.headDim = gopts.headDim
+		}
+	}
+
+	return gen
 }
 
 // Generate produces text from a prompt using the given sampling configuration.
@@ -81,8 +118,13 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 		return "", fmt.Errorf("prompt produced no tokens")
 	}
 
-	cache := NewKVCache[T](gen.config.NumLayers, gen.config.MaxSeqLen)
-	genCtx := WithKVCache(ctx, cache)
+	var cacheProvider CacheProvider[T]
+	if gen.blockPool != nil {
+		cacheProvider = NewPagedKVCache[T](gen.blockPool, gen.config.NumLayers)
+	} else {
+		cacheProvider = NewKVCache[T](gen.config.NumLayers, gen.config.MaxSeqLen)
+	}
+	genCtx := WithCache(ctx, cacheProvider)
 
 	stopSet := make(map[int]bool, len(sc.StopTokenIDs)+1)
 	for _, id := range sc.StopTokenIDs {

@@ -903,3 +903,81 @@ func TestGenerate_DecodeOutputError(t *testing.T) {
 	}
 }
 
+func TestGenerate_WithPagedKV(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Generate tokens 6, 7, then EOS (same as TestGenerate_Greedy).
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			BOSTokenID: 1,
+			NumLayers:  2, // Must be > 0 for paged KV
+		},
+		WithPagedKV(1, 64), // 1 MB pool, headDim=64
+	)
+
+	if gen.blockPool == nil {
+		t.Fatal("expected blockPool to be set with WithPagedKV")
+	}
+
+	result, err := gen.Generate(context.Background(), "hello world", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result != "foo bar" {
+		t.Errorf("Generate = %q, want %q", result, "foo bar")
+	}
+}
+
+func TestGenerate_WithPagedKV_MaxTokens(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	g := buildTestGraph(t, vocabSize, []int{6}) // always produce token 6
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  1,
+		},
+		WithPagedKV(1, 32),
+	)
+
+	result, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 3,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	if result != "foo foo foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo foo foo")
+	}
+}
+
+func TestNewGenerator_WithPagedKV_InvalidParams(t *testing.T) {
+	// Zero headDim should fall back to regular KV cache.
+	gen := NewGenerator[float32](nil, nil, nil, ModelConfig{
+		NumLayers: 2,
+		MaxSeqLen: 32,
+	}, WithPagedKV(1, 0))
+
+	if gen.blockPool != nil {
+		t.Error("expected nil blockPool when headDim=0")
+	}
+}
+
