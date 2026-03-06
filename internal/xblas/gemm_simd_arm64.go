@@ -72,9 +72,34 @@ func sgemmTiled(m, n, k int, a, b, c []float32) {
 	}
 }
 
-// sgemmGemvParallel splits M=1 GEMV across nCores goroutines along N.
+// sgemmGemvParallel splits M=1 GEMV across nCores workers along N.
+// Uses the shared worker pool if available, otherwise falls back to goroutines.
 func sgemmGemvParallel(n, k int, a, b, c []float32, nCores int) {
 	chunkSize := (n + nCores - 1) / nCores
+	if defaultPool != nil {
+		tasks := make([]func(), 0, nCores)
+		for t := range nCores {
+			nStart := t * chunkSize
+			nEnd := min(nStart+chunkSize, n)
+			if nStart >= n {
+				break
+			}
+			tasks = append(tasks, func() {
+				chunk := nEnd - nStart
+				for p0 := 0; p0 < k; p0 += tileK {
+					p1 := min(p0+tileK, k)
+					cPtr := unsafe.Pointer(&c[nStart])
+					for p := p0; p < p1; p++ {
+						if aVal := a[p]; aVal != 0 {
+							sgemmAccRowNeon(cPtr, unsafe.Pointer(&b[p*n+nStart]), aVal, chunk)
+						}
+					}
+				}
+			})
+		}
+		defaultPool.Submit(tasks)
+		return
+	}
 	var wg sync.WaitGroup
 	for t := range nCores {
 		nStart := t * chunkSize
@@ -83,7 +108,7 @@ func sgemmGemvParallel(n, k int, a, b, c []float32, nCores int) {
 			break
 		}
 		wg.Add(1)
-		go func(nStart, nEnd int) {
+		go func() {
 			defer wg.Done()
 			chunk := nEnd - nStart
 			for p0 := 0; p0 < k; p0 += tileK {
@@ -95,7 +120,7 @@ func sgemmGemvParallel(n, k int, a, b, c []float32, nCores int) {
 					}
 				}
 			}
-		}(nStart, nEnd)
+		}()
 	}
 	wg.Wait()
 }

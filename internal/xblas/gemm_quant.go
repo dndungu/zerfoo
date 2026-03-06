@@ -117,9 +117,27 @@ func GemmF32Q4NT(m, n, k int, a []float32, b *tensor.Q4Storage, c []float32) {
 	}
 }
 
-// gemmF32Q4NTParallel splits M=1 Q4 GEMV across nCores goroutines along N.
+// gemmF32Q4NTParallel splits M=1 Q4 GEMV across nCores workers along N.
+// Uses the shared worker pool if available, otherwise falls back to goroutines.
 func gemmF32Q4NTParallel(n int, a []float32, b *tensor.Q4Storage, c []float32, blocksPerRow, nCores int) {
 	chunkSize := (n + nCores - 1) / nCores
+	if defaultPool != nil {
+		tasks := make([]func(), 0, nCores)
+		for t := range nCores {
+			jStart := t * chunkSize
+			jEnd := min(jStart+chunkSize, n)
+			if jStart >= n {
+				break
+			}
+			tasks = append(tasks, func() {
+				for j := jStart; j < jEnd; j++ {
+					c[j] = q4DotRow(unsafe.Pointer(b.BlockPtr(j*blocksPerRow)), &a[0], blocksPerRow)
+				}
+			})
+		}
+		defaultPool.Submit(tasks)
+		return
+	}
 	var wg sync.WaitGroup
 	for t := range nCores {
 		jStart := t * chunkSize
@@ -128,12 +146,12 @@ func gemmF32Q4NTParallel(n int, a []float32, b *tensor.Q4Storage, c []float32, b
 			break
 		}
 		wg.Add(1)
-		go func(jStart, jEnd int) {
+		go func() {
 			defer wg.Done()
 			for j := jStart; j < jEnd; j++ {
 				c[j] = q4DotRow(unsafe.Pointer(b.BlockPtr(j*blocksPerRow)), &a[0], blocksPerRow)
 			}
-		}(jStart, jEnd)
+		}()
 	}
 	wg.Wait()
 }
