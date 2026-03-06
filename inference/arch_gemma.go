@@ -2,6 +2,7 @@ package inference
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -31,7 +32,11 @@ func buildGemmaGraph(
 	}
 
 	// Gemma always ties LM head to embedding weights.
-	g, err := buildTransformerGraph(tensors, cfg, engine, embedWeight)
+	// Gemma scales embeddings by sqrt(hidden_size).
+	scale := float32(math.Sqrt(float64(cfg.HiddenSize)))
+	g, err := buildTransformerGraph(tensors, cfg, engine, embedWeight, embedWeight, transformerGraphOpts{
+		embedScale: scale,
+	})
 	if err != nil {
 		return nil, nil, err
 	}

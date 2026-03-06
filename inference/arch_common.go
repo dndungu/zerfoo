@@ -15,17 +15,25 @@ import (
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
+// transformerGraphOpts configures architecture-specific differences.
+type transformerGraphOpts struct {
+	embedScale float32 // multiply embeddings by this factor (0 = no scaling)
+}
+
 // buildTransformerGraph constructs a computation graph for a decoder-only
 // transformer from pre-loaded GGUF tensors. Both Llama and Gemma share the
-// same transformer body; they differ only in LM head weight tying.
+// same transformer body; they differ only in LM head weight tying and
+// embedding scaling.
 //
-// lmHeadWeight is the weight tensor to use for the final projection. Callers
-// pass either a dedicated lm_head.weight or the embedding table for tied models.
+// The graph accepts token IDs as input [1, seqLen] and performs embedding
+// lookup internally. lmHeadWeight is used for the final logit projection.
 func buildTransformerGraph(
 	tensors map[string]*tensor.TensorNumeric[float32],
 	cfg *gguf.ModelConfig,
 	engine compute.Engine[float32],
+	embedWeight *tensor.TensorNumeric[float32],
 	lmHeadWeight *tensor.TensorNumeric[float32],
+	opts transformerGraphOpts,
 ) (*graph.Graph[float32], error) {
 	ops := numeric.Float32Ops{}
 
@@ -55,9 +63,16 @@ func buildTransformerGraph(
 	}
 
 	builder := graph.NewBuilder[float32](engine)
-	input := builder.Input([]int{1, 1, cfg.HiddenSize})
+	// Input: token IDs as [1, seqLen].
+	input := builder.Input([]int{1, 1})
 
-	hidden := input
+	// Embedding lookup: token IDs -> [1, seqLen, hiddenSize].
+	embNode := &embeddingLookupNode[float32]{
+		engine: engine,
+		weight: embedWeight,
+		scale:  opts.embedScale,
+	}
+	hidden := builder.AddNode(embNode, input)
 	headDim := cfg.HiddenSize / cfg.NumHeads
 
 	for i := 0; i < cfg.NumLayers; i++ {

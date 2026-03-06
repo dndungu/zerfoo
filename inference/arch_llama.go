@@ -34,7 +34,7 @@ func buildLlamaGraph(
 		lmHeadWeight = embedWeight
 	}
 
-	g, err := buildTransformerGraph(tensors, cfg, engine, lmHeadWeight)
+	g, err := buildTransformerGraph(tensors, cfg, engine, embedWeight, lmHeadWeight, transformerGraphOpts{})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -82,5 +82,55 @@ func (h *lmHeadNode[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNum
 }
 
 func (h *lmHeadNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, nil
+}
+
+// embeddingLookupNode converts token IDs [batch, seqLen] to embeddings
+// [batch, seqLen, hiddenDim] by looking up rows in the weight table.
+// Optionally scales embeddings by a constant factor.
+type embeddingLookupNode[T tensor.Numeric] struct {
+	engine compute.Engine[T]
+	weight *tensor.TensorNumeric[T] // [vocabSize, hiddenDim]
+	scale  float32                  // 0 means no scaling
+}
+
+func (e *embeddingLookupNode[T]) OpType() string                  { return "EmbeddingLookup" }
+func (e *embeddingLookupNode[T]) Attributes() map[string]any       { return nil }
+func (e *embeddingLookupNode[T]) OutputShape() []int               { return nil }
+func (e *embeddingLookupNode[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (e *embeddingLookupNode[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	input := inputs[0]
+	shape := input.Shape()
+	ids := input.Data()
+	hiddenDim := e.weight.Shape()[1]
+	embData := e.weight.Data()
+
+	seqLen := 1
+	for _, d := range shape {
+		seqLen *= d
+	}
+
+	out := make([]T, seqLen*hiddenDim)
+	for i := range seqLen {
+		id := int(ids[i])
+		for j := range hiddenDim {
+			out[i*hiddenDim+j] = embData[id*hiddenDim+j]
+		}
+	}
+
+	if e.scale > 0 {
+		s := T(e.scale)
+		for i := range out {
+			out[i] *= s
+		}
+	}
+
+	batch := shape[0]
+	sl := seqLen / batch
+	return tensor.New([]int{batch, sl, hiddenDim}, out)
+}
+
+func (e *embeddingLookupNode[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
 	return nil, nil
 }
