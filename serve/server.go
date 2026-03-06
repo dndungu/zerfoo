@@ -15,13 +15,23 @@ import (
 
 // Server wraps a loaded model and serves OpenAI-compatible HTTP endpoints.
 type Server struct {
-	model *inference.Model
-	mux   *http.ServeMux
-	batch *BatchScheduler // optional; nil means direct calls
+	model      *inference.Model
+	draftModel *inference.Model // optional; enables speculative decoding
+	mux        *http.ServeMux
+	batch      *BatchScheduler // optional; nil means direct calls
 }
 
 // ServerOption configures the server.
 type ServerOption func(*Server)
+
+// WithDraftModel enables speculative decoding using the given draft model.
+// When set, completion requests use speculative decode with the draft model
+// proposing tokens and the target model verifying them.
+func WithDraftModel(draft *inference.Model) ServerOption {
+	return func(s *Server) {
+		s.draftModel = draft
+	}
+}
 
 // WithBatchScheduler attaches a batch scheduler for non-streaming requests.
 // When set, incoming completion requests are routed through the scheduler
@@ -234,11 +244,14 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	var result string
 	var err error
 
-	if s.batch != nil {
+	switch {
+	case s.batch != nil:
 		var br BatchResult
 		br, err = s.batch.Submit(r.Context(), BatchRequest{Prompt: req.Prompt})
 		result = br.Value
-	} else {
+	case s.draftModel != nil:
+		result, err = s.model.SpeculativeGenerate(r.Context(), s.draftModel, req.Prompt, 4, opts...)
+	default:
 		result, err = s.model.Generate(r.Context(), req.Prompt, opts...)
 	}
 
