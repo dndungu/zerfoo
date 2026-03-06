@@ -458,63 +458,131 @@ func TestModel_Chat(t *testing.T) {
 
 // --- formatMessages tests ---
 
-func TestFormatMessages_Gemma(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: "gemma"},
-	}
-	messages := []Message{
-		{Role: "user", Content: "Hello"},
-		{Role: "model", Content: "Hi there"},
-	}
-	got := m.formatMessages(messages)
-	want := "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\nHi there<end_of_turn>\n<start_of_turn>model\n"
-	if got != want {
-		t.Errorf("formatMessages =\n%q\nwant\n%q", got, want)
-	}
-}
-
-func TestFormatMessages_DefaultTemplate(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: ""},
-	}
-	// Empty template defaults to "gemma".
-	messages := []Message{
-		{Role: "user", Content: "Hello"},
-	}
-	got := m.formatMessages(messages)
-	if !strings.Contains(got, "<start_of_turn>") {
-		t.Errorf("expected gemma template, got %q", got)
-	}
-}
-
-func TestFormatMessages_GenericTemplate(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: "chatml"},
-	}
-	messages := []Message{
-		{Role: "user", Content: "Hello"},
-	}
-	got := m.formatMessages(messages)
-	want := "user: Hello\nassistant: "
-	if got != want {
-		t.Errorf("formatMessages =\n%q\nwant\n%q", got, want)
-	}
-}
-
-func TestFormatMessages_MultipleMessages(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: "chatml"},
-	}
-	messages := []Message{
+func TestFormatMessages(t *testing.T) {
+	singleUser := []Message{{Role: "user", Content: "Hello"}}
+	multiTurn := []Message{
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "Hello"},
 		{Role: "assistant", Content: "Hi!"},
 		{Role: "user", Content: "How are you?"},
 	}
-	got := m.formatMessages(messages)
-	want := "system: You are helpful.\nuser: Hello\nassistant: Hi!\nuser: How are you?\nassistant: "
-	if got != want {
-		t.Errorf("formatMessages =\n%q\nwant\n%q", got, want)
+
+	tests := []struct {
+		name     string
+		template string
+		messages []Message
+		want     string
+	}{
+		{
+			name:     "gemma single",
+			template: "gemma",
+			messages: singleUser,
+			want:     "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n",
+		},
+		{
+			name:     "gemma multi",
+			template: "gemma",
+			messages: []Message{
+				{Role: "user", Content: "Hello"},
+				{Role: "model", Content: "Hi there"},
+			},
+			want: "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\nHi there<end_of_turn>\n<start_of_turn>model\n",
+		},
+		{
+			name:     "llama single",
+			template: "llama",
+			messages: singleUser,
+			want:     "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+		},
+		{
+			name:     "llama multi with system",
+			template: "llama",
+			messages: multiTurn,
+			want: "<|begin_of_text|>" +
+				"<|start_header_id|>system<|end_header_id|>\n\nYou are helpful.<|eot_id|>" +
+				"<|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>" +
+				"<|start_header_id|>assistant<|end_header_id|>\n\nHi!<|eot_id|>" +
+				"<|start_header_id|>user<|end_header_id|>\n\nHow are you?<|eot_id|>" +
+				"<|start_header_id|>assistant<|end_header_id|>\n\n",
+		},
+		{
+			name:     "mistral single",
+			template: "mistral",
+			messages: singleUser,
+			want:     "[INST] Hello [/INST]",
+		},
+		{
+			name:     "mistral multi with system",
+			template: "mistral",
+			messages: multiTurn,
+			want:     "[INST] You are helpful.\n\nHello [/INST]Hi![INST] How are you? [/INST]",
+		},
+		{
+			name:     "qwen single",
+			template: "qwen2",
+			messages: singleUser,
+			want:     "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+		},
+		{
+			name:     "qwen multi with system",
+			template: "qwen2",
+			messages: multiTurn,
+			want: "<|im_start|>system\nYou are helpful.<|im_end|>\n" +
+				"<|im_start|>user\nHello<|im_end|>\n" +
+				"<|im_start|>assistant\nHi!<|im_end|>\n" +
+				"<|im_start|>user\nHow are you?<|im_end|>\n" +
+				"<|im_start|>assistant\n",
+		},
+		{
+			name:     "deepseek single",
+			template: "deepseek",
+			messages: singleUser,
+			want:     "<|begin_of_sentence|>User: Hello\n\nAssistant:",
+		},
+		{
+			name:     "deepseek multi with system",
+			template: "deepseek",
+			messages: multiTurn,
+			want:     "<|begin_of_sentence|>You are helpful.\n\nUser: Hello\n\nAssistant: Hi!\n\nUser: How are you?\n\nAssistant:",
+		},
+		{
+			name:     "phi single",
+			template: "phi",
+			messages: singleUser,
+			want:     "<|user|>\nHello<|end|>\n<|assistant|>\n",
+		},
+		{
+			name:     "phi multi with system",
+			template: "phi",
+			messages: multiTurn,
+			want: "<|system|>\nYou are helpful.<|end|>\n" +
+				"<|user|>\nHello<|end|>\n" +
+				"<|assistant|>\nHi!<|end|>\n" +
+				"<|user|>\nHow are you?<|end|>\n" +
+				"<|assistant|>\n",
+		},
+		{
+			name:     "empty template defaults to gemma",
+			template: "",
+			messages: singleUser,
+			want:     "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n",
+		},
+		{
+			name:     "unknown template uses generic fallback",
+			template: "unknown_model",
+			messages: singleUser,
+			want:     "user: Hello\nassistant: ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Model{config: ModelMetadata{ChatTemplate: tt.template}}
+			got := m.formatMessages(tt.messages)
+			if got != tt.want {
+				t.Errorf("formatMessages =\n%q\nwant\n%q", got, tt.want)
+			}
+		})
 	}
 }
 

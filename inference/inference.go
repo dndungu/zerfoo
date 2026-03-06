@@ -372,38 +372,134 @@ func (m *Model) Chat(ctx context.Context, messages []Message, opts ...GenerateOp
 
 // formatMessages converts messages to the model's chat template format.
 func (m *Model) formatMessages(messages []Message) string {
-	template := m.config.ChatTemplate
+	template := strings.ToLower(m.config.ChatTemplate)
 	if template == "" {
-		// Default Gemma 3 format.
 		template = "gemma"
 	}
 
+	switch template {
+	case "gemma":
+		return formatGemma(messages)
+	case "llama":
+		return formatLlama(messages)
+	case "mistral":
+		return formatMistral(messages)
+	case "qwen2":
+		return formatQwen(messages)
+	case "deepseek":
+		return formatDeepSeek(messages)
+	case "phi":
+		return formatPhi(messages)
+	default:
+		return formatGeneric(messages)
+	}
+}
+
+func formatGemma(messages []Message) string {
 	var sb strings.Builder
 	for _, msg := range messages {
-		switch strings.ToLower(template) {
-		case "gemma":
-			sb.WriteString("<start_of_turn>")
-			sb.WriteString(msg.Role)
-			sb.WriteString("\n")
+		sb.WriteString("<start_of_turn>")
+		sb.WriteString(msg.Role)
+		sb.WriteString("\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<end_of_turn>\n")
+	}
+	sb.WriteString("<start_of_turn>model\n")
+	return sb.String()
+}
+
+func formatLlama(messages []Message) string {
+	var sb strings.Builder
+	sb.WriteString("<|begin_of_text|>")
+	for _, msg := range messages {
+		sb.WriteString("<|start_header_id|>")
+		sb.WriteString(msg.Role)
+		sb.WriteString("<|end_header_id|>\n\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<|eot_id|>")
+	}
+	sb.WriteString("<|start_header_id|>assistant<|end_header_id|>\n\n")
+	return sb.String()
+}
+
+func formatMistral(messages []Message) string {
+	var sb strings.Builder
+	// Mistral merges system into first user message.
+	pending := ""
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			pending = msg.Content + "\n\n"
+		case "user":
+			sb.WriteString("[INST] ")
+			sb.WriteString(pending)
 			sb.WriteString(msg.Content)
-			sb.WriteString("<end_of_turn>\n")
-		default:
-			// Generic format: Role: Content\n
-			sb.WriteString(msg.Role)
-			sb.WriteString(": ")
+			sb.WriteString(" [/INST]")
+			pending = ""
+		case "assistant":
 			sb.WriteString(msg.Content)
-			sb.WriteString("\n")
 		}
 	}
+	return sb.String()
+}
 
-	// Add the assistant turn opening.
-	switch strings.ToLower(template) {
-	case "gemma":
-		sb.WriteString("<start_of_turn>model\n")
-	default:
-		sb.WriteString("assistant: ")
+func formatQwen(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("<|im_start|>")
+		sb.WriteString(msg.Role)
+		sb.WriteString("\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<|im_end|>\n")
 	}
+	sb.WriteString("<|im_start|>assistant\n")
+	return sb.String()
+}
 
+func formatDeepSeek(messages []Message) string {
+	var sb strings.Builder
+	sb.WriteString("<|begin_of_sentence|>")
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n\n")
+		case "user":
+			sb.WriteString("User: ")
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n\n")
+		case "assistant":
+			sb.WriteString("Assistant: ")
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n\n")
+		}
+	}
+	sb.WriteString("Assistant:")
+	return sb.String()
+}
+
+func formatPhi(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("<|")
+		sb.WriteString(msg.Role)
+		sb.WriteString("|>\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<|end|>\n")
+	}
+	sb.WriteString("<|assistant|>\n")
+	return sb.String()
+}
+
+func formatGeneric(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString(msg.Role)
+		sb.WriteString(": ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("assistant: ")
 	return sb.String()
 }
 

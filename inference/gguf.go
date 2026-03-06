@@ -69,5 +69,26 @@ func (m *GGUFModel) ToModelMetadata() *ModelMetadata {
 		NumKeyValueHeads:      m.Config.NumKVHeads,
 		IntermediateSize:      m.Config.IntermediateSize,
 		RopeTheta:             m.Config.RopeTheta,
+		ChatTemplate:          chatTemplateForArch(m.Config.Architecture),
+	}
+}
+
+// chatTemplateForArch returns the chat template name for a GGUF architecture.
+func chatTemplateForArch(arch string) string {
+	switch arch {
+	case "gemma":
+		return "gemma"
+	case "llama":
+		return "llama"
+	case "mistral":
+		return "mistral"
+	case "qwen2":
+		return "qwen2"
+	case "deepseek":
+		return "deepseek"
+	case "phi3":
+		return "phi"
+	default:
+		return ""
 	}
 }
