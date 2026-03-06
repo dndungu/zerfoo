@@ -771,6 +771,45 @@ func TestDecodeTensor_Q4_0_TooShort(t *testing.T) {
 	}
 }
 
+func TestDecodeTensor_Q4_0_UsesQ4Storage(t *testing.T) {
+	scale := float16.FromFloat32(1.0)
+	var nibbles [16]byte
+	nibbles[0] = 0x79 // q0=1, q1=-1
+	for i := 1; i < 16; i++ {
+		nibbles[i] = 0x88
+	}
+	rawData := encodeQ4Block(scale, nibbles)
+
+	proto := &zmf.Tensor{
+		Dtype: zmf.Tensor_Q4_0,
+		Shape: []int64{32},
+		Data:  rawData,
+	}
+
+	decoded, err := DecodeTensor[float32](proto)
+	if err != nil {
+		t.Fatalf("DecodeTensor Q4_0 failed: %v", err)
+	}
+
+	// The tensor should be backed by Q4Storage, not dense float32.
+	q4, ok := decoded.GetStorage().(*tensor.Q4Storage)
+	if !ok {
+		t.Fatalf("expected Q4Storage backing, got %T", decoded.GetStorage())
+	}
+	if q4.NumBlocks() != 1 {
+		t.Errorf("expected 1 Q4 block, got %d", q4.NumBlocks())
+	}
+
+	// Data() should still return correct dequantized values via Q4Storage.Slice().
+	data := decoded.Data()
+	if data[0] != 1.0 {
+		t.Errorf("element 0: got %v, want 1.0", data[0])
+	}
+	if data[1] != -1.0 {
+		t.Errorf("element 1: got %v, want -1.0", data[1])
+	}
+}
+
 func TestDecodeTensor_Q4_0_UnsupportedDestType(t *testing.T) {
 	scale := float16.FromFloat32(1.0)
 	var nibbles [16]byte
