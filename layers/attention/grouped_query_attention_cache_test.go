@@ -161,6 +161,69 @@ func TestGQA_CacheLayerIndex(t *testing.T) {
 	}
 }
 
+// TestGQA_PagedKVCachedForward verifies that sequential single-token cached forward
+// calls using PagedKVCache produce finite outputs and correct shapes.
+func TestGQA_PagedKVCachedForward(t *testing.T) {
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	modelDim := 8
+	numQ := 2
+	numKV := 2
+	headDim := modelDim / numQ // 4
+	seqLen := 3
+
+	gqa, err := NewGroupedQueryAttention[float32](
+		engine, numeric.Float32Ops{}, modelDim, numQ, numKV,
+		WithMaxSeqLen[float32](seqLen),
+	)
+	if err != nil {
+		t.Fatalf("construct GQA: %v", err)
+	}
+	gqa.LayerIndex = 0
+
+	// Pool headDim = numKV * headDim = 2*4 = 8 to accommodate
+	// GQA's [batch*numKVHeads, seqLen, headDim] storage.
+	pool, err := generate.NewBlockPool[float32](1, 16, numKV*headDim, 1)
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	cache := generate.NewPagedKVCache[float32](pool, 1)
+	ctx := generate.WithCache(context.Background(), generate.CacheProvider[float32](cache))
+
+	data := make([]float32, seqLen*modelDim)
+	for i := range data {
+		data[i] = float32(i%7) / 5.0
+	}
+
+	for tok := range seqLen {
+		tokenData := data[tok*modelDim : (tok+1)*modelDim]
+		tokenInput, tensorErr := tensor.New([]int{1, 1, modelDim}, tokenData)
+		if tensorErr != nil {
+			t.Fatal(tensorErr)
+		}
+
+		out, fwdErr := gqa.Forward(ctx, tokenInput)
+		if fwdErr != nil {
+			t.Fatalf("paged cached forward token %d: %v", tok, fwdErr)
+		}
+
+		outShape := out.Shape()
+		if outShape[0] != 1 || outShape[1] != 1 || outShape[2] != modelDim {
+			t.Fatalf("token %d: output shape = %v, want [1 1 %d]", tok, outShape, modelDim)
+		}
+
+		outData := out.Data()
+		for i, v := range outData {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				t.Errorf("token %d: output[%d] = %v (not finite)", tok, i, v)
+			}
+		}
+	}
+
+	if got := cache.SeqLen(); got != seqLen {
+		t.Errorf("PagedKVCache SeqLen = %d, want %d", got, seqLen)
+	}
+}
+
 // TestGQA_NoCacheBackwardCompatible verifies the uncached path is unchanged.
 func TestGQA_NoCacheBackwardCompatible(t *testing.T) {
 	engine := compute.NewCPUEngine(numeric.Float32Ops{})
