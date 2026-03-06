@@ -244,6 +244,99 @@ func TestSpeculativeGenerate_StopToken(t *testing.T) {
 	_ = result
 }
 
+func TestKVCache_Truncate(t *testing.T) {
+	cache := NewKVCache[float32](2, 128)
+
+	// Append 5 tokens to each layer.
+	for i := range 5 {
+		for layer := range 2 {
+			k := makeTestTensor(t, []int{1, 1, 4}, []float32{float32(i), float32(layer), 0, 0})
+			v := makeTestTensor(t, []int{1, 1, 4}, []float32{0, 0, float32(i), float32(layer)})
+			if err := cache.Update(layer, k, v); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+		}
+	}
+	if got := cache.SeqLen(); got != 5 {
+		t.Fatalf("SeqLen = %d, want 5", got)
+	}
+
+	// Truncate to 3.
+	cache.Truncate(3)
+	if got := cache.SeqLen(); got != 3 {
+		t.Errorf("SeqLen after Truncate(3) = %d, want 3", got)
+	}
+
+	// Can still append.
+	k := makeTestTensor(t, []int{1, 1, 4}, []float32{99, 0, 0, 0})
+	v := makeTestTensor(t, []int{1, 1, 4}, []float32{0, 0, 99, 0})
+	if err := cache.Update(0, k, v); err != nil {
+		t.Fatalf("Update after Truncate: %v", err)
+	}
+	if got := cache.SeqLen(); got != 4 {
+		t.Errorf("SeqLen after Truncate+Update = %d, want 4", got)
+	}
+
+	// Verify data: position 3 should have the new data.
+	lkv, ok := cache.Get(0)
+	if !ok {
+		t.Fatal("Get(0) should return true")
+	}
+	kd := lkv.Key.Data()
+	if kd[3*4] != 99 {
+		t.Errorf("Key data at pos 3 = %v, want 99", kd[3*4])
+	}
+}
+
+func TestPagedKVCache_Truncate(t *testing.T) {
+	pool, err := NewBlockPool[float32](1, 4, 2, 1)
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	cache := NewPagedKVCache[float32](pool, 1)
+
+	// Append 6 tokens (2 blocks: 4+2).
+	for i := range 6 {
+		k := makeTestTensor(t, []int{1, 1, 2}, []float32{float32(i), 0})
+		v := makeTestTensor(t, []int{1, 1, 2}, []float32{0, float32(i)})
+		if err := cache.Append(0, k, v); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+	}
+	if got := cache.SeqLen(); got != 6 {
+		t.Fatalf("SeqLen = %d, want 6", got)
+	}
+
+	availBefore := pool.Available()
+
+	// Truncate to 3 (should free second block).
+	cache.Truncate(3)
+	if got := cache.SeqLen(); got != 3 {
+		t.Errorf("SeqLen after Truncate(3) = %d, want 3", got)
+	}
+	if got := pool.Available(); got != availBefore+1 {
+		t.Errorf("Available after Truncate = %d, want %d", got, availBefore+1)
+	}
+
+	// Verify data.
+	lkv, ok := cache.GetKV(0)
+	if !ok {
+		t.Fatal("GetKV(0) should return true")
+	}
+	kd := lkv.Key.Data()
+	for i := range 3 {
+		if kd[i*2] != float32(i) {
+			t.Errorf("Key[%d] = %v, want %v", i, kd[i*2], float32(i))
+		}
+	}
+
+	// Truncate to 0.
+	cache.Truncate(0)
+	if got := cache.SeqLen(); got != 0 {
+		t.Errorf("SeqLen after Truncate(0) = %d, want 0", got)
+	}
+}
+
 // Verify that SpeculativeGenerator implements a basic "model forward" pattern
 // by testing with a simple model and checking output shape consistency.
 func TestSpeculativeGenerator_ForwardConsistency(t *testing.T) {

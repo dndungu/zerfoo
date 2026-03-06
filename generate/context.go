@@ -14,6 +14,7 @@ type CacheProvider[T tensor.Numeric] interface {
 	Get(layer int) (*LayerKV[T], bool)
 	SeqLen() int
 	Reset()
+	Truncate(newSeqLen int)
 }
 
 type kvCacheKey struct{}

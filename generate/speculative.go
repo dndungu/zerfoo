@@ -183,29 +183,16 @@ func (sg *SpeculativeGenerator[T]) Generate(ctx context.Context, prompt string, 
 			break
 		}
 
-		// Rebuild draft cache if tokens were rejected.
-		if len(accepted) < len(draftTokens) {
-			draftCache.Reset()
-			// Re-prefill draft with prompt + all generated tokens.
-			allIDs := make([]int, len(promptIDs)+len(generatedIDs))
-			copy(allIDs, promptIDs)
-			copy(allIDs[len(promptIDs):], generatedIDs)
-
-			reprefill, rErr := sg.idsToTensor(allIDs)
-			if rErr != nil {
-				return "", fmt.Errorf("draft re-prefill tensor: %w", rErr)
-			}
-			_, rErr = sg.draftGraph.Forward(draftCtx, reprefill)
-			if rErr != nil {
-				return "", fmt.Errorf("draft re-prefill: %w", rErr)
-			}
-
-			// Also rebuild target cache to keep it consistent.
-			targetCache.Reset()
-			_, rErr = sg.targetGraph.Forward(targetCtx, reprefill)
-			if rErr != nil {
-				return "", fmt.Errorf("target re-prefill: %w", rErr)
-			}
+		// Roll back caches if tokens were rejected.
+		// The target cache has the verified tokens + all draft tokens.
+		// The draft cache has the prompt + generated + all draft tokens.
+		// Truncate both to the correct position: prompt + accepted + bonus.
+		correctSeqLen := len(promptIDs) + len(generatedIDs)
+		if draftCache.SeqLen() > correctSeqLen {
+			draftCache.Truncate(correctSeqLen)
+		}
+		if targetCache.SeqLen() > correctSeqLen {
+			targetCache.Truncate(correctSeqLen)
 		}
 
 		if len(generatedIDs) > 0 {

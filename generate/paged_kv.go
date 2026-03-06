@@ -205,6 +205,34 @@ func (c *PagedKVCache[T]) Free() {
 	}
 }
 
+// Truncate rolls back the cache to the given sequence length.
+// Blocks beyond the new length are returned to the pool.
+func (c *PagedKVCache[T]) Truncate(newSeqLen int) {
+	if newSeqLen < 0 {
+		newSeqLen = 0
+	}
+	for i := range c.layerCursors {
+		if c.layerCursors[i] > newSeqLen {
+			c.layerCursors[i] = newSeqLen
+		}
+	}
+
+	// Free blocks beyond the new length.
+	neededBlocks := 0
+	if newSeqLen > 0 {
+		neededBlocks = (newSeqLen-1)/c.blockSize + 1
+	}
+	for i := neededBlocks; i < len(c.blockTable); i++ {
+		c.pool.Free(c.blockTable[i])
+	}
+	c.blockTable = c.blockTable[:neededBlocks]
+
+	if newSeqLen == 0 {
+		c.channels = 0
+		c.perPosDim = 0
+	}
+}
+
 // NumLayers returns the number of layers in the cache.
 func (c *PagedKVCache[T]) NumLayers() int {
 	return c.numLayers
