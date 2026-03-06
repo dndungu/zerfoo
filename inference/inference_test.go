@@ -1316,3 +1316,113 @@ func TestLoad_MmapInvalidZMF(t *testing.T) {
 		t.Errorf("error = %q, want mmap-related error", err.Error())
 	}
 }
+
+// --- Alias tests ---
+
+func TestResolveAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"gemma-3-1b-q4", "google/gemma-3-1b-it-qat-q4_0-gguf"},
+		{"llama-3-1b-q4", "meta-llama/Llama-3.2-1B-Instruct-GGUF"},
+		{"unknown-model", "unknown-model"},
+		{"google/some-repo", "google/some-repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := ResolveAlias(tt.input)
+			if got != tt.want {
+				t.Errorf("ResolveAlias(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRegisterAlias(t *testing.T) {
+	RegisterAlias("my-model", "my-org/my-model-gguf")
+	got := ResolveAlias("my-model")
+	if got != "my-org/my-model-gguf" {
+		t.Errorf("ResolveAlias after RegisterAlias = %q, want %q", got, "my-org/my-model-gguf")
+	}
+	// Clean up.
+	delete(modelAliases, "my-model")
+}
+
+// --- findGGUF tests ---
+
+func TestFindGGUF(t *testing.T) {
+	t.Run("finds gguf file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "model.gguf"), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := findGGUF(dir)
+		if got != filepath.Join(dir, "model.gguf") {
+			t.Errorf("findGGUF = %q, want %q", got, filepath.Join(dir, "model.gguf"))
+		}
+	})
+
+	t.Run("returns empty for no gguf", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "model.zmf"), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := findGGUF(dir)
+		if got != "" {
+			t.Errorf("findGGUF = %q, want empty", got)
+		}
+	})
+
+	t.Run("returns empty for nonexistent dir", func(t *testing.T) {
+		got := findGGUF("/nonexistent/path")
+		if got != "" {
+			t.Errorf("findGGUF = %q, want empty", got)
+		}
+	})
+}
+
+// --- Load with alias resolution ---
+
+func TestLoad_ResolvesAlias(t *testing.T) {
+	// Verify that Load resolves aliases before checking the registry.
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"google/gemma-3-1b-it-qat-q4_0-gguf": {ID: "google/gemma-3-1b-it-qat-q4_0-gguf", Path: t.TempDir()},
+		},
+	}
+	// This will fail on model loading (no files), but we verify alias resolution
+	// by checking that the registry was queried with the resolved ID.
+	_, err := Load("gemma-3-1b-q4", WithRegistry(reg))
+	// Should fail trying to load config.json, not "model not found"
+	if err == nil {
+		t.Error("expected error")
+	}
+	if strings.Contains(err.Error(), "pull model") {
+		t.Errorf("error = %q; alias was not resolved (tried to pull)", err.Error())
+	}
+}
+
+// --- Load with GGUF auto-detect ---
+
+func TestLoad_DetectsGGUFFile(t *testing.T) {
+	dir := t.TempDir()
+	// Create a fake .gguf file (will fail GGUF parsing, but tests the detection path).
+	if err := os.WriteFile(filepath.Join(dir, "model.gguf"), []byte("not-gguf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"test-gguf": {ID: "test-gguf", Path: dir},
+		},
+	}
+	_, err := Load("test-gguf", WithRegistry(reg))
+	if err == nil {
+		t.Error("expected error from GGUF parsing")
+	}
+	// The error should come from GGUF loading, not ZMF loading.
+	if strings.Contains(err.Error(), "load model") || strings.Contains(err.Error(), "config.json") {
+		t.Errorf("error = %q; should have tried GGUF path, not ZMF path", err.Error())
+	}
+}

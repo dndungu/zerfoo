@@ -62,6 +62,30 @@ type ModelMetadata struct {
 	NumSharedExperts int `json:"n_shared_experts"`
 }
 
+// modelAliases maps short model names to HuggingFace repo IDs.
+var modelAliases = map[string]string{
+	"gemma-3-1b-q4":  "google/gemma-3-1b-it-qat-q4_0-gguf",
+	"gemma-3-2b-q4":  "google/gemma-3-2b-it-qat-q4_0-gguf",
+	"llama-3-1b-q4":  "meta-llama/Llama-3.2-1B-Instruct-GGUF",
+	"llama-3-8b-q4":  "meta-llama/Llama-3.1-8B-Instruct-GGUF",
+	"mistral-7b-q4":  "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
+	"qwen-2.5-7b-q4": "Qwen/Qwen2.5-7B-Instruct-GGUF",
+}
+
+// ResolveAlias returns the HuggingFace repo ID for a short alias.
+// If the name is not an alias, it is returned unchanged.
+func ResolveAlias(name string) string {
+	if id, ok := modelAliases[name]; ok {
+		return id
+	}
+	return name
+}
+
+// RegisterAlias adds a custom short name -> HuggingFace repo ID mapping.
+func RegisterAlias(shortName, repoID string) {
+	modelAliases[shortName] = repoID
+}
+
 // Option configures model loading.
 type Option func(*loadOptions)
 
@@ -139,18 +163,25 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		opt(o)
 	}
 
+	// Resolve short aliases to full repo IDs.
+	modelID = ResolveAlias(modelID)
+
 	// Get or create registry.
 	reg := o.registry
 	if reg == nil {
 		var err error
+		var lr *registry.LocalRegistry
 		if o.cacheDir != "" {
-			reg, err = registry.NewLocalRegistry(o.cacheDir)
+			lr, err = registry.NewLocalRegistry(o.cacheDir)
 		} else {
-			reg, err = registry.NewLocalRegistry("")
+			lr, err = registry.NewLocalRegistry("")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("create registry: %w", err)
 		}
+		// Wire the HuggingFace pull function by default.
+		lr.SetPullFunc(registry.NewHFPullFunc(registry.HFPullOptions{}))
+		reg = lr
 	}
 
 	// Check cache first, pull if needed.
@@ -161,6 +192,11 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pull model %q: %w", modelID, err)
 		}
+	}
+
+	// If a GGUF file exists in the model directory, use the GGUF loader.
+	if ggufPath := findGGUF(info.Path); ggufPath != "" {
+		return LoadFile(ggufPath, opts...)
 	}
 
 	// Load config.json.
@@ -216,6 +252,21 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 	m := assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen)
 	m.closer = mmapCloser
 	return m, nil
+}
+
+// findGGUF looks for a .gguf file in the given directory.
+// Returns the full path if found, empty string otherwise.
+func findGGUF(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // assembleModel wires together loaded components into a ready-to-use Model.
