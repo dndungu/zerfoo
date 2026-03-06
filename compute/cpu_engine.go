@@ -1023,6 +1023,11 @@ func (e *CPUEngine[T]) Transpose(_ context.Context, a *tensor.TensorNumeric[T], 
 	if len(originalShape) == 2 && axes[0] == 1 && axes[1] == 0 {
 		rows := originalShape[0]
 		cols := originalShape[1]
+		// When either dimension is 1, layout is identical — just copy.
+		if rows == 1 || cols == 1 {
+			copy(rData, aData)
+			return result, nil
+		}
 		const blockSize = 64
 		parallelFor(rows, func(startRow, endRow int) {
 			for jb := 0; jb < cols; jb += blockSize {
@@ -1049,6 +1054,14 @@ func (e *CPUEngine[T]) Transpose(_ context.Context, a *tensor.TensorNumeric[T], 
 		dim1 := originalShape[1]
 		dim2 := originalShape[2]
 		D := originalShape[3]
+
+		// When either swapped dimension is 1 (common in decode with seq_len=1),
+		// the data layout is identical — just copy without transposing.
+		if dim1 == 1 || dim2 == 1 {
+			copy(rData, aData)
+			return result, nil
+		}
+
 		batchStride := dim1 * dim2 * D
 		const blockSize = 32
 		parallelFor(B, func(startB, endB int) {
