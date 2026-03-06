@@ -1,0 +1,165 @@
+package gguf
+
+import "testing"
+
+func TestMapTensorName_Llama(t *testing.T) {
+	tests := []struct {
+		gguf string
+		want string
+	}{
+		{"token_embd.weight", "model.embed_tokens.weight"},
+		{"output_norm.weight", "model.norm.weight"},
+		{"output.weight", "lm_head.weight"},
+		{"blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight"},
+		{"blk.0.attn_q.weight", "model.layers.0.self_attn.q_proj.weight"},
+		{"blk.0.attn_k.weight", "model.layers.0.self_attn.k_proj.weight"},
+		{"blk.0.attn_v.weight", "model.layers.0.self_attn.v_proj.weight"},
+		{"blk.0.attn_output.weight", "model.layers.0.self_attn.o_proj.weight"},
+		{"blk.0.ffn_norm.weight", "model.layers.0.post_attention_layernorm.weight"},
+		{"blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"},
+		{"blk.0.ffn_up.weight", "model.layers.0.mlp.up_proj.weight"},
+		{"blk.0.ffn_down.weight", "model.layers.0.mlp.down_proj.weight"},
+		{"blk.31.attn_q.weight", "model.layers.31.self_attn.q_proj.weight"},
+		{"blk.15.ffn_gate.weight", "model.layers.15.mlp.gate_proj.weight"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.gguf, func(t *testing.T) {
+			got := MapTensorName("llama", tt.gguf)
+			if got != tt.want {
+				t.Errorf("MapTensorName(llama, %q) = %q, want %q", tt.gguf, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapTensorName_Gemma(t *testing.T) {
+	// Gemma uses the same tensor name mapping as Llama in GGUF.
+	tests := []struct {
+		gguf string
+		want string
+	}{
+		{"token_embd.weight", "model.embed_tokens.weight"},
+		{"blk.0.attn_q.weight", "model.layers.0.self_attn.q_proj.weight"},
+		{"blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.gguf, func(t *testing.T) {
+			got := MapTensorName("gemma", tt.gguf)
+			if got != tt.want {
+				t.Errorf("MapTensorName(gemma, %q) = %q, want %q", tt.gguf, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapTensorName_Unknown(t *testing.T) {
+	// Unknown names pass through unchanged.
+	got := MapTensorName("llama", "some.unknown.tensor")
+	if got != "some.unknown.tensor" {
+		t.Errorf("unknown tensor name should pass through, got %q", got)
+	}
+}
+
+func TestExtractModelConfig(t *testing.T) {
+	meta := map[string]any{
+		"general.architecture":           "llama",
+		"general.name":                   "test-model",
+		"llama.embedding_length":         uint32(2048),
+		"llama.block_count":              uint32(22),
+		"llama.attention.head_count":     uint32(32),
+		"llama.attention.head_count_kv":  uint32(8),
+		"llama.feed_forward_length":      uint32(5632),
+		"llama.context_length":           uint32(8192),
+		"llama.rope.freq_base":           float32(10000.0),
+		"llama.vocab_size":               uint32(32000),
+	}
+
+	f := &File{Metadata: meta}
+	cfg, err := ExtractModelConfig(f)
+	if err != nil {
+		t.Fatalf("ExtractModelConfig: %v", err)
+	}
+
+	if cfg.Architecture != "llama" {
+		t.Errorf("Architecture = %q, want llama", cfg.Architecture)
+	}
+	if cfg.Name != "test-model" {
+		t.Errorf("Name = %q, want test-model", cfg.Name)
+	}
+	if cfg.HiddenSize != 2048 {
+		t.Errorf("HiddenSize = %d, want 2048", cfg.HiddenSize)
+	}
+	if cfg.NumLayers != 22 {
+		t.Errorf("NumLayers = %d, want 22", cfg.NumLayers)
+	}
+	if cfg.NumHeads != 32 {
+		t.Errorf("NumHeads = %d, want 32", cfg.NumHeads)
+	}
+	if cfg.NumKVHeads != 8 {
+		t.Errorf("NumKVHeads = %d, want 8", cfg.NumKVHeads)
+	}
+	if cfg.IntermediateSize != 5632 {
+		t.Errorf("IntermediateSize = %d, want 5632", cfg.IntermediateSize)
+	}
+	if cfg.MaxSeqLen != 8192 {
+		t.Errorf("MaxSeqLen = %d, want 8192", cfg.MaxSeqLen)
+	}
+	if cfg.VocabSize != 32000 {
+		t.Errorf("VocabSize = %d, want 32000", cfg.VocabSize)
+	}
+}
+
+func TestExtractModelConfig_Gemma(t *testing.T) {
+	meta := map[string]any{
+		"general.architecture":          "gemma",
+		"gemma.embedding_length":        uint32(2048),
+		"gemma.block_count":             uint32(18),
+		"gemma.attention.head_count":    uint32(8),
+		"gemma.attention.head_count_kv": uint32(1),
+		"gemma.feed_forward_length":     uint32(16384),
+		"gemma.context_length":          uint32(8192),
+	}
+
+	f := &File{Metadata: meta}
+	cfg, err := ExtractModelConfig(f)
+	if err != nil {
+		t.Fatalf("ExtractModelConfig: %v", err)
+	}
+
+	if cfg.Architecture != "gemma" {
+		t.Errorf("Architecture = %q, want gemma", cfg.Architecture)
+	}
+	if cfg.HiddenSize != 2048 {
+		t.Errorf("HiddenSize = %d, want 2048", cfg.HiddenSize)
+	}
+	if cfg.NumKVHeads != 1 {
+		t.Errorf("NumKVHeads = %d, want 1", cfg.NumKVHeads)
+	}
+}
+
+func TestExtractModelConfig_MissingArch(t *testing.T) {
+	f := &File{Metadata: map[string]any{}}
+	_, err := ExtractModelConfig(f)
+	if err == nil {
+		t.Error("expected error for missing architecture")
+	}
+}
+
+func TestExtractModelConfig_KVHeadsDefaultsToHeads(t *testing.T) {
+	meta := map[string]any{
+		"general.architecture":       "llama",
+		"llama.embedding_length":     uint32(4096),
+		"llama.block_count":          uint32(32),
+		"llama.attention.head_count": uint32(32),
+		// No head_count_kv → should default to head_count.
+	}
+
+	f := &File{Metadata: meta}
+	cfg, err := ExtractModelConfig(f)
+	if err != nil {
+		t.Fatalf("ExtractModelConfig: %v", err)
+	}
+	if cfg.NumKVHeads != 32 {
+		t.Errorf("NumKVHeads = %d, want 32 (default to NumHeads)", cfg.NumKVHeads)
+	}
+}
