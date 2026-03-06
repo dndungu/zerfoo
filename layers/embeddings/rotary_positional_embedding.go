@@ -189,6 +189,25 @@ func (rpe *RotaryPositionalEmbedding[T]) Forward(ctx context.Context, inputs ...
 	seqLen := rpe.inputShape[1]
 	halfRotary := rpe.rotaryDim / 2
 
+	// Fused single-pass kernel for float32 on CPUEngine (inference hot path).
+	if _, isCPU := rpe.engine.(*compute.CPUEngine[T]); isCPU {
+		if f32Input, ok := any(input).(*tensor.TensorNumeric[float32]); ok {
+			f32Cos, cOk := any(rpe.cosAngles).(*tensor.TensorNumeric[float32])
+			f32Sin, sOk := any(rpe.sinAngles).(*tensor.TensorNumeric[float32])
+			if cOk && sOk {
+				out, err := compute.FusedRoPE(f32Input, f32Cos, f32Sin, rpe.rotaryDim)
+				if err == nil {
+					rpe.outputShape = input.Shape()
+					// Cache slices for backward pass.
+					rpe.xRot0Slice, _ = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{0, halfRotary})
+					rpe.xRot1Slice, _ = input.Slice([2]int{0, rpe.inputShape[0]}, [2]int{0, seqLen}, [2]int{halfRotary, rpe.rotaryDim})
+					return any(out).(*tensor.TensorNumeric[T]), nil
+				}
+				// Fall through to unfused path on error (e.g. non-3D input).
+			}
+		}
+	}
+
 	// Slice cos and sin angles to match the input sequence length
 	cosAngles, err := rpe.cosAngles.Slice([2]int{0, seqLen}, [2]int{0, halfRotary})
 	if err != nil {
