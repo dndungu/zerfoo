@@ -163,7 +163,7 @@ Existing code:
   - Test: 128 tokens (8 blocks), verify full sequence attention.
   - All tests compare block-table vs contiguous output within 1e-6.
 
-- [ ] T59.2 Benchmark block-table vs gather-copy  Owner: TBD  Est: 2h
+- [x] T59.2 Benchmark block-table vs gather-copy  Owner: TBD  Est: 2h
   - Benchmark GQA forward pass with:
     A. Gather blocks to contiguous buffer, then standard attention.
     B. Block-table direct reads (T59.1).
@@ -172,9 +172,9 @@ Existing code:
     documented (may not be faster due to non-contiguous memory access).
   - Dependencies: T59.1.
 
-- [ ] S59.2.1 Benchmark report  Owner: TBD  Est: 30m
+- [x] S59.2.1 Benchmark report  Owner: TBD  Est: 30m
 
-- [ ] T59.3 Multi-sequence load test  Owner: TBD  Est: 3h
+- [x] T59.3 Multi-sequence load test  Owner: TBD  Est: 3h
   - Create `serve/loadtest_test.go` with a test that:
     1. Starts the HTTP server with `WithPagedKV`.
     2. Sends 8 concurrent chat completion requests via HTTP.
@@ -184,11 +184,11 @@ Existing code:
     8 sequences of mixed length (128-1024 tokens). p99 latency < 2x single.
   - Dependencies: T59.1.
 
-- [ ] S59.3.1 Load test validation  Owner: TBD  Est: 1h
+- [x] S59.3.1 Load test validation  Owner: TBD  Est: 1h
   - Verify all 8 requests complete successfully.
   - Verify memory measurements are consistent across 3 runs.
 
-- [ ] T59.4 Run golangci-lint on layers/attention/ and serve/  Owner: TBD  Est: 15m
+- [x] T59.4 Run golangci-lint on layers/attention/ and serve/  Owner: TBD  Est: 15m
   - Dependencies: T59.3.
 
 ### E60: Speculative Decoding Real-Model Validation (O59)
@@ -464,7 +464,7 @@ Existing code:
   - Acceptance: Training output shows both metrics.
   - Dependencies: T64.1.
 
-- [ ] T64.3 Run golangci-lint on audacity/internal/training/  Owner: TBD  Est: 15m
+- [x] T64.3 Run golangci-lint on audacity/internal/training/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
   - Dependencies: T64.2.
 
 ### E65: EMA of Model Weights (O64)
@@ -506,7 +506,7 @@ Existing code:
   - Test: decay=1.0 makes shadow never change from initial.
   - Benchmark: EMA overhead per Step (expect < 10% of optimizer cost).
 
-- [ ] T65.2 Wire EMA into Audacity training loop  Owner: TBD  Est: 2h
+- [x] T65.2 Wire EMA into Audacity training loop  Owner: TBD  Est: 2h  (pre-existing)
   - Modify training loop to:
     1. Wrap optimizer with EMA when `--ema-decay` flag is set.
     2. Before validation: call `SwapWeights()` to use shadow params.
@@ -516,11 +516,11 @@ Existing code:
     Validation uses EMA weights.
   - Dependencies: T65.1.
 
-- [ ] S65.2.1 EMA training integration test  Owner: TBD  Est: 1h
+- [x] S65.2.1 EMA training integration test  Owner: TBD  Est: 1h  (pre-existing)
   - Train 5 epochs with EMA on synthetic data.
   - Verify final saved model contains EMA weights, not live weights.
 
-- [ ] T65.3 Run golangci-lint on training/optimizer/  Owner: TBD  Est: 15m
+- [x] T65.3 Run golangci-lint on training/optimizer/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
   - Dependencies: T65.2.
 
 ### E66: Cosine Annealing with Warm Restarts (O66)
@@ -556,13 +556,13 @@ Existing code:
   - Test: LR at cycle end equals EtaMin.
   - Test: LR at cycle midpoint equals (EtaMax+EtaMin)/2.
 
-- [ ] T66.2 Wire warm restarts into training config  Owner: TBD  Est: 1h
+- [x] T66.2 Wire warm restarts into training config  Owner: TBD  Est: 1h
   - Add `--lr-schedule=cosine-warm-restarts`, `--lr-t0`, `--lr-tmult` flags.
   - Acceptance: Training with `--lr-schedule=cosine-warm-restarts --lr-t0=5`
     shows LR resets in training log.
   - Dependencies: T66.1.
 
-- [ ] T66.3 Run golangci-lint on audacity/internal/training/  Owner: TBD  Est: 15m
+- [x] T66.3 Run golangci-lint on audacity/internal/training/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
   - Dependencies: T66.2.
 
 ### E67: Stochastic Weight Averaging (O67)
@@ -600,7 +600,7 @@ Different from EMA: SWA averages at epoch boundaries, EMA averages every step.
   - Test: SwapWeights exchanges live and SWA params.
   - Test: nAveraged increments correctly.
 
-- [ ] T67.2 Wire SWA into Audacity training loop  Owner: TBD  Est: 2h
+- [x] T67.2 Wire SWA into Audacity training loop  Owner: TBD  Est: 2h
   - Modify training loop:
     1. When `--swa-start` flag is set, wrap optimizer with SWA.
     2. At each epoch end (after startEpoch), call `UpdateAverage()`.
@@ -610,11 +610,11 @@ Different from EMA: SWA averages at epoch boundaries, EMA averages every step.
     epoch 10 onwards. Saved model uses SWA weights.
   - Dependencies: T67.1.
 
-- [ ] S67.2.1 SWA training integration test  Owner: TBD  Est: 1h
+- [x] S67.2.1 SWA training integration test  Owner: TBD  Est: 1h
   - Train 20 epochs with SWA starting at epoch 10.
   - Verify final model is average of checkpoints 10-19.
 
-- [ ] T67.3 Run golangci-lint on training/optimizer/  Owner: TBD  Est: 15m
+- [x] T67.3 Run golangci-lint on training/optimizer/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
   - Dependencies: T67.2.
 
 ### E68: Feature Dropout (O68)
@@ -649,23 +649,23 @@ market regimes.
   - Test: rate=0.0 passes through unchanged.
   - Test: rate=1.0 zeros all features.
 
-- [ ] T68.2 Register FeatureDropout in layer registry  Owner: TBD  Est: 30m
+- [x] T68.2 Register FeatureDropout in layer registry  Owner: TBD  Est: 30m  (2026-03-06)
   - Add to `layers/registry/register.go`.
   - Acceptance: Layer can be loaded from ZMF model file.
   - Dependencies: T68.1.
 
-- [ ] T68.3 Wire into Audacity model graph  Owner: TBD  Est: 1h
+- [x] T68.3 Wire into Audacity model graph  Owner: TBD  Est: 1h
   - Add `--feature-dropout` flag to control rate.
   - Insert FeatureDropout before the first linear layer in the model.
   - Acceptance: Training with `--feature-dropout=0.05` logs that feature
     dropout is active. Model trains without errors.
   - Dependencies: T68.1.
 
-- [ ] S68.3.1 Feature dropout training test  Owner: TBD  Est: 1h
+- [x] S68.3.1 Feature dropout training test  Owner: TBD  Est: 1h
   - Train 3 epochs with feature dropout on synthetic data.
   - Verify loss decreases (model still learns with dropped features).
 
-- [ ] T68.4 Run golangci-lint on layers/regularization/  Owner: TBD  Est: 15m
+- [x] T68.4 Run golangci-lint on layers/regularization/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
   - Dependencies: T68.3.
 
 ---
