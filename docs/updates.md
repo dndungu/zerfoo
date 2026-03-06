@@ -51,3 +51,28 @@ longer sequences where absolute position information matters. No performance cos
 (offset is a simple integer stored on the RoPE struct).
 
 ## E51 COMPLETE -- KV cache decode already optimal + RoPE bug fixed
+
+## 2026-03-06: T49.1 + S49.1.1 -- Q4 dot product scalar implementation
+
+- `29a8f20` Added `q4DotBlock` in `internal/xblas/q4dot.go`. Scalar fallback that
+  fuses nibble extraction and dot product in a single pass (no intermediate buffer).
+  Tests verify parity against `dequantQ4Block`+manual dot for 6 test cases + real
+  Q4 data. Benchmarks included.
+- **Remaining E49 tasks (T49.2-T49.4):** Require NEON assembly on DGX Spark ARM64.
+  The scalar `q4DotBlock` is the building block; `GemmQ4F32Fused` M=1 integration
+  needs a different approach for N>1 (B columns are strided). The NEON version
+  should process nibble extraction in SIMD registers and accumulate against B rows
+  using the existing `sgemmAccRow` pattern but with in-register dequant.
+- **Key insight:** For M=1 with large N (decode: 4096-8192), the bottleneck is
+  the 32 sgemmAccRow calls per Q4 block. The NEON kernel should batch these by
+  dequantizing nibbles into float32x4 registers and doing 4-wide FMLA directly.
+
+## Session Summary -- Phase 29 Progress
+
+| Epic | Status | Notes |
+|------|--------|-------|
+| E49 | T49.1 done | Scalar q4DotBlock + tests. NEON asm needs DGX Spark. |
+| E50 | COMPLETE | TensorPool wired into Generator. Alloc benchmark ready. |
+| E51 | COMPLETE | KV cache already optimal. RoPE position offset bug fixed. |
+| E52 | Not started | NEON fused ops (RMSNorm, SiLU-gate, transpose). |
+| E53 | Not started | DGX Spark benchmark validation. |

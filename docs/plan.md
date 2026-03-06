@@ -129,7 +129,7 @@ then calls `sgemmAccRow`. The NEON kernel replaces `dequantQ4Block` + the
 inner multiply with a single NEON routine that extracts nibbles and FMAs
 directly in vector registers.
 
-- [ ] T49.1 NEON Q4 block dot-product function  Owner: TBD  Est: 4h
+- [x] T49.1 NEON Q4 block dot-product function  Owner: TBD  Est: 4h
   - Add `q4DotBlockNeon(packed *byte, scale float32, x *float32) float32`
     in `internal/xblas/q4dot_arm64.s`.
   - Takes one Q4 block (16 packed bytes = 32 nibbles) and 32 float32
@@ -146,7 +146,7 @@ directly in vector registers.
   - Acceptance: Output matches `dequantQ4Block` + scalar dot within 1e-5.
   - Dependencies: none.
 
-- [ ] S49.1.1 NEON Q4 block dot-product tests  Owner: TBD  Est: 1h
+- [x] S49.1.1 NEON Q4 block dot-product tests  Owner: TBD  Est: 1h
   - Table-driven: zero block, all-same-nibble, random, max-scale, min-scale.
   - Compare NEON result against scalar `dequantQ4Block` + dot product.
 
