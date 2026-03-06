@@ -22,7 +22,8 @@ type SpeculativeGenerator[T tensor.Numeric] struct {
 	engine      compute.Engine[T]
 	draftCfg    ModelConfig
 	targetCfg   ModelConfig
-	draftLen    int // number of draft tokens per step (default 4)
+	draftLen    int // initial draft tokens per step (default 4)
+	adaptive    bool
 }
 
 // NewSpeculativeGenerator creates a speculative generator with separate draft
@@ -46,7 +47,15 @@ func NewSpeculativeGenerator[T tensor.Numeric](
 		draftCfg:    draftCfg,
 		targetCfg:   targetCfg,
 		draftLen:    draftLen,
+		adaptive:    true,
 	}
+}
+
+// WithAdaptive enables or disables adaptive draft length adjustment.
+// When enabled (default), the draft length is adjusted based on acceptance rate.
+func (sg *SpeculativeGenerator[T]) WithAdaptive(enabled bool) *SpeculativeGenerator[T] {
+	sg.adaptive = enabled
+	return sg
 }
 
 // Generate produces text from a prompt using speculative decoding with greedy
@@ -102,12 +111,21 @@ func (sg *SpeculativeGenerator[T]) Generate(ctx context.Context, prompt string, 
 	generatedIDs := []int{firstToken}
 	nextDraftInput := firstToken
 
+	var tracker *adaptiveDraftLen
+	if sg.adaptive {
+		tracker = newAdaptiveDraftLen(sg.draftLen, 1, 8, 32)
+	}
+
 	for len(generatedIDs) < sc.MaxNewTokens {
 		if err := ctx.Err(); err != nil {
 			break
 		}
 
-		draftN := min(sg.draftLen, sc.MaxNewTokens-len(generatedIDs))
+		currentDraftLen := sg.draftLen
+		if tracker != nil {
+			currentDraftLen = tracker.Current()
+		}
+		draftN := min(currentDraftLen, sc.MaxNewTokens-len(generatedIDs))
 
 		// Draft phase: generate draftN tokens greedily.
 		draftTokens := make([]int, 0, draftN)
@@ -181,6 +199,11 @@ func (sg *SpeculativeGenerator[T]) Generate(ctx context.Context, prompt string, 
 
 		if len(generatedIDs) >= sc.MaxNewTokens {
 			break
+		}
+
+		// Record acceptance rate for adaptive draft length.
+		if tracker != nil {
+			tracker.Record(len(accepted), len(draftTokens))
 		}
 
 		// Roll back caches if tokens were rejected.
