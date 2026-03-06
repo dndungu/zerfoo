@@ -115,6 +115,68 @@ func TestCPUEngine_Transpose(t *testing.T) {
 	}
 }
 
+func TestCPUEngine_Transpose4D(t *testing.T) {
+	engine := NewCPUEngine[int](numeric.IntOps{})
+
+	// [B=1, S=2, H=3, D=2] -> axes=[0,2,1,3] -> [B=1, H=3, S=2, D=2]
+	data := []int{
+		// B=0, S=0: H0=[1,2], H1=[3,4], H2=[5,6]
+		1, 2, 3, 4, 5, 6,
+		// B=0, S=1: H0=[7,8], H1=[9,10], H2=[11,12]
+		7, 8, 9, 10, 11, 12,
+	}
+	a, err := tensor.New[int]([]int{1, 2, 3, 2}, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.Transpose(context.Background(), a, []int{0, 2, 1, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedShape := []int{1, 3, 2, 2}
+	if !reflect.DeepEqual(result.Shape(), expectedShape) {
+		t.Errorf("shape: want %v, got %v", expectedShape, result.Shape())
+	}
+
+	// Expected: [B=0, H=0: S0=[1,2], S1=[7,8]; H=1: S0=[3,4], S1=[9,10]; H=2: S0=[5,6], S1=[11,12]]
+	expectedData := []int{1, 2, 7, 8, 3, 4, 9, 10, 5, 6, 11, 12}
+	if !reflect.DeepEqual(result.Data(), expectedData) {
+		t.Errorf("data: want %v, got %v", expectedData, result.Data())
+	}
+
+	// Verify the fast path matches generic path by also testing with float32
+	// (uses same code path) with a larger tensor.
+	f32Engine := NewCPUEngine[float32](numeric.Float32Ops{})
+	f32Data := make([]float32, 2*4*8*16)
+	for i := range f32Data {
+		f32Data[i] = float32(i)
+	}
+	f32Tensor, _ := tensor.New[float32]([]int{2, 4, 8, 16}, f32Data)
+	f32Result, err := f32Engine.Transpose(context.Background(), f32Tensor, []int{0, 2, 1, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify against generic transpose by checking random elements.
+	// In [B,S,H,D] -> [B,H,S,D], element at [b,s,h,d] maps to [b,h,s,d].
+	for b := 0; b < 2; b++ {
+		for s := 0; s < 4; s++ {
+			for h := 0; h < 8; h++ {
+				for d := 0; d < 16; d++ {
+					srcIdx := b*4*8*16 + s*8*16 + h*16 + d
+					dstIdx := b*8*4*16 + h*4*16 + s*16 + d
+					if f32Result.Data()[dstIdx] != f32Data[srcIdx] {
+						t.Fatalf("[%d,%d,%d,%d]: want %f got %f",
+							b, s, h, d, f32Data[srcIdx], f32Result.Data()[dstIdx])
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestCPUEngine_Sum(t *testing.T) {
 	engine := NewCPUEngine[int](numeric.IntOps{})
 	a, _ := tensor.New[int]([]int{2, 3}, []int{1, 2, 3, 4, 5, 6})

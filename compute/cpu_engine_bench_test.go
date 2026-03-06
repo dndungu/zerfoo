@@ -119,6 +119,32 @@ func BenchmarkCPUEngineTranspose(b *testing.B) {
 	}
 }
 
+func BenchmarkCPUEngineTranspose4D(b *testing.B) {
+	ctx := context.Background()
+	e := newEngineF32()
+
+	cases := []struct {
+		name  string
+		shape []int
+	}{
+		{"1x8x128x64", []int{1, 8, 128, 64}},
+		{"1x16x256x64", []int{1, 16, 256, 64}},
+		{"4x8x512x64", []int{4, 8, 512, 64}},
+	}
+
+	for _, tc := range cases {
+		a := allocF32(tc.shape)
+		fillUniform(e, a, -1, 1)
+		b.Run(tc.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				if _, err := e.Transpose(ctx, a, []int{0, 2, 1, 3}); err != nil {
+					b.Fatalf("Transpose4D error: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkCPUEngineSum(b *testing.B) {
 	ctx := context.Background()
 	e := newEngineF32()

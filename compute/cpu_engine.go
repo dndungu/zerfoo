@@ -1040,6 +1040,45 @@ func (e *CPUEngine[T]) Transpose(_ context.Context, a *tensor.TensorNumeric[T], 
 		return result, nil
 	}
 
+	// Fast path for 4D attention transpose (axes=[0,2,1,3]):
+	// Swaps dims 1 and 2, keeping batch (0) and head_dim (3) in place.
+	// This is a batched 2D transpose of (dim1 x dim2) tiles, each element
+	// being a contiguous row of dim3 values.
+	if len(originalShape) == 4 && axes[0] == 0 && axes[1] == 2 && axes[2] == 1 && axes[3] == 3 {
+		B := originalShape[0]
+		dim1 := originalShape[1]
+		dim2 := originalShape[2]
+		D := originalShape[3]
+		batchStride := dim1 * dim2 * D
+		const blockSize = 32
+		parallelFor(B, func(startB, endB int) {
+			for b := startB; b < endB; b++ {
+				bOff := b * batchStride
+				for ib := 0; ib < dim1; ib += blockSize {
+					iEnd := ib + blockSize
+					if iEnd > dim1 {
+						iEnd = dim1
+					}
+					for jb := 0; jb < dim2; jb += blockSize {
+						jEnd := jb + blockSize
+						if jEnd > dim2 {
+							jEnd = dim2
+						}
+						for i := ib; i < iEnd; i++ {
+							srcRow := bOff + i*dim2*D
+							for j := jb; j < jEnd; j++ {
+								srcOff := srcRow + j*D
+								dstOff := bOff + j*dim1*D + i*D
+								copy(rData[dstOff:dstOff+D], aData[srcOff:srcOff+D])
+							}
+						}
+					}
+				}
+			}
+		})
+		return result, nil
+	}
+
 	// Build inverse permutation: invAxes[oldAxis] = newAxisIndex
 	invAxes := make([]int, len(axes))
 	for newAxis, oldAxis := range axes {
