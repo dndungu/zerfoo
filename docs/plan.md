@@ -257,17 +257,14 @@ producing 79,537 allocs/token.
 
 ### E52: NEON Fused Ops (O74)
 
-- [ ] T52.1 Fuse runtime attention transpose  Owner: TBD  Est: 3h
-  - The 8.8% runtime transpose is Q/K transposes in attention.
-  - Option A: Store K in transposed layout in the KV cache, so Q @ K^T
-    becomes Q @ K_stored (no transpose needed).
-  - Option B: Use a transposed-B GEMM variant (sgemmABT) that iterates K
-    columns directly without materializing the transpose.
-  - Choose the option that requires fewer graph builder changes.
-  - Acceptance: Runtime transpose drops to < 2% CPU in profile.
+- [x] T52.1 Eliminate runtime constant transpose  Owner: TBD  Est: 3h
+  - Root cause: 79% CPU was embedding weight transpose [262144,1152] on every forward pass.
+  - Fix: Cache transposed result in Transpose layer when input data pointer unchanged.
+  - Also cached MatMul B-operand transpose and LMHead tied weight transpose.
+  - Result: 3.53 -> 5.42 tok/s. Transpose drops to 0% CPU in profile.
   - Dependencies: E51 (KV cache changes may affect K layout).
 
-- [ ] S52.1.1 Attention transpose elimination benchmark  Owner: TBD  Est: 30m
+- [x] S52.1.1 Attention transpose elimination benchmark  Owner: TBD  Est: 30m
 
 - [ ] T52.2 NEON RMSNorm  Owner: TBD  Est: 2h
   - `compute/fused_rmsnorm.go` uses scalar Go loops.

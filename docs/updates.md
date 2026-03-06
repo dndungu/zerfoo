@@ -67,6 +67,38 @@ longer sequences where absolute position information matters. No performance cos
   the 32 sgemmAccRow calls per Q4 block. The NEON kernel should batch these by
   dequantizing nibbles into float32x4 registers and doing 4-wide FMLA directly.
 
+## 2026-03-06: T52.1 + S52.1.1 -- Constant transpose elimination
+
+**Root cause discovery:** Profiling on DGX Spark showed 79% of CPU time in
+`Transpose.func1` — NOT the 8.8% expected from Phase 28. The culprit was a
+`[262144, 1152]` embedding weight matrix being transposed on EVERY forward pass
+by a graph-level Transpose node. This 302M-element transpose ran 3 times during
+32-token generation, consuming ~24.5s CPU time across cores.
+
+**Why FoldConstantTransposes didn't catch it:** The graph fold optimization only
+handles Transpose nodes whose direct dependency is a `Parameter` or `Constant`
+node. In this model, the embedding weight flows through `MatMul -> Transpose`,
+so the Transpose input is `MatMul` (dynamic), not a constant.
+
+**Fix:** Added data-pointer-based caching to `Transpose.Forward()`. When the same
+input data pointer is seen on consecutive calls, the cached transposed tensor is
+returned directly. This makes ALL constant-input transposes free after the first
+call, regardless of graph structure.
+
+- `a004055` Transpose layer cache (3.53 -> 5.42 tok/s, transpose drops to 0% CPU)
+- `9dc3272` MatMul B-operand cache + LMHead tied weight cache (defensive)
+
+**New profile (post-fix):**
+| Component | % CPU | Notes |
+|-----------|-------|-------|
+| sgemmAccRowNeon (MatMul) | 81.6% | Actual compute |
+| binaryOp (Mul/Add) | 11.4% | Element-wise ops |
+| math.pow (RMSNorm) | 1.4% | Scalar power |
+| Transpose | 0% | ELIMINATED |
+
+**bench_tps tool:** Added `cmd/bench_tps` for quick tok/s measurement on local models.
+Usage: `bench_tps -model ~/models/gemma3-q4 -tokens 64 -mmap`
+
 ## Session Summary -- Phase 29 Progress
 
 | Epic | Status | Notes |
@@ -74,12 +106,12 @@ longer sequences where absolute position information matters. No performance cos
 | E49 | T49.1 done | Scalar q4DotBlock + tests. NEON asm needs DGX Spark. |
 | E50 | COMPLETE | TensorPool wired into Generator. Alloc benchmark ready. |
 | E51 | COMPLETE | KV cache already optimal. RoPE position offset bug fixed. |
-| E52 | Not started | NEON fused ops (RMSNorm, SiLU-gate, transpose). |
+| E52 | T52.1 done | Transpose eliminated (3.53->5.42 tok/s). T52.2-T52.3 pending. |
 | E53 | Not started | DGX Spark benchmark validation. |
 
 ## What needs DGX Spark (ssh ndungu@192.168.86.250)
 
-All remaining work requires ARM64 hardware:
+Remaining ARM64 work:
 
 1. **E49 T49.2-T49.4:** Write `q4dot_arm64.s` NEON assembly. The kernel should:
    - VLD1 16 packed bytes, VAND/USHR for nibble extraction
@@ -87,12 +119,8 @@ All remaining work requires ARM64 hardware:
    - FMLA against activation float32x4 registers
    - Integrate into GemmQ4F32Fused M=1 decode path
 
-2. **E52 T52.1:** Profile to confirm 8.8% transpose is still a bottleneck after
-   E50/E51 optimizations. Option A (K stored transposed in cache) is simplest.
+2. **E52 T52.2-T52.3:** NEON RMSNorm and SiLU-gate assembly files.
 
-3. **E52 T52.2-T52.3:** NEON RMSNorm and SiLU-gate assembly files.
+3. **E53:** End-to-end benchmark with all optimizations enabled.
 
-4. **E53:** End-to-end benchmark with all optimizations enabled.
-
-**RoPE fix (T51.3) may improve tok/s** — the position-0 bug meant decode tokens
-lacked correct positional information. Rerun benchmark before and after to measure.
+**Current baseline: 5.42 tok/s** (up from 3.53). Target: >= 15 tok/s.
