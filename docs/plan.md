@@ -424,7 +424,7 @@ O50: Automated performance regression tracking in CI.
 
 ### E38: Performance CI Dashboard (O50)
 
-- [ ] T38.1 Create benchmark runner script  Owner: TBD  Est: 2h
+- [x] T38.1 Create benchmark runner script  Owner: TBD  Est: 2h  2026-03-05
   - Create `scripts/bench.sh` that runs key benchmarks and outputs JSON:
     - GEMM GFLOPS (128, 512, 1024)
     - Q4 GEMV tok/s equivalent
@@ -434,9 +434,9 @@ O50: Automated performance regression tracking in CI.
   - Acceptance: script runs, produces valid JSON output.
   - Dependencies: none.
 
-- [ ] S38.1.1 Validate benchmark script output  Owner: TBD  Est: 30m
+- [x] S38.1.1 Validate benchmark script output  Owner: TBD  Est: 30m  2026-03-05
 
-- [ ] T38.2 GitHub Actions workflow for benchmarks  Owner: TBD  Est: 2h
+- [x] T38.2 GitHub Actions workflow for benchmarks  Owner: TBD  Est: 2h  2026-03-05
   - Create `.github/workflows/benchmark.yml`.
   - Trigger: on push to main, weekly schedule.
   - Run `scripts/bench.sh` on the CI runner.
@@ -445,9 +445,9 @@ O50: Automated performance regression tracking in CI.
   - Acceptance: workflow runs, stores results, detects regressions.
   - Dependencies: T38.1.
 
-- [ ] S38.2.1 Workflow validation  Owner: TBD  Est: 30m
+- [x] S38.2.1 Workflow validation  Owner: TBD  Est: 30m  2026-03-05
 
-- [ ] T38.3 DGX Spark GPU benchmark integration  Owner: TBD  Est: 2h
+- [x] T38.3 DGX Spark GPU benchmark integration  Owner: TBD  Est: 2h  2026-03-05
   - Add a self-hosted runner label for the DGX Spark.
   - Run GPU benchmarks (CUDA Q4 GEMM, cuBLAS SGEMM) on GPU runner.
   - Report GPU GFLOPS alongside CPU metrics.
@@ -455,9 +455,9 @@ O50: Automated performance regression tracking in CI.
   - Dependencies: T38.2.
   - Risk: Self-hosted runner setup may require admin access.
 
-- [ ] S38.3.1 GPU benchmark validation  Owner: TBD  Est: 30m
+- [x] S38.3.1 GPU benchmark validation  Owner: TBD  Est: 30m  2026-03-05
 
-- [ ] T38.4 Run golangci-lint on scripts/  Owner: TBD  Est: 15m
+- [x] T38.4 Run golangci-lint on scripts/  Owner: TBD  Est: 15m  2026-03-05
 
 ---
 
