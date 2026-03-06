@@ -1676,6 +1676,29 @@ func (e *CPUEngine[T]) tryQuantizedMatMul(
 		}
 		return true
 	default:
+		// Not handled on A; fall through to check B.
+	}
+
+	// Check B for Q4 storage. This handles the case where a graph-level
+	// Transpose node passes through Q4 storage with shape [K,N] but
+	// data in [N,K] layout. GemmF32Q4NT reads the Q4 blocks directly
+	// from the original [N,K] weight layout.
+	storB := b.GetStorage()
+	switch qsB := any(storB).(type) {
+	case *tensor.Q4Storage:
+		aF := any(a.Data()).([]float32)
+		rF := any(result.Data()).([]float32)
+		if batchSize == 1 {
+			xblas.GemmF32Q4NT(m, n, k, aF, qsB, rF)
+		} else {
+			for i := range batchSize {
+				aOff := i * m * k
+				cOff := i * m * n
+				xblas.GemmF32Q4NT(m, n, k, aF[aOff:aOff+m*k], qsB, rF[cOff:cOff+m*n])
+			}
+		}
+		return true
+	default:
 		return false
 	}
 }
