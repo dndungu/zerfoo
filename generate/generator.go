@@ -68,8 +68,9 @@ type Generator[T tensor.Numeric] struct {
 	tokenizer tokenizer.Tokenizer
 	engine    compute.Engine[T]
 	config    ModelConfig
-	blockPool *BlockPool[T] // nil when using pre-allocated KV cache
-	headDim   int           // per-head dim for paged KV
+	pool      *compute.TensorPool[T] // reusable intermediate buffers
+	blockPool *BlockPool[T]          // nil when using pre-allocated KV cache
+	headDim   int                    // per-head dim for paged KV
 }
 
 // NewGenerator creates a Generator from a model graph, tokenizer, engine, and config.
@@ -90,6 +91,11 @@ func NewGenerator[T tensor.Numeric](
 		tokenizer: tok,
 		engine:    eng,
 		config:    cfg,
+	}
+
+	if g != nil {
+		gen.pool = compute.NewTensorPool[T]()
+		g.WithPool(gen.pool)
 	}
 
 	if gopts.pagedKVMaxMB > 0 && gopts.headDim > 0 {

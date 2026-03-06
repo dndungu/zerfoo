@@ -969,6 +969,64 @@ func TestGenerate_WithPagedKV_MaxTokens(t *testing.T) {
 	}
 }
 
+func TestNewGenerator_PoolWiring(t *testing.T) {
+	t.Run("nil graph skips pool", func(t *testing.T) {
+		gen := NewGenerator[float32](nil, nil, nil, ModelConfig{
+			NumLayers: 2,
+			MaxSeqLen: 32,
+		})
+		if gen.pool != nil {
+			t.Error("expected nil pool when graph is nil")
+		}
+	})
+
+	t.Run("non-nil graph creates pool", func(t *testing.T) {
+		g := buildTestGraph(t, 8, []int{6, 2})
+		gen := NewGenerator[float32](g, nil, nil, ModelConfig{
+			NumLayers: 2,
+			MaxSeqLen: 32,
+		})
+		if gen.pool == nil {
+			t.Error("expected non-nil pool when graph is provided")
+		}
+	})
+}
+
+func TestGenerate_WithPoolCorrectness(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Generate 5 tokens then EOS -- enough decode steps to verify pool doesn't break output.
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 6, 7, 6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	if gen.pool == nil {
+		t.Fatal("expected pool to be wired when graph is non-nil")
+	}
+
+	result, err := gen.Generate(context.Background(), "hello world", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// Correctness: output should be unchanged by pool.
+	if result != "foo bar foo bar foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo bar foo bar foo")
+	}
+}
+
 func TestNewGenerator_WithPagedKV_InvalidParams(t *testing.T) {
 	// Zero headDim should fall back to regular KV cache.
 	gen := NewGenerator[float32](nil, nil, nil, ModelConfig{
