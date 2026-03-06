@@ -230,7 +230,7 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 	seqLen := input.Shape()[1]
 
 	// Check for KV cache in context.
-	cache, hasCache := generate.GetKVCache[T](ctx)
+	cache, hasCache := generate.GetCache[T](ctx)
 
 	// 1. Linear projections for Q, K, V
 	qProj, err := gqa.wq.Forward(ctx, input)
