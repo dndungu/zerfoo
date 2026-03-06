@@ -16,7 +16,7 @@ type RMSNorm[T tensor.Numeric] struct {
 	engine  compute.Engine[T]
 	ops     numeric.Arithmetic[T]
 	epsilon T
-	gain    *graph.Parameter[T] // Learnable gain parameter
+	gain *graph.Parameter[T] // Learnable gain parameter
 
 	// Cache for backward pass
 	inputTensor *tensor.TensorNumeric[T]
@@ -50,6 +50,7 @@ func WithRMSNormEpsilon[T tensor.Numeric](epsilon T) RMSNormOption[T] {
 		opts.Epsilon = epsilon
 	}
 }
+
 
 // NewRMSNorm creates a new RMSNorm layer.
 func NewRMSNorm[T tensor.Numeric](name string, engine compute.Engine[T], ops numeric.Arithmetic[T], modelDim int, options ...RMSNormOption[T]) (*RMSNorm[T], error) {
@@ -115,6 +116,23 @@ func (r *RMSNorm[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeri
 	r.inputTensor = input // Cache for backward pass
 	r.outputShape = input.Shape()
 
+	// Use fused single-pass kernel for float32 on CPUEngine (inference hot path).
+	if _, isCPU := r.engine.(*compute.CPUEngine[T]); isCPU {
+		if f32Input, ok := any(input).(*tensor.TensorNumeric[float32]); ok {
+			f32Weight, wOk := any(r.gain.Value).(*tensor.TensorNumeric[float32])
+			f32Eps, eOk := any(r.epsilon).(float32)
+			if wOk && eOk && f32Weight.Size() == f32Input.Shape()[len(f32Input.Shape())-1] {
+				out, scales, err := compute.FusedRMSNorm(f32Input, f32Weight, f32Eps)
+				if err != nil {
+					return nil, err
+				}
+				r.rms = any(scales).(*tensor.TensorNumeric[T])
+				return any(out).(*tensor.TensorNumeric[T]), nil
+			}
+		}
+	}
+
+	// Fallback: multi-step path for non-float32 types or when fused is disabled.
 	// Calculate sum of squares along the last dimension
 	squared, err := r.engine.Mul(ctx, input, input, nil)
 	if err != nil {

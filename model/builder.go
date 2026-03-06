@@ -443,7 +443,14 @@ func BuildFromZMF[T tensor.Numeric](
 		}
 	}
 
-	return builder.Build(outputNode)
+	built, err := builder.Build(outputNode)
+	if err != nil {
+		return nil, err
+	}
+
+	// Optimization: fold Transpose nodes with constant inputs at load time.
+	// This pre-applies weight transposes so they don't run on every forward pass.
+	return graph.FoldConstantTransposes(built, engine)
 }
 
 // maskFromInputNode generates an all-ones attention mask from input_ids shape.

@@ -1,0 +1,108 @@
+name: benchmark
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # weekly Monday 6am UTC
+  workflow_dispatch:
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          check-latest: true
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-bench-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-bench-
+      - name: Run benchmarks
+        run: ./scripts/bench.sh > bench-results.json 2>bench-stderr.txt || true
+      - name: Show results
+        run: cat bench-results.json
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: |
+            bench-results.json
+            bench-stderr.txt
+          retention-days: 90
+      - name: Download previous results
+        id: prev
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-previous
+          path: prev/
+        continue-on-error: true
+      - name: Check for regressions
+        if: steps.prev.outcome == 'success'
+        run: |
+          python3 -c "
+          import json, sys
+          prev = {r['metric']: r['value'] for r in (json.loads(l) for l in open('prev/bench-results.json') if l.strip())}
+          curr = {r['metric']: r['value'] for r in (json.loads(l) for l in open('bench-results.json') if l.strip())}
+          regressions = []
+          for m, cv in curr.items():
+              pv = prev.get(m)
+              if pv and pv > 0:
+                  change = (cv - pv) / pv * 100
+                  direction = 'higher' if change > 0 else 'lower'
+                  if abs(change) > 5:
+                      regressions.append(f'{m}: {pv:.2f} -> {cv:.2f} ({change:+.1f}% {direction})')
+          if regressions:
+              print('Benchmark regressions detected (>5% change):')
+              for r in regressions:
+                  print(f'  - {r}')
+              sys.exit(1)
+          else:
+              print('No significant regressions detected.')
+          "
+      - name: Save as previous baseline
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-previous
+          path: bench-results.json
+          overwrite: true
+          retention-days: 90
+  bench-gpu:
+    runs-on: [self-hosted, dgx-spark]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run GPU benchmarks
+        env:
+          PATH: /usr/local/cuda/bin:/usr/local/go/bin:${{ env.PATH }}
+          CGO_CFLAGS: -I/usr/local/cuda/include
+          CGO_LDFLAGS: -L/usr/local/cuda/lib64
+        run: |
+          go test -tags cuda -bench='BenchmarkGemmQ4F32_1024' -benchmem -count=1 -run='^$' \
+              -timeout 300s ./internal/cuda/kernels/ 2>&1 | \
+          awk '/BenchmarkGemmQ4F32_1024/ {
+              for (i=1; i<=NF; i++) {
+                  if ($(i+1) == "ns/op") ns=$i
+              }
+          } END {
+              if (ns) {
+                  flops = 2 * 1024 * 1024 * 1024
+                  gflops = flops / (ns * 1e-9) / 1e9
+                  printf "{\"metric\": \"cuda_q4_gemm_gflops_1024\", \"value\": %.2f, \"unit\": \"GFLOPS\"}\n", gflops
+              }
+          }' > gpu-bench-results.json
+          cat gpu-bench-results.json
+      - name: Upload GPU benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-benchmark-results-${{ github.sha }}
+          path: gpu-bench-results.json
+          retention-days: 90

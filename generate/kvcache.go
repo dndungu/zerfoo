@@ -160,3 +160,13 @@ func (c *KVCache[T]) Reset() {
 		c.layers[i].cursor = 0
 	}
 }
+
+// Truncate rolls back the cache to the given sequence length.
+// If newSeqLen >= current SeqLen, this is a no-op.
+func (c *KVCache[T]) Truncate(newSeqLen int) {
+	for i := range c.layers {
+		if c.layers[i].cursor > newSeqLen {
+			c.layers[i].cursor = newSeqLen
+		}
+	}
+}

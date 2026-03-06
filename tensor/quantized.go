@@ -2,6 +2,7 @@ package tensor
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/zerfoo/float16"
@@ -144,6 +145,28 @@ func (q *Q4Storage) BlockData(i int) *byte {
 	return &q.blocks[i].data[0]
 }
 
+// NewQ4StorageFromRaw creates Q4Storage from raw block data in the standard
+// Q4_0 format: 18 bytes per block (2 bytes float16 scale LE + 16 bytes packed nibbles).
+// numElements is the number of logical float32 elements the data represents.
+func NewQ4StorageFromRaw(raw []byte, numElements int) (*Q4Storage, error) {
+	if numElements <= 0 {
+		return nil, fmt.Errorf("numElements must be positive, got %d", numElements)
+	}
+	nBlocks := (numElements + q4BlockSize - 1) / q4BlockSize
+	const blockBytes = 18
+	if len(raw) < nBlocks*blockBytes {
+		return nil, fmt.Errorf("Q4_0 raw data too short: need %d bytes for %d blocks, got %d", nBlocks*blockBytes, nBlocks, len(raw))
+	}
+
+	blocks := make([]q4Block, nBlocks)
+	for i := range nBlocks {
+		off := i * blockBytes
+		blocks[i].scale = float16.FromBits(binary.LittleEndian.Uint16(raw[off : off+2]))
+		copy(blocks[i].data[:], raw[off+2:off+blockBytes])
+	}
+	return &Q4Storage{blocks: blocks, len: numElements}, nil
+}
+
 // Ensure Q4Storage implements Storage[float32].
 var _ Storage[float32] = (*Q4Storage)(nil)
 
@@ -243,6 +266,39 @@ func (q *Q8Storage) Set(_ []float32) { panic("Q8Storage is immutable") }
 
 // DeviceType returns device.CPU.
 func (q *Q8Storage) DeviceType() device.Type { return device.CPU }
+
+// BlockScale returns the float32 scale for block i.
+func (q *Q8Storage) BlockScale(i int) float32 {
+	return q.blocks[i].scale
+}
+
+// BlockQuants returns the int8 quantized values for block i.
+func (q *Q8Storage) BlockQuants(i int) []int8 {
+	return q.blocks[i].data[:]
+}
+
+// NewQ8StorageFromBlocks creates Q8Storage from pre-decoded block data.
+// scales has one entry per block. quants has 32 int8 values per block (flattened).
+// numElements is the number of logical float32 elements.
+func NewQ8StorageFromBlocks(scales []float32, quants []int8, numElements int) (*Q8Storage, error) {
+	if numElements <= 0 {
+		return nil, fmt.Errorf("numElements must be positive, got %d", numElements)
+	}
+	nBlocks := (numElements + q8BlockSize - 1) / q8BlockSize
+	if len(scales) != nBlocks {
+		return nil, fmt.Errorf("expected %d scales for %d elements, got %d", nBlocks, numElements, len(scales))
+	}
+	if len(quants) != nBlocks*q8BlockSize {
+		return nil, fmt.Errorf("expected %d quants for %d blocks, got %d", nBlocks*q8BlockSize, nBlocks, len(quants))
+	}
+
+	blocks := make([]q8Block, nBlocks)
+	for i := range nBlocks {
+		blocks[i].scale = scales[i]
+		copy(blocks[i].data[:], quants[i*q8BlockSize:(i+1)*q8BlockSize])
+	}
+	return &Q8Storage{blocks: blocks, len: numElements}, nil
+}
 
 // Ensure Q8Storage implements Storage[float32].
 var _ Storage[float32] = (*Q8Storage)(nil)

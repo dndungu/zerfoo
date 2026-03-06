@@ -7,12 +7,12 @@ import (
 	"github.com/zerfoo/zerfoo/device"
 )
 
-func TestQuantizeQ4_RoundTrip(t *testing.T) {
+func TestQuantizeQ4_RoundTrip(t *testing.T) { //nolint:dupl // Q4 and Q8 round-trip tests are structurally similar but differ in tolerance and quantizer.
 	tests := []struct {
-		name      string
-		input     []float32
-		maxErr    float32
-		wantLen   int
+		name    string
+		input   []float32
+		maxErr  float32
+		wantLen int
 	}{
 		{
 			name:    "32 values in [-1,1]",
@@ -145,6 +145,53 @@ func TestQ4Storage_BlockCount(t *testing.T) {
 		if q.NumBlocks() != tt.wantBlocks {
 			t.Errorf("n=%d: NumBlocks() = %d, want %d", tt.n, q.NumBlocks(), tt.wantBlocks)
 		}
+	}
+}
+
+func TestNewQ4StorageFromRaw(t *testing.T) {
+	// Quantize known data, serialize to raw bytes, reconstruct, and verify.
+	input := linspace(-1, 1, 64) // 2 blocks
+	orig := QuantizeQ4(input)
+	raw := orig.RawBytes()
+
+	got, err := NewQ4StorageFromRaw(raw, 64)
+	if err != nil {
+		t.Fatalf("NewQ4StorageFromRaw: %v", err)
+	}
+	if got.Len() != 64 {
+		t.Fatalf("Len() = %d, want 64", got.Len())
+	}
+	if got.NumBlocks() != 2 {
+		t.Fatalf("NumBlocks() = %d, want 2", got.NumBlocks())
+	}
+
+	// Dequantize and compare with original.
+	origSlice := orig.Slice()
+	gotSlice := got.Slice()
+	for i := range origSlice {
+		if origSlice[i] != gotSlice[i] {
+			t.Errorf("index %d: got %v, want %v", i, gotSlice[i], origSlice[i])
+		}
+	}
+}
+
+func TestNewQ4StorageFromRaw_Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+		n    int
+	}{
+		{"too short", make([]byte, 17), 32},
+		{"zero elements", nil, 0},
+		{"negative elements", nil, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewQ4StorageFromRaw(tt.raw, tt.n)
+			if err == nil {
+				t.Error("expected error")
+			}
+		})
 	}
 }
 

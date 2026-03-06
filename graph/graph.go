@@ -11,6 +11,11 @@ import (
 	"github.com/zerfoo/zerfoo/types"
 )
 
+// TensorReleaser can release tensors back to a pool for reuse.
+type TensorReleaser[T tensor.Numeric] interface {
+	Release(t *tensor.TensorNumeric[T])
+}
+
 // Graph represents a computation graph with a defined execution order.
 type Graph[T tensor.Numeric] struct {
 	mu           sync.Mutex
@@ -21,6 +26,7 @@ type Graph[T tensor.Numeric] struct {
 	output       Node[T]
 	memo         map[Node[T]]*tensor.TensorNumeric[T]
 	parallel     bool
+	pool         TensorReleaser[T]
 }
 
 // WithParallel enables or disables parallel execution of independent nodes.
@@ -30,6 +36,15 @@ func (g *Graph[T]) WithParallel(enabled bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.parallel = enabled
+}
+
+// WithPool sets a tensor pool for intermediate buffer reuse during Forward.
+// When set, the executor releases intermediate tensors back to the pool as
+// soon as all their consumers have executed.
+func (g *Graph[T]) WithPool(pool TensorReleaser[T]) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pool = pool
 }
 
 // Forward executes the forward pass of the entire graph.
@@ -50,6 +65,28 @@ func (g *Graph[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[
 	g.memo = make(map[Node[T]]*tensor.TensorNumeric[T])
 	for i, n := range g.inputs {
 		g.memo[n] = inputs[i]
+	}
+
+	// Build reference counts for pool-based intermediate release.
+	var refCount map[Node[T]]int
+	if g.pool != nil {
+		refCount = make(map[Node[T]]int, len(g.nodes))
+		for _, n := range g.nodes {
+			for _, dep := range g.dependencies[n] {
+				refCount[dep]++
+			}
+		}
+		// Protect input and output nodes from release.
+		for _, n := range g.inputs {
+			refCount[n] = -1 // sentinel: never release
+		}
+		refCount[g.output] = -1
+		// Protect parameter/constant nodes (they hold model weights).
+		for _, n := range g.nodes {
+			if isConstantNode[T](n) {
+				refCount[n] = -1
+			}
+		}
 	}
 
 	for nodeIdx, n := range g.nodes {
@@ -77,6 +114,24 @@ func (g *Graph[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[
 		}
 
 		g.memo[n] = output
+
+		// Release intermediate tensors whose consumers are all done.
+		if refCount != nil {
+			for _, dep := range g.dependencies[n] {
+				rc := refCount[dep]
+				if rc < 0 {
+					continue // protected node
+				}
+				rc--
+				refCount[dep] = rc
+				if rc == 0 {
+					if t := g.memo[dep]; t != nil {
+						g.pool.Release(t)
+						delete(g.memo, dep)
+					}
+				}
+			}
+		}
 	}
 
 	return g.memo[g.output], nil
