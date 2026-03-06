@@ -4,6 +4,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"unsafe"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -15,6 +16,12 @@ import (
 type MatMul[T tensor.Numeric] struct {
 	engine      compute.Engine[T]
 	outputShape []int
+
+	// cachedBTranspose caches the transposed B operand when B requires
+	// transposition (constant weight case). Set on first Forward call
+	// and reused on subsequent calls to avoid transposing every time.
+	cachedBTranspose *tensor.TensorNumeric[T]
+	cachedBPtr       uintptr // data pointer of the B tensor that was transposed
 }
 
 // NewMatMul creates a new MatMul layer.
@@ -53,7 +60,7 @@ func (m *MatMul[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 	if aShape[len(aShape)-1] != bShape[len(bShape)-2] {
 		// Check if this is a case where b needs to be transposed (2D only).
 		if len(bShape) == 2 && aShape[len(aShape)-1] == bShape[1] {
-			bTransposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
+			bTransposed, err := m.getCachedTranspose(ctx, b)
 			if err != nil {
 				return nil, fmt.Errorf("failed to transpose second operand: %w", err)
 			}
@@ -78,6 +85,23 @@ func (m *MatMul[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 	m.outputShape = result.Shape()
 
 	return result, nil
+}
+
+// getCachedTranspose returns the transposed B matrix, caching it for reuse
+// when the same B tensor (identified by data pointer) is passed on subsequent calls.
+// This avoids re-transposing constant weight matrices on every forward pass.
+func (m *MatMul[T]) getCachedTranspose(ctx context.Context, b *tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	bPtr := uintptr(unsafe.Pointer(&b.Data()[0]))
+	if m.cachedBTranspose != nil && m.cachedBPtr == bPtr {
+		return m.cachedBTranspose, nil
+	}
+	transposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
+	if err != nil {
+		return nil, err
+	}
+	m.cachedBTranspose = transposed
+	m.cachedBPtr = bPtr
+	return transposed, nil
 }
 
 // Backward computes the gradients for the MatMul layer.
