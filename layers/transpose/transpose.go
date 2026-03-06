@@ -3,6 +3,7 @@ package transpose
 
 import (
 	"context"
+	"unsafe"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -15,6 +16,11 @@ type Transpose[T tensor.Numeric] struct {
 	engine      compute.Engine[T]
 	perm        []int
 	outputShape []int
+
+	// Cache for constant inputs: when the same input data pointer is seen
+	// on consecutive calls, return the cached result instead of re-transposing.
+	cachedResult *tensor.TensorNumeric[T]
+	cachedInPtr  uintptr
 }
 
 // OpType returns the operation type.
@@ -69,10 +75,22 @@ func (t *Transpose[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNume
 
 	t.outputShape = outputShape
 
-	// Transpose the input tensor
-	transposed, err := t.engine.Transpose(ctx, inputs[0], perm)
+	// Cache hit: if input data pointer matches the previous call, return cached result.
+	data := input.Data()
+	inPtr := uintptr(unsafe.Pointer(&data[0]))
+	if t.cachedResult != nil && t.cachedInPtr == inPtr {
+		return t.cachedResult, nil
+	}
 
-	return transposed, err
+	// Transpose the input tensor.
+	transposed, err := t.engine.Transpose(ctx, input, perm)
+	if err != nil {
+		return nil, err
+	}
+
+	t.cachedResult = transposed
+	t.cachedInPtr = inPtr
+	return transposed, nil
 }
 
 // Backward computes the gradients for the Transpose layer.
