@@ -114,7 +114,7 @@ TEXT ·q4DotRowSIMD(SB), NOSPLIT, $0-28
 row_loop:
 	// Load float16 scale from block [R0], convert to float32.
 	WORD	$0x7C400007				// LDR H7, [X0]
-	WORD	$0x1E22E0E7				// FCVT S7, H7
+	WORD	$0x1EE240E7				// FCVT S7, H7
 
 	// Load 16 packed bytes from block [R0+2].
 	ADD	$2, R0, R5
