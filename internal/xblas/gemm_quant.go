@@ -68,6 +68,43 @@ func GemmQ4F32Fused(m, n, k int, a *tensor.Q4Storage, b, c []float32) {
 	}
 }
 
+// GemmF32Q4NT computes C = A * B^T where A is float32 [M,K] and B is Q4_0 [N,K].
+// B is stored in row-major Q4 format: each row j of B (length K) is contiguous
+// in Q4 blocks. The "NT" suffix means B is Not Transposed — the caller passes B
+// in its original [N,K] layout and this function computes the transpose implicitly.
+// K must be a multiple of 32. Falls back to dequant+transpose+SGEMM otherwise.
+func GemmF32Q4NT(m, n, k int, a []float32, b *tensor.Q4Storage, c []float32) {
+	if k%32 != 0 {
+		// Fallback: dequant, transpose, regular SGEMM.
+		bF32 := make([]float32, n*k)
+		b.Dequantize(bF32)
+		bT := make([]float32, k*n)
+		for r := range n {
+			for col := range k {
+				bT[col*n+r] = bF32[r*k+col]
+			}
+		}
+		SgemmSimd(m, n, k, a, bT, c)
+		return
+	}
+
+	blocksPerRow := k / 32
+
+	// For each row i of A and each row j of B, compute C[i,j] = dot(A[i,:], B[j,:]).
+	// B[j,:] is contiguous in Q4 format starting at block j*blocksPerRow.
+	for i := range m {
+		aRow := a[i*k:]
+		for j := range n {
+			var sum float32
+			blkBase := j * blocksPerRow
+			for bi := range blocksPerRow {
+				sum += q4DotBlock(b.BlockData(blkBase+bi), b.BlockScaleF32(blkBase+bi), &aRow[bi*32], 32)
+			}
+			c[i*n+j] = sum
+		}
+	}
+}
+
 // dequantQ4Block unpacks 16 packed bytes into 32 float32 values.
 func dequantQ4Block(data *byte, scale float32, buf *[32]float32) {
 	packed := unsafe.Slice(data, 16)
