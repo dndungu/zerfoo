@@ -99,6 +99,19 @@ call, regardless of graph structure.
 **bench_tps tool:** Added `cmd/bench_tps` for quick tok/s measurement on local models.
 Usage: `bench_tps -model ~/models/gemma3-q4 -tokens 64 -mmap`
 
+## CRITICAL FINDING: ZMF Q4 weights dequantized at load time
+
+The ZMF loader (`model/tensor_decoder.go:235-240`) dequantizes Q4_0 weights to
+full float32 at load time via `decodeQ4Blocks`. This means:
+
+1. **4x memory waste:** Q4 model uses same RAM as F32 (weights expanded to float32)
+2. **No Q4 GEMM benefit:** MatMul runs `sgemmAccRowNeon` on full f32, not `GemmQ4F32Fused`
+3. **E49 is blocked:** NEON Q4 dot product can't help until inference keeps Q4 format
+
+**Required fix (new work item):** Change `DecodeTensor` to return Q4-backed tensors
+(`tensor.Q4Storage`) and wire them through `MatMulNBits` or `GemmQ4F32Fused` in the
+graph builder. This is prerequisite to the 4x target.
+
 ## Session Summary -- Phase 29 Progress
 
 | Epic | Status | Notes |
