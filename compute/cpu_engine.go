@@ -15,6 +15,7 @@ import (
 
 	float16 "github.com/zerfoo/float16"
 	float8 "github.com/zerfoo/float8"
+	"github.com/zerfoo/zerfoo/internal/workerpool"
 	"github.com/zerfoo/zerfoo/internal/xblas"
 	"github.com/zerfoo/zerfoo/log"
 	metrics "github.com/zerfoo/zerfoo/metrics/runtime"
@@ -28,6 +29,7 @@ type CPUEngine[T tensor.Numeric] struct {
 	logger     log.Logger
 	collector  metrics.Collector
 	memTracker *MemoryTracker
+	pool       *workerpool.Pool
 }
 
 // Default histogram buckets for operation duration (seconds).
@@ -52,6 +54,9 @@ func (e *CPUEngine[T]) TanhPrime(ctx context.Context, a, upstream *tensor.Tensor
 	}, dst...)
 }
 
+// computePool is the shared worker pool for parallelFor. Set by NewCPUEngine.
+var computePool *workerpool.Pool
+
 // parallelFor splits [0,total) into chunks and runs fn(start,end) across workers.
 // It avoids goroutine overhead for small ranges.
 func parallelFor(total int, fn func(start, end int)) {
@@ -73,6 +78,20 @@ func parallelFor(total int, fn func(start, end int)) {
 		workers = 1
 	}
 	chunk := (total + workers - 1) / workers
+	if computePool != nil {
+		tasks := make([]func(), 0, workers)
+		for start := 0; start < total; start += chunk {
+			end := start + chunk
+			if end > total {
+				end = total
+			}
+			tasks = append(tasks, func() {
+				fn(start, end)
+			})
+		}
+		computePool.Submit(tasks)
+		return
+	}
 	var wg sync.WaitGroup
 	for start := 0; start < total; start += chunk {
 		end := start + chunk
@@ -80,10 +99,10 @@ func parallelFor(total int, fn func(start, end int)) {
 			end = total
 		}
 		wg.Add(1)
-		go func(s, e int) {
+		go func() {
 			defer wg.Done()
-			fn(s, e)
-		}(start, end)
+			fn(start, end)
+		}()
 	}
 	wg.Wait()
 }
@@ -117,6 +136,26 @@ func parallelForCtx(ctx context.Context, total int, fn func(start, end int)) err
 	}
 	chunk := (total + workers - 1) / workers
 
+	if computePool != nil {
+		tasks := make([]func(), 0, workers)
+		for start := 0; start < total; start += chunk {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			end := start + chunk
+			if end > total {
+				end = total
+			}
+			tasks = append(tasks, func() {
+				fn(start, end)
+			})
+		}
+		computePool.Submit(tasks)
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	canceled := false
 
@@ -137,10 +176,10 @@ func parallelForCtx(ctx context.Context, total int, fn func(start, end int)) err
 			end = total
 		}
 		wg.Add(1)
-		go func(s, e int) {
+		go func() {
 			defer wg.Done()
-			fn(s, e)
-		}(start, end)
+			fn(start, end)
+		}()
 	}
 	wg.Wait()
 
@@ -357,13 +396,19 @@ func (e *CPUEngine[T]) MulScalar(_ context.Context, a *tensor.TensorNumeric[T], 
 // NewCPUEngine constructs a new CPUEngine for the given numeric operations.
 // A no-op logger and no-op collector are used by default; call SetLogger/SetCollector to override.
 func NewCPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T]) *CPUEngine[T] {
+	n := runtime.NumCPU()
+	pool := workerpool.New(n)
+	computePool = pool
+	xblas.InitPool(n)
 	return &CPUEngine[T]{
 		ops:        ops,
 		logger:     log.Nop(),
 		collector:  metrics.Nop(),
 		memTracker: NewMemoryTracker(0),
+		pool:       pool,
 	}
 }
+
 
 // SetLogger replaces the engine's logger.
 func (e *CPUEngine[T]) SetLogger(l log.Logger) {
@@ -393,7 +438,15 @@ func (e *CPUEngine[T]) MemoryTracker() *MemoryTracker {
 }
 
 // Close is a no-op for CPUEngine. It satisfies the shutdown.Closer interface.
-func (e *CPUEngine[T]) Close(_ context.Context) error { return nil }
+func (e *CPUEngine[T]) Close(_ context.Context) error {
+	if e.pool != nil {
+		e.pool.Close()
+		e.pool = nil
+	}
+	xblas.ShutdownPool()
+	computePool = nil
+	return nil
+}
 
 // Ops returns the arithmetic ops for this engine.
 func (e *CPUEngine[T]) Ops() numeric.Arithmetic[T] { return e.ops }
