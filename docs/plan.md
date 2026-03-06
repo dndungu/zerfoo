@@ -239,10 +239,10 @@ producing 79,537 allocs/token.
     See docs/updates.md T51.1 audit findings.
   - Dependencies: T51.1.
 
-- [ ] S51.2.1 Decode parity test  Owner: TBD  Est: 1h
+- [x] S51.2.1 Decode parity test  Owner: TBD  Est: 1h
   - Generate 10 tokens. Verify token-for-token identical output to baseline.
 
-- [ ] T51.3 Incremental RoPE for decode  Owner: TBD  Est: 2h
+- [x] T51.3 Incremental RoPE for decode  Owner: TBD  Est: 2h
   - During decode, apply RoPE only to the new token's Q/K at the correct
     position index (seq_len so far), not recompute for full sequence.
   - The fused RoPE in `compute/fused_rope.go` takes a position offset.
@@ -251,9 +251,9 @@ producing 79,537 allocs/token.
     position.
   - Dependencies: T51.2.
 
-- [ ] S51.3.1 Incremental RoPE correctness test  Owner: TBD  Est: 30m
+- [x] S51.3.1 Incremental RoPE correctness test  Owner: TBD  Est: 30m
 
-- [ ] T51.4 Run golangci-lint on inference/ and generate/  Owner: TBD  Est: 15m
+- [x] T51.4 Run golangci-lint on inference/ and generate/  Owner: TBD  Est: 15m
 
 ### E52: NEON Fused Ops (O74)
 

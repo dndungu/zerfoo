@@ -33,3 +33,21 @@
 
 **Decision:** T51.2 (optimize decode graph path) can be marked "already optimized" for
 Q/K/V projection and KV cache. The only actionable optimization is T51.3 (RoPE fix).
+
+## 2026-03-06: T51.3 + S51.3.1 -- RoPE position offset fix
+
+**Bug fixed:** During decode, RoPE always used position 0 for all generated tokens.
+
+**Fix:**
+- `502986d` Added `SetPositionOffset(offset int)` to `RotaryPositionalEmbedding`.
+  Both fused and unfused paths now slice cos/sin from `[offset:offset+seqLen]`.
+  Test verifies single-position-with-offset matches full-sequence RoPE at that position.
+- `559b7e4` In `GroupedQueryAttention.Forward`, before applying RoPE, set offset to
+  `cache.SeqLen()` (the number of tokens already cached). During prefill, offset=0
+  (no cache yet). During decode step N, offset=prefillLen+N-1.
+
+**Impact:** This correctness fix should improve generation quality especially for
+longer sequences where absolute position information matters. No performance cost
+(offset is a simple integer stored on the RoPE struct).
+
+## E51 COMPLETE -- KV cache decode already optimal + RoPE bug fixed
