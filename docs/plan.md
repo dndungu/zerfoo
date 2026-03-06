@@ -1,88 +1,96 @@
-# Zerfoo Development Plan -- Phase 28: Make It Actually Work
+# Zerfoo Development Plan -- Phase 29: 4x CPU Throughput
 
 ## 1. Context
 
 ### Problem Statement
 
-The README promises a 3-line experience:
+Phase 28 DGX Spark benchmarks measured 3.80 tok/s for Gemma 3 2B Q4_0 on
+ARM64 CPU (GB10, 20 cores). The target is >= 15 tok/s (4x improvement).
+GPU inference is out of scope -- this phase is CPU-only optimization.
 
-```go
-model, _ := inference.Load("gemma-3-1b-q4")
-reply, _ := model.Generate(ctx, "What is the capital of France?")
-fmt.Println(reply)
-```
+See docs/design.md for full architecture context and Phases 1-28 history.
 
-This does not work today. A developer who follows the README will hit failures
-immediately. The gap between promise and reality is the single biggest barrier
-to adoption.
+### Profile Breakdown (Phase 28, DGX Spark GB10, Gemma 3 2B Q4_0)
 
-See docs/design.md for full architecture context and Phases 1-27 history.
+| Component | % CPU | Notes |
+|-----------|-------|-------|
+| MatMul (NEON GEMM) | 19.6% | sgemmAccRowNeon |
+| Runtime Transpose | 8.8% | Dynamic Q/K transposes in attention |
+| GC + memclr | 6.9% | 79,537 allocs/token, 39.4 GB/op |
+| Element-wise ops | 3.5% | Add, Mul, Pow (binaryOp) |
+| Q4 dequantize | 3.1% | decodeQ4Blocks at load time |
+| Other | ~58% | Parallelization overhead, scheduling |
 
-### Audit of README Promises vs Implementation
+The three highest-impact opportunities are:
+1. **Q4 NEON dot product** -- `GemmQ4F32Fused` in `internal/xblas/gemm_quant.go`
+   already does per-block dequant into a stack buffer, then calls `sgemmAccRow`.
+   A true NEON kernel would extract nibbles and FMA directly in SIMD registers,
+   avoiding even the per-block scalar dequant. (See docs/adr/020-q4-quantized-dot-product.md)
+2. **TensorPool wiring in generate loop** -- `graph.Forward` already has pool
+   support (`WithPool()`, ref-counting, `Release`). But `generate/generator.go`
+   never creates or attaches a `compute.TensorPool`. Wiring it eliminates most
+   of the 79K allocs/token.
+3. **KV cache optimization** -- The generate loop already passes single tokens
+   in decode mode (`gen.graph.Forward(genCtx, tokenTensor)` with `[]int{nextToken}`).
+   The graph builders may still project Q/K/V for the full sequence. Optimize
+   to only project the new token.
 
-| Promise | Status | Blocker |
-|---------|--------|---------|
-| `inference.Load("gemma-3-1b-q4")` auto-downloads | Fails -- default registry has no pull function | E45 |
-| GGUF models load and run | Parser only -- no graph builder | E44 |
-| Chat works with all listed models | Only Gemma template, others get broken fallback | E46 |
-| Q4 quantization | Only Q4_0/Q8_0 -- most HuggingFace GGUFs use Q4_K_M | E47 |
-| `zerfoo run` / `zerfoo serve` | Code exists but blocked by all of the above | All |
+### Existing Code Inventory
 
-### Phase 27 Summary
-
-| Epic | Status | Result |
-|------|--------|--------|
-| E39: Transpose Elimination | Kernel complete, benchmark pending | FoldConstantTransposes + blocked 4D transpose |
-| E40: Tensor Arena | Kernel complete, benchmark pending | TensorPool + ref-counted release in graph.Forward |
-| E41: GPU Inference | Not started | Deferred to Phase 29 (requires DGX Spark) |
-| E42: GGUF End-to-End | Not started | Superseded by E44 with refined scope |
-| E43: Operator Fusion | Complete | Fused RMSNorm, RoPE, SiLU-gate |
-
-Remaining Phase 27 benchmark tasks (T39.3, T40.3, T43.4) require DGX Spark
-and are carried forward to E48.
+| File | What Exists | What Is Missing |
+|------|-------------|-----------------|
+| `internal/xblas/gemm_quant.go` | `GemmQ4F32Fused` -- per-block dequant to stack buf, then `sgemmAccRow` | NEON kernel that does nibble extract + FMA in registers |
+| `internal/xblas/gemm_simd_arm64.s` | `sgemmAccRowNeon` -- NEON float32 row accumulate | Q4-specific NEON inner loop |
+| `compute/pool.go` | `TensorPool[T]` with `Acquire(shape)`, `Release(t)`, mutex-safe | Nothing -- pool itself is complete |
+| `graph/graph.go:44` | `WithPool(pool TensorReleaser[T])` -- wires pool into Forward with ref-counting | Nothing -- graph integration is complete |
+| `generate/generator.go:156,186` | Calls `gen.graph.Forward()` for prefill and decode | Never calls `gen.graph.WithPool()` |
+| `generate/kv_cache.go` | `KVCache` and `PagedKVCache` with `CacheProvider` interface | May recompute full-sequence projections |
+| `compute/fused_rmsnorm.go` | Scalar fused RMSNorm | NEON SIMD version |
+| `compute/fused_silugate.go` | Scalar fused SiLU-gate | NEON SIMD version |
 
 ### Objectives
 
-- O61: `inference.Load("model-name")` downloads, loads, and returns a
-  ready-to-generate Model in one call, for any supported architecture.
-- O62: GGUF files load end-to-end without external conversion tools.
-- O63: Chat completions produce correct output for all six listed
-  architectures (Gemma, LLaMA, Mistral, Qwen, DeepSeek, Phi-4).
-- O64: Q4_K_M and Q6_K quantized GGUFs load and run (covers >80% of
-  HuggingFace GGUF models).
-- O65: `zerfoo run` and `zerfoo serve` work end-to-end from a fresh install.
+- O71: NEON Q4 dot-product kernel that performs nibble extraction and FMA
+  in SIMD registers, replacing the scalar per-block dequant in GemmQ4F32Fused.
+- O72: TensorPool wired from `generate/generator.go` into `graph.WithPool()`
+  so intermediate tensors are recycled between decode steps. Target: < 1,000
+  allocs/token.
+- O73: KV cache used efficiently during autoregressive decode. Each step
+  computes only the new token's Q/K/V projections and reuses cached K/V.
+- O74: >= 15 tok/s on DGX Spark GB10 for Gemma 3 2B Q4_0 CPU ARM64.
 
 ### Non-Goals
 
-- GPU inference pipeline (deferred to Phase 29, needs DGX Spark).
-- Vision/multimodal models (text-only focus).
-- Training performance or new training features.
-- Embeddings API (`model.Embed()` remains stubbed).
-- Multi-GPU inference.
-- Breaking changes to the Engine[T] or Node[T] interfaces.
+- GPU inference pipeline (separate phase).
+- Vision/multimodal models.
+- Training performance or features.
+- New model architectures.
+- x86 AVX2/AVX-512 SIMD kernels (ARM64 NEON only for now).
+- Breaking changes to Engine[T] or Node[T] interfaces.
 
 ### Constraints and Assumptions
 
-- Use Go standard library only where possible. Minimize new dependencies.
+- Go standard library only where possible.
 - All CUDA code behind `//go:build cuda` build tags.
 - Pre-commit hook rejects commits spanning multiple directories.
 - All changes must pass golangci-lint, go vet, and gofmt.
 - Tests must pass with -race flag.
 - Table-driven tests using the standard testing package.
-- DGX Spark GB10 at ssh ndungu@192.168.86.250 for GPU validation and benchmarks.
-- GGUF parser is pure Go (no CGo dependency on llama.cpp).
-- Reference implementation for K-quant dequantization: llama.cpp `ggml-quants.c`.
+- DGX Spark GB10 at ssh ndungu@192.168.86.250 for benchmarks.
+- ARM64 NEON assembly via Go asm (`internal/xblas/` pattern).
+- Existing Q4_0 block format: 32 values per block, 18 bytes (2B float16 scale
+  + 16B packed nibbles). `q4Block` struct in `tensor/quantized.go`.
+- `GemmQ4F32Fused` already uses `dequantQ4Block` + `sgemmAccRow` pattern.
+  The NEON kernel replaces `dequantQ4Block` with in-register nibble extraction.
 
 ### Success Metrics
 
-| Metric | Current | Phase 28 Target |
+| Metric | Current | Phase 29 Target |
 |--------|---------|-----------------|
-| `inference.Load()` works out-of-box | No (missing pull func) | Yes |
-| GGUF to inference | No (parser only) | Yes (Llama + Gemma) |
-| Chat template coverage | 1/6 (Gemma only) | 6/6 |
-| Quantization format coverage | Q4_0, Q8_0 | + Q4_K_M, Q5_K_M, Q6_K |
-| `zerfoo run model.gguf` works | No | Yes |
-| End-to-end integration tests | Gemma ZMF only | Gemma + Llama, GGUF + ZMF |
+| tok/s (Gemma 3 2B Q4_0, CPU ARM64) | 3.80 | >= 15 |
+| allocs/token | 79,537 | < 1,000 |
+| GC % CPU | 6.9% | < 1% |
+| MatMul+dequantize % CPU | 22.7% | < 15% |
 
 ---
 
@@ -92,204 +100,220 @@ and are carried forward to E48.
 
 | ID | Deliverable | Rationale |
 |----|-------------|-----------|
-| D91 | GGUF end-to-end inference | `inference.Load("path/to/model.gguf")` to `model.Generate()` for Llama and Gemma |
-| D92 | Auto-download | `inference.Load("gemma-3-1b-q4")` downloads from HF, no manual setup |
-| D93 | Chat templates | `model.Chat()` produces correctly formatted output for all 6 architectures |
-| D94 | K-quant support | Q4_K_M, Q5_K_M, Q6_K GGUFs dequantize correctly |
-| D95 | Working CLI | `zerfoo run model.gguf` starts interactive chat from a fresh install |
-| D96 | Phase 27 benchmarks | Transpose folding + tensor pool + fused ops validated on DGX Spark |
+| D101 | NEON Q4 dot-product kernel | Replace scalar dequant in GemmQ4F32Fused with NEON nibble-extract + FMA |
+| D102 | TensorPool wiring | Create pool in generator, pass to graph.WithPool() |
+| D103 | KV cache decode optimization | Single-token projection with cached K/V reuse |
+| D104 | NEON fused ops | RMSNorm and SiLU-gate NEON kernels |
+| D105 | DGX Spark benchmark | >= 15 tok/s validated on GB10 |
 
 ### Out of Scope
 
-- GPU inference (Phase 29).
-- New model architectures beyond the six already listed.
-- Embeddings / hidden state extraction.
-- GGUF write / model export.
-- Quantization (converting F32 to Q4_K) -- only dequantization for inference.
+- GPU inference path.
+- Q4_K / Q5_K / Q6_K fused dot products (follow-up phase).
+- x86 SIMD kernels.
 - Prompt caching / prefix sharing.
-- Multi-GPU KV cache partitioning.
+- Multi-GPU.
+- Rewriting TensorPool or graph.Forward pool logic (already works).
 
 ---
 
 ## 3. Checkable Work Breakdown
 
-### E44: GGUF End-to-End Inference (O61, O62)
+### E49: NEON Q4 Dot Product Kernel (O71, O74)
 
-Carried forward from Phase 27 E42 with refined scope.
+Decision rationale: docs/adr/020-q4-quantized-dot-product.md
 
-- [x] T44.1 Graph template builder for Llama architecture  Owner: TBD  Est: 6h  2026-03-06
-  - Create `inference/arch_llama.go` with
-    `buildLlamaGraph(tensors map[string]*tensor.TensorNumeric[float32], cfg ModelMetadata, engine Engine) (*graph.Graph[float32], error)`.
-  - Build the standard Llama graph: Embed -> [RMSNorm -> GQA -> RMSNorm ->
-    FFN(SiLU-gate)] x N -> RMSNorm -> LMHead.
-  - Map canonical tensor names (from E37 arch mapping) to graph parameters.
-  - Support GQA (num_kv_heads < num_heads).
-  - Acceptance: Llama 3.2 1B GGUF loads and produces non-NaN logits.
-    Greedy decode of "The capital of France is" produces "Paris".
+The existing `GemmQ4F32Fused` in `internal/xblas/gemm_quant.go` dequantizes
+each Q4 block (32 values) into a `[32]float32` stack buffer via `dequantQ4Block`,
+then calls `sgemmAccRow`. The NEON kernel replaces `dequantQ4Block` + the
+inner multiply with a single NEON routine that extracts nibbles and FMAs
+directly in vector registers.
+
+- [ ] T49.1 NEON Q4 block dot-product function  Owner: TBD  Est: 4h
+  - Add `q4DotBlockNeon(packed *byte, scale float32, x *float32) float32`
+    in `internal/xblas/q4dot_arm64.s`.
+  - Takes one Q4 block (16 packed bytes = 32 nibbles) and 32 float32
+    activation values. Returns dot product of dequantized Q4 * activation.
+  - NEON implementation:
+    1. VLD1 16 packed bytes into V0.
+    2. VAND V0, #0x0F -> V1 (low nibbles), USHR V0, #4 -> V2 (high nibbles).
+    3. Widen uint4 to int16 via UXTL, subtract 8 (zero-point).
+    4. Widen int16 to int32 via SXTL, then SCVTF to float32.
+    5. VLD1 activation float32x4 into V-regs, FMLA accumulate.
+    6. Multiply accumulated sum by scale, return.
+  - Go declaration in `q4dot_arm64.go` with `//go:build arm64`.
+  - Scalar fallback in `q4dot_generic.go` with `//go:build !arm64`.
+  - Acceptance: Output matches `dequantQ4Block` + scalar dot within 1e-5.
   - Dependencies: none.
 
-- [x] S44.1.1 Llama GGUF forward pass + decode test  Owner: TBD  Est: 1h  2026-03-06
+- [ ] S49.1.1 NEON Q4 block dot-product tests  Owner: TBD  Est: 1h
+  - Table-driven: zero block, all-same-nibble, random, max-scale, min-scale.
+  - Compare NEON result against scalar `dequantQ4Block` + dot product.
 
-- [x] T44.2 Graph template builder for Gemma architecture  Owner: TBD  Est: 4h  2026-03-06
-  - Extend for Gemma differences: shared embed/lm_head weight tying,
-    GeGLU activation (GELU instead of SiLU in MLP), embedding scaling
-    by sqrt(hidden_size), pre/post normalization differences.
-  - Refactored: extracted shared transformer loop into arch_common.go
-    to eliminate duplication with Llama builder.
-  - Acceptance: Gemma 3 1B GGUF loads and produces non-NaN logits.
-    Greedy decode produces coherent text.
-  - Dependencies: T44.1.
+- [ ] T49.2 Replace dequantQ4Block in GemmQ4F32Fused  Owner: TBD  Est: 3h
+  - Modify `GemmQ4F32Fused` in `internal/xblas/gemm_quant.go`:
+    - Instead of `dequantQ4Block(data, scale, &buf)` then accumulating via
+      `sgemmAccRow`, call `q4DotBlockNeon` for decode (M=1, single output row)
+      path directly.
+    - For M>1 (batch), keep the existing `dequantQ4Block` + `sgemmAccRow`
+      path (NEON dot is only faster for M=1 where memory bandwidth dominates).
+  - Acceptance: `go test ./internal/xblas/ -run TestGemmQ4` passes.
+    Benchmark at M=1, K=2048, N=8192: >= 1.5x faster than current.
+  - Dependencies: T49.1.
 
-- [x] S44.2.1 Gemma GGUF forward pass + decode test  Owner: TBD  Est: 1h  2026-03-06
+- [ ] S49.2.1 GemmQ4F32Fused benchmark before/after  Owner: TBD  Est: 1h
+  - Benchmark M=1 (decode) and M=32 (batch) at K=2048, N=8192.
+  - Compare against current `GemmQ4F32Fused` on DGX Spark.
 
-- [x] T44.3 GGUF tokenizer extraction  Owner: TBD  Est: 3h  2026-03-06
-  - Extract tokenizer vocabulary from GGUF metadata keys:
-    `tokenizer.ggml.tokens`, `tokenizer.ggml.scores`,
-    `tokenizer.ggml.merges`, `tokenizer.ggml.token_type`.
-  - Build a `tokenizer.Tokenizer` from GGUF metadata without needing a
-    separate `tokenizer.json` file.
-  - Fallback: if GGUF tokenizer data is absent, look for `tokenizer.json`
-    in the same directory.
-  - Acceptance: tokenizer encodes "Hello, world!" and decodes back to
-    same string for both Llama and Gemma GGUFs.
+- [ ] T49.3 NEON Q4 row dot-product for M>1  Owner: TBD  Est: 4h
+  - For batch (M>1), the per-block dot is not sufficient because each block
+    contributes to all N output columns. Implement a hybrid:
+    - Still use `q4DotBlockNeon` for the inner nibble extraction.
+    - Restructure the outer loop to process multiple output columns per block.
+  - Alternative: for M>1 (prefill only), keep dequant+sgemmAccRow (prefill
+    is not the bottleneck -- decode is).
+  - Acceptance: M=32 path produces correct output. No regression vs current.
+  - Dependencies: T49.2.
+
+- [ ] S49.3.1 Batch path correctness tests  Owner: TBD  Est: 30m
+
+- [ ] T49.4 Run golangci-lint on internal/xblas/  Owner: TBD  Est: 15m
+
+### E50: TensorPool Wiring in Generate Loop (O72, O74)
+
+The pool infrastructure is complete:
+- `compute.TensorPool[T]` in `compute/pool.go` (Acquire, Release, mutex-safe).
+- `graph.Graph[T].WithPool(pool)` in `graph/graph.go` (ref-counting, release).
+
+The gap: `generate/generator.go` never calls `graph.WithPool()`. Each
+`graph.Forward` call allocates fresh tensors for every intermediate result,
+producing 79,537 allocs/token.
+
+- [x] T50.1 Create TensorPool in Generator constructor  Owner: TBD  Est: 2h
+  - In `generate/generator.go`, add a `pool *compute.TensorPool[T]` field
+    to `Generator[T]`.
+  - Create the pool in `NewGenerator()` or `NewGeneratorWithEngine()`.
+  - Call `gen.graph.WithPool(gen.pool)` before the first `Forward` call.
+  - The pool persists across decode steps so buffers are reused.
+  - Do NOT create the pool if the graph is nil (for testing).
+  - Acceptance: `go test ./generate/ -race` passes. No behavior change.
   - Dependencies: none.
 
-- [x] S44.3.1 GGUF tokenizer encode/decode tests  Owner: TBD  Est: 1h  2026-03-06
+- [x] S50.1.1 Generator pool wiring tests  Owner: TBD  Est: 1h
+  - Verify pool is attached: after Generate(), pool.Len() > 0 (buffers
+    returned to pool).
+  - Verify correctness: Generate() output unchanged with pool enabled.
 
-- [x] T44.4 Unified load function for GGUF  Owner: TBD  Est: 3h  2026-03-06
-  - Extend `inference.Load()` to detect GGUF files (by extension or magic
-    bytes) and dispatch to the GGUF loading path.
-  - Add `inference.LoadFile(path string, opts ...Option) (*Model, error)`
-    for loading from a local file path directly.
-  - Architecture dispatch based on GGUF `general.architecture` metadata.
-  - Wire tokenizer, graph, engine, and generator into a ready-to-use Model.
-  - Acceptance: `inference.LoadFile("model.gguf")` to `model.Generate(ctx, prompt)`
-    works end-to-end.
-  - Dependencies: T44.1, T44.2, T44.3.
+- [x] T50.2 Measure allocation reduction  Owner: TBD  Est: 1h
+  - Add a benchmark test in `generate/` that measures allocs/token with
+    pool enabled vs disabled.
+  - Use `testing.B.ReportAllocs()` and `testing.AllocsPerRun`.
+  - Acceptance: allocs/token < 1,000 (from 79,537).
+  - Dependencies: T50.1.
 
-- [x] S44.4.1 End-to-end GGUF load + generate test  Owner: TBD  Est: 1h  2026-03-06
+- [x] S50.2.1 Allocation benchmark test  Owner: TBD  Est: 30m
+  - Table-driven: with pool, without pool. Report allocs/op and bytes/op.
 
-- [x] T44.5 Run golangci-lint on inference/ and model/gguf/  Owner: TBD  Est: 15m  2026-03-06
+- [x] T50.3 Run golangci-lint on generate/  Owner: TBD  Est: 15m
 
-### E45: Model Hub & Auto-Download (O61, O65)
+### E51: KV Cache Decode Optimization (O73, O74)
 
-- [x] T45.1 Wire HuggingFace pull into default registry  Owner: TBD  Est: 2h  2026-03-06
-  - Load() now calls NewHFPullFunc() on default LocalRegistry.
-  - shouldDownload() includes .gguf files.
-  - findGGUF() auto-detects GGUF files and routes to LoadFile().
+- [x] T51.1 Audit current decode-step graph execution  Owner: TBD  Est: 2h
+  - Trace what happens when `gen.graph.Forward(genCtx, tokenTensor)` is
+    called with a single-token input tensor during decode.
+  - The graph builders in `inference/arch_common.go` build the full
+    transformer graph at load time. During decode, the graph executes
+    with a [1, hidden_dim] input. Verify:
+    a) Does each attention layer's Q/K/V projection only process the new
+       token (input is 1 token), or does it process the full cached sequence?
+    b) Does the KV cache append the new K/V and return the full sequence
+       K/V for attention, or does it recompute?
+    c) How does causal masking work for the single-token case?
+  - Document findings in docs/updates.md.
+  - Acceptance: Written analysis with line numbers.
   - Dependencies: none.
 
-- [x] S45.1.1 Auto-download integration test (with mock HTTP)  Owner: TBD  Est: 1h  2026-03-06
+- [x] T51.2 Optimize decode graph path  Owner: TBD  Est: 4h
+  - Already optimized: Q/K/V projections process only new token [1,d],
+    KV cache appends+returns full sequence, causal mask skipped for decode.
+    See docs/updates.md T51.1 audit findings.
+  - Dependencies: T51.1.
 
-- [x] T45.2 Model alias registry  Owner: TBD  Est: 2h  2026-03-06
-  - Built-in alias map: gemma-3-{1b,2b}-q4, llama-3-{1b,8b}-q4, mistral-7b-q4, qwen-2.5-7b-q4.
-  - ResolveAlias() and RegisterAlias() exported.
-  - Dependencies: T45.1.
+- [ ] S51.2.1 Decode parity test  Owner: TBD  Est: 1h
+  - Generate 10 tokens. Verify token-for-token identical output to baseline.
 
-- [x] S45.2.1 Alias resolution tests  Owner: TBD  Est: 30m  2026-03-06
+- [ ] T51.3 Incremental RoPE for decode  Owner: TBD  Est: 2h
+  - During decode, apply RoPE only to the new token's Q/K at the correct
+    position index (seq_len so far), not recompute for full sequence.
+  - The fused RoPE in `compute/fused_rope.go` takes a position offset.
+    Verify the graph builder passes the correct offset during decode.
+  - Acceptance: RoPE output matches full-sequence RoPE for the new token
+    position.
+  - Dependencies: T51.2.
 
-- [x] T45.3 Download progress and error UX  Owner: TBD  Est: 1h  2026-03-06
-  - ProgressFunc already supported in HFPullOptions.OnProgress.
-  - HF_TOKEN already supported via env var.
-  - Dependencies: T45.1.
+- [ ] S51.3.1 Incremental RoPE correctness test  Owner: TBD  Est: 30m
 
-- [x] S45.3.1 Error message tests  Owner: TBD  Est: 30m  2026-03-06
+- [ ] T51.4 Run golangci-lint on inference/ and generate/  Owner: TBD  Est: 15m
 
-- [x] T45.4 Run golangci-lint on registry/ and inference/  Owner: TBD  Est: 15m  2026-03-06
+### E52: NEON Fused Ops (O74)
 
-### E46: Chat Template Engine (O63)
+- [ ] T52.1 Fuse runtime attention transpose  Owner: TBD  Est: 3h
+  - The 8.8% runtime transpose is Q/K transposes in attention.
+  - Option A: Store K in transposed layout in the KV cache, so Q @ K^T
+    becomes Q @ K_stored (no transpose needed).
+  - Option B: Use a transposed-B GEMM variant (sgemmABT) that iterates K
+    columns directly without materializing the transpose.
+  - Choose the option that requires fewer graph builder changes.
+  - Acceptance: Runtime transpose drops to < 2% CPU in profile.
+  - Dependencies: E51 (KV cache changes may affect K layout).
 
-- [x] T46.1 Template renderer  Owner: TBD  Est: 4h  2026-03-06
-  - Pragmatic approach: hardcoded per-architecture formatters in
-    inference/inference.go (formatGemma, formatLlama, formatMistral,
-    formatQwen, formatDeepSeek, formatPhi, formatGeneric).
+- [ ] S52.1.1 Attention transpose elimination benchmark  Owner: TBD  Est: 30m
+
+- [ ] T52.2 NEON RMSNorm  Owner: TBD  Est: 2h
+  - `compute/fused_rmsnorm.go` uses scalar Go loops.
+  - Add ARM64 assembly in `compute/fused_rmsnorm_arm64.s`:
+    - FMLA for sum-of-squares across float32x4 lanes.
+    - FRSQRTE + FRECPS for reciprocal sqrt (2 Newton iterations).
+    - FMUL for element-wise weight scaling.
+  - Go declaration in `fused_rmsnorm_arm64.go` with `//go:build arm64`.
+  - Scalar fallback unchanged in `fused_rmsnorm.go`.
+  - Acceptance: NEON RMSNorm matches scalar within 1e-5. >= 2x faster in
+    benchmark.
   - Dependencies: none.
 
-- [x] S46.1.1 Template rendering tests for all 6 architectures  Owner: TBD  Est: 1h  2026-03-06
+- [ ] S52.2.1 NEON RMSNorm parity and benchmark  Owner: TBD  Est: 30m
 
-- [x] T46.2 Architecture-specific chat templates  Owner: TBD  Est: 2h  2026-03-06
-  - All 6 templates implemented. Auto-detect via chatTemplateForArch()
-    in inference/gguf.go, mapping GGUF general.architecture to template name.
-  - Dependencies: T46.1.
-
-- [x] S46.2.1 Chat format parity tests vs HuggingFace reference  Owner: TBD  Est: 1h  2026-03-06
-
-- [x] T46.3 Run golangci-lint on inference/  Owner: TBD  Est: 15m  2026-03-06
-
-### E47: K-Quant Dequantization (O64)
-
-- [x] T47.1 Q4_K dequantization  Owner: TBD  Est: 4h  2026-03-06
-  - Implemented Q4_K_M block dequantization in `tensor/quantized_kquant.go`.
-  - Q4_K layout: super-blocks of 256 values (144 bytes each).
-  - Wired into GGUF loader via `decodeQ4KTensor`.
+- [ ] T52.3 NEON SiLU-gate  Owner: TBD  Est: 2h
+  - `compute/fused_silugate.go` uses scalar Go loops.
+  - Add ARM64 assembly in `compute/fused_silugate_arm64.s`:
+    - FNEG + polynomial FEXP approximation (minimax degree-4) for sigmoid.
+    - FMUL for gate * up.
+  - Acceptance: NEON SiLU-gate matches scalar within 1e-4. >= 2x faster.
   - Dependencies: none.
 
-- [x] S47.1.1 Q4_K dequantization correctness tests  Owner: TBD  Est: 1h  2026-03-06
+- [ ] S52.3.1 NEON SiLU-gate parity and benchmark  Owner: TBD  Est: 30m
 
-- [x] T47.2 Q6_K dequantization  Owner: TBD  Est: 3h  2026-03-06
-  - Implemented Q6_K block dequantization (210-byte super-blocks, 6-bit values).
-  - Dependencies: none.
+- [ ] T52.4 Run golangci-lint on compute/  Owner: TBD  Est: 15m
 
-- [x] T47.3 Q5_K dequantization  Owner: TBD  Est: 2h  2026-03-06
-  - Implemented Q5_K_M block dequantization (176-byte super-blocks, 5-bit values).
-  - Dependencies: none.
+### E53: DGX Spark Benchmark Validation (O74)
 
-- [x] S47.3.1 Q5_K and Q6_K correctness tests  Owner: TBD  Est: 1h  2026-03-06
+- [ ] T53.1 End-to-end benchmark with all optimizations  Owner: TBD  Est: 2h
+  - Run Gemma 3 2B Q4_0 benchmark on DGX Spark GB10 with all Phase 29
+    optimizations enabled (NEON Q4 dot, pool wired, KV decode opt, NEON ops).
+  - Capture: tok/s, allocs/token, GC %, CPU profile breakdown.
+  - Compare against Phase 28 baseline (3.80 tok/s, 79,537 allocs/token).
+  - Acceptance: >= 15 tok/s OR clear documentation of remaining bottlenecks
+    and next steps.
+  - Dependencies: E49, E50, E51, E52.
 
-- [x] T47.4 Wire K-quants into GGUF loader  Owner: TBD  Est: 2h  2026-03-06
-  - Extended `model/gguf/loader.go` with Q5_K and Q6_K tensorByteSize
-    and decodeTensor cases.
-  - Dependencies: T47.1, T47.2, T47.3.
+- [ ] S53.1.1 Before/after profile comparison  Owner: TBD  Est: 30m
 
-- [x] S47.4.1 K-quant GGUF load test  Owner: TBD  Est: 30m  2026-03-06
+- [ ] T53.2 Regression test for correctness  Owner: TBD  Est: 1h
+  - Run existing parity tests on DGX Spark with all optimizations.
+  - Verify no output quality degradation from fused kernels or pooling.
+  - Dependencies: T53.1.
 
-- [x] T47.5 Run golangci-lint on tensor/ and model/gguf/  Owner: TBD  Est: 15m  2026-03-06
-
-### E48: Phase 27 Deferred Benchmarks (O65)
-
-These tasks were blocked on DGX Spark access during Phase 27.
-
-- [x] T48.1 End-to-end benchmark: transpose elimination  Owner: TBD  Est: 1h  2026-03-06
-  - FoldConstantTransposes is already applied in ZMF builder (model/builder.go:453).
-  - Profile results (DGX Spark GB10, 20 cores, ARM64):
-    - Constant transposes pre-applied at load time (~15s one-time cost).
-    - Runtime transpose: 8.8% of inference CPU (down from 62% before folding).
-    - MatMul (NEON GEMM): 19.6% of inference CPU (now the dominant op).
-  - Result: Transpose is no longer the bottleneck. Folding works correctly.
-
-- [x] S48.1.1 Before/after profile comparison  Owner: TBD  Est: 30m  2026-03-06
-
-- [x] T48.2 End-to-end benchmark: tensor pool  Owner: TBD  Est: 1h  2026-03-06
-  - TensorPool exists in compute/pool.go but is NOT yet wired into the
-    inference forward loop. Current allocation profile:
-    - 2,545,174 allocs/op for 32 tokens = ~79,537 allocs/token.
-    - 39.4 GB/op (mostly from Q4 dequantization creating float32 buffers).
-    - memclr accounts for 3.2% of CPU (zeroing new allocations).
-    - GC accounts for ~3.7% of CPU.
-  - Result: Pool exists but needs graph-level integration (Phase 29 scope).
-    Allocs/token target (< 100) NOT met. Current: ~79,537 allocs/token.
-
-- [x] S48.2.1 Allocation profile comparison  Owner: TBD  Est: 30m  2026-03-06
-
-- [x] T48.3 End-to-end benchmark: all fusions  Owner: TBD  Est: 1h  2026-03-06
-  - Final benchmark results (DGX Spark GB10, Gemma 3 2B Q4_0, CPU ARM64):
-    - Baseline tok/s: **3.80 tok/s** (up from 3.60 in Phase 26)
-    - 15 tok/s target NOT met. Requires further optimization:
-      - Q4 dot-product GEMM (avoid full dequantize-to-float32)
-      - NEON-optimized attention (fused QKV + softmax)
-      - TensorPool integration into graph forward loop
-      - CUDA inference path (Phase 29)
-  - Profile breakdown (inference only, excluding model load):
-    | Component | % CPU | Notes |
-    |-----------|-------|-------|
-    | MatMul (NEON GEMM) | 19.6% | sgemmAccRowNeon |
-    | Runtime Transpose | 8.8% | Dynamic Q/K transposes in attention |
-    | Element-wise ops | 3.5% | Add, Mul, Pow (binaryOp) |
-    | GC + memclr | 6.9% | Allocation pressure from dequantization |
-    | Q4 dequantize | 3.1% | decodeQ4Blocks at load time |
-    | Other | ~58% | Parallelization overhead, scheduling |
-
-- [x] S48.3.1 Final Phase 27+28 performance report  Owner: TBD  Est: 30m  2026-03-06
+- [ ] T53.3 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
 
 ---
 
@@ -297,21 +321,21 @@ These tasks were blocked on DGX Spark access during Phase 27.
 
 | Milestone | ID | Dependencies | Exit Criteria |
 |-----------|----|-------------|---------------|
-| M16: GGUF inference | E44 | E37 | `LoadFile("model.gguf")` to generate text, Llama + Gemma |
-| M17: One-command install | E45 | E44 | `inference.Load("gemma-3-1b-q4")` auto-downloads and runs |
-| M18: Universal chat | E46 | none | `model.Chat()` correct for all 6 architectures |
-| M19: K-quant ecosystem | E47 | none | Q4_K_M GGUFs from HuggingFace load and run |
-| M20: Validated throughput | E48 | E39-E43 | >= 15 tok/s on DGX Spark (Phase 27 target) |
+| M21: NEON Q4 dot product | E49 | none | NEON kernel passes correctness tests, >= 1.5x faster than current GemmQ4F32Fused at M=1 |
+| M22: Zero-alloc forward | E50 | none | allocs/token < 1,000 via pool wiring in generator |
+| M23: Efficient decode | E51 | none | Decode step only projects new token, reuses cached K/V |
+| M24: NEON fusions | E52 | E51 | Runtime transpose < 2%, NEON RMSNorm and SiLU-gate |
+| M25: 15 tok/s | E53 | E49-E52 | >= 15 tok/s on DGX Spark GB10 validated |
 
 Recommended execution order:
+1. **[E49, E50, E51]** -- All three are independent. E49 (NEON kernel) and
+   E50 (pool wiring) are the highest-impact changes. E51 (KV decode audit)
+   starts with analysis.
+2. **E52** -- NEON fused ops. T52.1 (transpose) depends on E51 findings.
+   T52.2-T52.3 (RMSNorm, SiLU-gate) are independent.
+3. **E53** -- Final benchmark. Depends on all.
 
-1. **[E44, E47]** -- GGUF graph builders + K-quant dequant (independent, both
-   needed for GGUF models from HuggingFace)
-2. **E46** -- Chat templates (independent, small scope)
-3. **E45** -- Auto-download (depends on E44 for GGUF loading to actually work)
-4. **E48** -- DGX benchmarks (independent, requires hardware access)
-
-Critical path: E44 -> E45 -> working README.
+Critical path: E49 + E50 -> E53 (NEON GEMM + pooling are the largest gains).
 
 ---
 
@@ -319,12 +343,12 @@ Critical path: E44 -> E45 -> working README.
 
 | ID | Risk | Impact | Likelihood | Mitigation |
 |----|------|--------|------------|------------|
-| R61 | GGUF graph builder produces incorrect attention patterns | Wrong output, NaN | High | Validate against llama.cpp logits for same model+prompt. Use known test vectors. |
-| R62 | K-quant dequantization has subtle bit-packing errors | Slightly wrong weights, degraded quality | Medium | Compare dequantized values against llama.cpp `ggml_dequantize_row_q4_K` output. |
-| R63 | HuggingFace API rate limits during auto-download | Load fails for new users | Medium | Cache aggressively. Retry with exponential backoff. Document `HF_TOKEN` for higher limits. |
-| R64 | Chat template variations between model versions | Garbled chat output | Medium | Pin templates to specific model families, not versions. Test against HF tokenizer configs. |
-| R65 | GGUF tokenizer metadata missing or malformed | Tokenizer fails to build | Medium | Fallback to `tokenizer.json` in same directory. Log clear warning. |
-| R66 | Q4_K_M models have mixed quantization (some layers Q6_K) | Loader fails on unexpected quant type | High | Handle all K-quant types that appear in practice. Start by auditing a real Q4_K_M GGUF. |
+| R71 | NEON assembly bugs cause silent numerical errors | Wrong model output | Medium | Compare NEON vs scalar for 10K random vectors. Use Go test fuzzing. |
+| R72 | Q4 NEON speedup less than expected due to memory bandwidth saturation | < 1.5x improvement | Medium | Profile L1/L2 cache utilization. The decode M=1 case is bandwidth-bound; NEON reduces compute but bandwidth may dominate. |
+| R73 | TensorPool wiring causes use-after-release bugs | Data corruption | High | ref-counting in graph.Forward already handles this. Run all tests with -race. Add stress test with 1000-token generate. |
+| R74 | KV cache decode already optimized (single-token input already works) | E51 has no impact | Medium | Audit first (T51.1). If already optimal, mark as done and move on. |
+| R75 | 15 tok/s not achievable on CPU alone | Target not met | Medium | Document achieved speedup and remaining bottlenecks. GPU inference as Phase 30 fallback. |
+| R76 | Go assembler limitations prevent optimal NEON codegen | Suboptimal SIMD utilization | Low | Use Go asm TEXT directives (proven pattern in `gemm_simd_arm64.s`). |
 
 ---
 
@@ -346,72 +370,53 @@ A task is done when:
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(inference): add Llama GGUF graph builder`.
+- Use Conventional Commits: `perf(xblas): add NEON Q4 block dot product`.
 - Always run linters and formatters before committing.
 
 ### Validation Strategy
 
-- For K-quant work: validate against llama.cpp reference dequantization
-  (`ggml-quants.c`).
-- For GGUF builders: parity tests comparing logits against a known-good
-  implementation (Python transformers or llama.cpp).
-- For chat templates: test against HuggingFace `tokenizer_config.json`
-  reference strings.
-- End-to-end tests use small models: Llama 3.2 1B Q4_0 (~700 MB),
-  Gemma 3 1B Q4_0 (~700 MB).
+- NEON kernels: compare against scalar fallback for 10K random inputs.
+- TensorPool: measure allocs/token with testing.AllocsPerRun.
+- KV cache: token-for-token parity against baseline (no optimization).
+- All benchmarks on DGX Spark GB10 (ssh ndungu@192.168.86.250).
 
 ---
 
 ## 7. Progress Log
 
-### Change Summary -- 2026-03-06 (Phase 28 COMPLETE: E44-E48)
+### Change Summary -- 2026-03-06 (plan refinement)
 
-E48 (Phase 27 Deferred Benchmarks) ALL COMPLETE: T48.1-T48.3, S48.1.1-S48.3.1.
-DGX Spark GB10 benchmarks: 3.80 tok/s (up from 3.60 baseline). Transpose
-folding confirmed working (8.8% runtime vs 62% before). 15 tok/s target NOT
-met -- requires Q4 dot-product GEMM, TensorPool integration, or CUDA path.
-All Phase 28 epics (E44-E48) now complete.
+Refined Phase 29 plan based on codebase audit. Key corrections:
 
-E45 (Model Hub & Auto-Download) ALL COMPLETE: T45.1-T45.4, S45.1.1-S45.3.1.
-HF pull wired into default registry, model aliases for 6 models, GGUF auto-
-detection in downloaded model directories, shouldDownload includes .gguf.
-
-E46 (Chat Template Engine) ALL COMPLETE: T46.1-T46.3, S46.1.1-S46.2.1.
-Hardcoded per-architecture formatters for Gemma, LLaMA 3, Mistral, Qwen 2.5,
-DeepSeek, Phi-4. Auto-detection from GGUF architecture metadata. Table-driven
-tests with 15 cases covering all templates.
-
-### Change Summary -- 2026-03-06 (E44+E47 complete)
-
-E44 (GGUF End-to-End Inference) ALL COMPLETE: T44.1-T44.5, S44.1.1-S44.4.1.
-Llama and Gemma graph builders with shared transformer loop in arch_common.go.
-GGUF tokenizer extraction, unified LoadFile, end-to-end generate tests.
-
-E47 (K-Quant Dequantization) ALL COMPLETE: T47.1-T47.5, S47.1.1-S47.4.1.
-Q4_K (144B/256val), Q6_K (210B/256val), Q5_K (176B/256val) dequantization.
-All three wired into GGUF loader. Round-trip and storage tests pass.
-
-Next: E46 (Chat Template Engine), then E45 (Auto-Download).
+- E49: Updated to reflect that `GemmQ4F32Fused` already exists with per-block
+  dequant + `sgemmAccRow`. The NEON kernel replaces `dequantQ4Block` with
+  in-register nibble extraction, not a full rewrite. Added code inventory
+  table to Context.
+- E50: Corrected to reflect that `graph.Forward` pool wiring (ref-counting,
+  `WithPool()`, `Release`) already works. The only gap is that
+  `generate/generator.go` never calls `graph.WithPool()`. Reduced from 4
+  tasks to 3 tasks. Removed T50.1 (audit) and T50.2 (wire into graph.Forward)
+  since both are already done.
+- E51: Added note that the generate loop already sends single-token tensors
+  in decode mode. T51.1 audit will determine if further optimization is needed.
+- Added "Existing Code Inventory" table to Context section.
+- ADR 020 already exists, no changes needed.
 
 ### Change Summary -- 2026-03-06
 
-Trimmed completed Phases 25-27 from plan.md into docs/design.md (sections
-15.7-15.9). Removed all completed epics (E25-E38, E39-E40 kernel tasks,
-E43 kernel tasks). Merged Phase 28 content from docs/phase28.md as the
-active plan. Added epics E44-E48 with 30 tasks targeting adoption blockers:
-GGUF inference, auto-download, chat templates, K-quant dequantization,
-and deferred DGX benchmarks.
-
-Superseded tasks:
-- E42 (GGUF End-to-End) replaced by E44 with refined scope and file paths.
-- T39.3, T40.3, T43.4 (DGX benchmarks) carried forward to E48.
-- E41 (GPU Inference) deferred to Phase 29.
+Created Phase 29 plan targeting 4x CPU throughput (3.80 -> 15 tok/s).
+Five epics: E49 (NEON Q4 dot product), E50 (TensorPool wiring), E51
+(KV cache optimization), E52 (NEON fused ops), E53 (DGX benchmark
+validation). Trimmed completed Phase 28 epics (E44-E48) from plan.
+Merged Phase 28 stable knowledge into docs/design.md section 15.10.
+Created ADR: docs/adr/020-q4-quantized-dot-product.md.
 
 ### Previous Entries
 
 | Date | Phase | Summary |
 |------|-------|---------|
-| 2026-03-05 | 27 | Merged Phase 27 epics (E39-E43). T39.1, T39.2, T40.1, T40.2, T43.1-T43.3 complete. |
+| 2026-03-06 | 28 | Phase 28 ALL COMPLETE. E44-E48 done. GGUF inference, auto-download, chat templates, K-quants, DGX benchmarks (3.80 tok/s). |
+| 2026-03-05 | 27 | Phase 27 kernel work complete. Transpose folding, TensorPool, fused ops. |
 | 2026-03-05 | 26 | Phase 26 ALL COMPLETE. E34-E38 done. Gemma 3 2B Q4: 3.60 tok/s. |
 | 2026-03-05 | 25 | Phase 25 ALL COMPLETE. All epics E25-E33 done. |
 | 2026-03-05 | 22-24 | Phases 22-24 COMPLETE. BF16 GEMM, unified memory, SigLIP fix, coverage push. |
@@ -426,12 +431,10 @@ Superseded tasks:
 
 - **Architecture:** Read docs/design.md for interface contracts, package layout,
   GPU architecture, operations, and troubleshooting. Design decisions are in
-  docs/adr/ (ADR-001 through ADR-019).
-- **Phases 1-27:** All complete (kernel-level). See docs/design.md sections 15.7-15.9.
-- **Phase 28:** This plan is the source of truth. See also docs/phase28.md for
-  the standalone Phase 28 design document.
-- **Quality:** See docs/QUALITY.md for test coverage report. 9 packages at 100%,
-  42 of 50 at >= 95%.
+  docs/adr/ (ADR-001 through ADR-020).
+- **Phases 1-28:** All complete. See docs/design.md sections 15.1-15.10.
+- **Phase 29:** This plan is the source of truth.
+- **Quality:** See docs/QUALITY.md for test coverage report.
 - **How to build:**
   - CPU: `go build ./...`
   - CUDA: `go build -tags cuda ./...`
@@ -439,18 +442,22 @@ Superseded tasks:
     then `go build -tags cuda,cutlass ./...`
 - **Pre-commit hook:** Runs golangci-lint and tests. Rejects multi-directory commits.
 
-### Key Phase 28 Starting Points
+### Key Phase 29 Starting Points
 
-1. **E44 (start here):** GGUF graph builders. Key files: `inference/gguf.go`
-   (existing stub), `model/gguf/` (parser + loader + arch mapping),
-   `inference/inference.go` (Load function).
-2. **E45:** Auto-download. Key files: `registry/registry.go` (model registry),
-   `registry/pull.go` (HF download logic -- already implemented, just not wired).
-3. **E46:** Chat templates. Key file: `inference/inference.go` (formatMessages method).
-4. **E47:** K-quant dequant. Key files: `tensor/quantized.go` (Q4_0/Q8_0 reference),
-   `model/gguf/parser.go` (GGUF type constants), `model/gguf/loader.go` (tensor loading).
-   Reference: llama.cpp `ggml-quants.c`.
-5. **E48 (DGX Spark required):** Deferred Phase 27 benchmarks.
+1. **E49 (NEON Q4 dot):** Start in `internal/xblas/gemm_quant.go` --
+   `GemmQ4F32Fused` and `dequantQ4Block` are the functions to optimize.
+   The ARM64 NEON GEMM pattern is in `gemm_simd_arm64.s` (sgemmAccRowNeon).
+   Q4 block format is in `tensor/quantized.go` (q4Block struct).
+2. **E50 (pool wiring):** One-file change in `generate/generator.go`. Create
+   `compute.NewTensorPool[T]()`, store on Generator, call
+   `gen.graph.WithPool(gen.pool)`. The graph-level ref-counting is already
+   implemented in `graph/graph.go:70-134`.
+3. **E51 (KV cache):** Start by reading `generate/generator.go:175-199`
+   (decode loop) and `generate/kv_cache.go` (cache interface). Trace how
+   the graph builders in `inference/arch_common.go` handle single-token input.
+4. **E52 (NEON fused ops):** `compute/fused_rmsnorm.go` and
+   `compute/fused_silugate.go` are pure scalar Go. Add ARM64 asm files
+   following the pattern in `internal/xblas/gemm_simd_arm64.s`.
 
 ### External Dependencies
 
@@ -458,15 +465,10 @@ Superseded tasks:
   - Go 1.25.0 linux/arm64, CUDA 13.0, sm_121 (Blackwell).
   - Models: ~/models/gemma3-q4/ (Q4 ZMF), ~/models/gemma3/ (F32 ZMF).
   - Repos: ~/zerfoo/, ~/zonnx/, ~/zmf/.
-- HuggingFace API for model downloads (HF_TOKEN for gated models).
+- No external service dependencies for CPU-only work.
 
-### Performance Numbers
+### Performance Baseline (Phase 28)
 
-| Model | Params | Quant | Phase 26 tok/s | Phase 28 tok/s | Target |
-|-------|--------|-------|----------------|----------------|--------|
-| Gemma 3 2B | 2.6B | Q4_0 | 3.60 | 3.80 | >= 15 |
-| Gemma 3 2B | 2.6B | F32 | 3.51 | -- | -- |
-
-Phase 28 improvement: +5.6% from transpose folding. Further gains require
-Q4 dot-product GEMM (avoid dequantize overhead), CUDA inference, or
-TensorPool integration into graph forward loop.
+| Model | Params | Quant | tok/s | allocs/token | GC % |
+|-------|--------|-------|-------|--------------|------|
+| Gemma 3 2B | 2.6B | Q4_0 | 3.80 | 79,537 | 6.9% |
