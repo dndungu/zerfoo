@@ -52,8 +52,9 @@ type generatorOptions struct {
 
 // WithPagedKV enables paged KV caching with the given memory budget in MB.
 // When enabled, the Generator allocates blocks from a shared BlockPool
-// instead of pre-allocating the full maxSeqLen per sequence. headDim must
-// be provided (the per-head dimension for the KV cache).
+// instead of pre-allocating the full maxSeqLen per sequence. headDim is the
+// per-position storage size: for GQA models pass numKVHeads * actualHeadDim
+// so the pool can store all KV heads per position.
 func WithPagedKV(maxMemoryMB, headDim int) GeneratorOption {
 	return func(o *generatorOptions) {
 		o.pagedKVMaxMB = maxMemoryMB

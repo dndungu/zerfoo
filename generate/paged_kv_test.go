@@ -260,18 +260,122 @@ func TestPagedKVCache_ManyTokens(t *testing.T) {
 	}
 }
 
-func TestPagedKVCache_AppendBatchedToken(t *testing.T) {
+func TestPagedKVCache_AppendChannelsDimMismatch(t *testing.T) {
+	// Pool headDim=2, tensor [2, 1, 2] has channels*dim=4 != 2.
 	pool, err := NewBlockPool[float32](1, 4, 2, 1)
 	if err != nil {
 		t.Fatalf("NewBlockPool: %v", err)
 	}
 	cache := NewPagedKVCache[float32](pool, 1)
 
-	// Paged cache only supports batch=1.
 	k := makeTestTensor(t, []int{2, 1, 2}, []float32{1, 2, 3, 4})
 	v := makeTestTensor(t, []int{2, 1, 2}, []float32{5, 6, 7, 8})
 	if err := cache.Append(0, k, v); err == nil {
-		t.Error("Append with batch>1 should return error")
+		t.Error("Append with channels*dim != headDim should return error")
+	}
+}
+
+func TestPagedKVCache_MultiChannel(t *testing.T) {
+	// Simulate GQA with 2 KV heads, headDim=3: pool headDim = 2*3 = 6.
+	const (
+		numKVHeads = 2
+		headDim    = 3
+		poolHD     = numKVHeads * headDim // 6
+	)
+	pool, err := NewBlockPool[float32](1, 4, poolHD, 1)
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	cache := NewPagedKVCache[float32](pool, 1)
+
+	// Prefill 2 tokens: shape [2, 2, 3] (channels=2, seqLen=2, dim=3).
+	// Layout: [ch0_pos0(3), ch0_pos1(3), ch1_pos0(3), ch1_pos1(3)]
+	kData := []float32{
+		1, 2, 3, // ch0, pos0
+		4, 5, 6, // ch0, pos1
+		7, 8, 9, // ch1, pos0
+		10, 11, 12, // ch1, pos1
+	}
+	vData := []float32{
+		21, 22, 23,
+		24, 25, 26,
+		27, 28, 29,
+		30, 31, 32,
+	}
+	k := makeTestTensor(t, []int{2, 2, 3}, kData)
+	v := makeTestTensor(t, []int{2, 2, 3}, vData)
+
+	if err := cache.Append(0, k, v); err != nil {
+		t.Fatalf("Append prefill: %v", err)
+	}
+	if got := cache.SeqLen(); got != 2 {
+		t.Errorf("SeqLen() = %d, want 2", got)
+	}
+
+	// Decode 1 more token: shape [2, 1, 3].
+	kDec := makeTestTensor(t, []int{2, 1, 3}, []float32{13, 14, 15, 16, 17, 18})
+	vDec := makeTestTensor(t, []int{2, 1, 3}, []float32{33, 34, 35, 36, 37, 38})
+
+	if err := cache.Append(0, kDec, vDec); err != nil {
+		t.Fatalf("Append decode: %v", err)
+	}
+	if got := cache.SeqLen(); got != 3 {
+		t.Errorf("SeqLen() = %d, want 3", got)
+	}
+
+	// GetKV should return [2, 3, 3].
+	lkv, ok := cache.GetKV(0)
+	if !ok {
+		t.Fatal("GetKV(0) should return true")
+	}
+	shape := lkv.Key.Shape()
+	if shape[0] != 2 || shape[1] != 3 || shape[2] != 3 {
+		t.Fatalf("Key shape = %v, want [2 3 3]", shape)
+	}
+
+	// Verify K data: [ch0: pos0,pos1,pos2 | ch1: pos0,pos1,pos2]
+	gotK := lkv.Key.Data()
+	wantK := []float32{
+		1, 2, 3, 4, 5, 6, 13, 14, 15, // ch0
+		7, 8, 9, 10, 11, 12, 16, 17, 18, // ch1
+	}
+	for i, w := range wantK {
+		if gotK[i] != w {
+			t.Errorf("Key data[%d] = %v, want %v", i, gotK[i], w)
+		}
+	}
+
+	gotV := lkv.Value.Data()
+	wantV := []float32{
+		21, 22, 23, 24, 25, 26, 33, 34, 35,
+		27, 28, 29, 30, 31, 32, 36, 37, 38,
+	}
+	for i, w := range wantV {
+		if gotV[i] != w {
+			t.Errorf("Value data[%d] = %v, want %v", i, gotV[i], w)
+		}
+	}
+}
+
+func TestPagedKVCache_MultiChannelLayoutChange(t *testing.T) {
+	// After first Append with channels=2, a second Append with channels=1 should error.
+	pool, err := NewBlockPool[float32](1, 4, 4, 1)
+	if err != nil {
+		t.Fatalf("NewBlockPool: %v", err)
+	}
+	cache := NewPagedKVCache[float32](pool, 1)
+
+	k1 := makeTestTensor(t, []int{2, 1, 2}, []float32{1, 2, 3, 4})
+	v1 := makeTestTensor(t, []int{2, 1, 2}, []float32{5, 6, 7, 8})
+	if err := cache.Append(0, k1, v1); err != nil {
+		t.Fatalf("First Append: %v", err)
+	}
+
+	// channels=1, dim=4 => channels*dim=4 matches headDim, but layout differs.
+	k2 := makeTestTensor(t, []int{1, 1, 4}, []float32{1, 2, 3, 4})
+	v2 := makeTestTensor(t, []int{1, 1, 4}, []float32{5, 6, 7, 8})
+	if err := cache.Append(0, k2, v2); err == nil {
+		t.Error("Append with changed channel layout should return error")
 	}
 }
 

@@ -11,13 +11,21 @@ import (
 // maxSeqLen per sequence, blocks of blockSize tokens are allocated on demand,
 // reducing memory waste for concurrent sequences of varying length.
 //
-// Each sequence gets its own PagedKVCache. The cache supports batch=1 only;
-// multi-sequence serving allocates one PagedKVCache per sequence.
+// Each sequence gets its own PagedKVCache. The cache accepts tensors with
+// arbitrary first dimensions (channels). GQA attention stores KV as
+// [batchSize*numKVHeads, seqLen, headDim]; the pool's headDim must equal
+// channels * dim to accommodate the full per-position data.
 type PagedKVCache[T tensor.Numeric] struct {
 	pool      *BlockPool[T]
 	numLayers int
 	blockSize int
-	headDim   int
+	headDim   int // pool's headDim = channels * perPosDim
+
+	// channels and perPosDim are lazily detected from the first Append call.
+	// channels is the first dimension of the KV tensors (e.g., numKVHeads for GQA).
+	// perPosDim is the last dimension (actual head dim per channel).
+	channels  int
+	perPosDim int
 
 	// blockTable holds the allocated blocks in order.
 	// Blocks are shared across layers: block.K and block.V are laid out as
@@ -50,8 +58,10 @@ func (c *PagedKVCache[T]) SeqLen() int {
 }
 
 // Append writes new key and value data for the given layer. The tensors must
-// have shape [1, seqLen, headDim] (batch=1). Data is written into the current
-// block; a new block is allocated from the pool when the current one fills up.
+// have shape [channels, seqLen, dim] where channels*dim equals the pool's
+// headDim. For standard caching channels=1; for GQA caching channels equals
+// batchSize*numKVHeads. Data is written into the current block; a new block
+// is allocated from the pool when the current one fills up.
 func (c *PagedKVCache[T]) Append(layer int, newK, newV *tensor.TensorNumeric[T]) error {
 	if layer < 0 || layer >= c.numLayers {
 		return fmt.Errorf("layer %d out of range [0, %d)", layer, c.numLayers)
@@ -59,14 +69,22 @@ func (c *PagedKVCache[T]) Append(layer int, newK, newV *tensor.TensorNumeric[T])
 
 	shape := newK.Shape()
 	if len(shape) != 3 {
-		return fmt.Errorf("expected 3D tensor [batch, seq, dim], got %dD", len(shape))
+		return fmt.Errorf("expected 3D tensor [channels, seq, dim], got %dD", len(shape))
 	}
-	batch, seqLen, dim := shape[0], shape[1], shape[2]
-	if batch != 1 {
-		return fmt.Errorf("paged KV cache requires batch=1, got %d", batch)
+	channels, seqLen, dim := shape[0], shape[1], shape[2]
+	perPosSize := channels * dim
+	if perPosSize != c.headDim {
+		return fmt.Errorf("channels*dim mismatch: pool has headDim=%d, tensor has %d*%d=%d",
+			c.headDim, channels, dim, perPosSize)
 	}
-	if dim != c.headDim {
-		return fmt.Errorf("headDim mismatch: pool has %d, tensor has %d", c.headDim, dim)
+
+	// Lazily detect channel layout from first Append.
+	if c.channels == 0 {
+		c.channels = channels
+		c.perPosDim = dim
+	} else if c.channels != channels || c.perPosDim != dim {
+		return fmt.Errorf("channel layout mismatch: expected [%d, *, %d], got [%d, *, %d]",
+			c.channels, c.perPosDim, channels, dim)
 	}
 
 	cursor := c.layerCursors[layer]
@@ -90,11 +108,14 @@ func (c *PagedKVCache[T]) Append(layer int, newK, newV *tensor.TensorNumeric[T])
 		block := c.blockTable[blockIdx]
 
 		// Write K and V at the layer's region within the block.
-		// Layout: [numLayers][blockSize][headDim]
-		offset := layer*c.blockSize*c.headDim + posInBlock*c.headDim
-		srcOffset := pos * c.headDim
-		copy(block.K[offset:offset+c.headDim], kData[srcOffset:srcOffset+c.headDim])
-		copy(block.V[offset:offset+c.headDim], vData[srcOffset:srcOffset+c.headDim])
+		// Layout: [numLayers][blockSize][headDim] where headDim = channels*dim.
+		dstBase := layer*c.blockSize*c.headDim + posInBlock*c.headDim
+		for ch := range channels {
+			srcOff := ch*seqLen*dim + pos*dim
+			dstOff := dstBase + ch*dim
+			copy(block.K[dstOff:dstOff+dim], kData[srcOff:srcOff+dim])
+			copy(block.V[dstOff:dstOff+dim], vData[srcOff:srcOff+dim])
+		}
 
 		if posInBlock+1 > block.Used {
 			block.Used = posInBlock + 1
@@ -106,7 +127,7 @@ func (c *PagedKVCache[T]) Append(layer int, newK, newV *tensor.TensorNumeric[T])
 }
 
 // GetKV returns the cached key and value tensors for the given layer,
-// gathered into contiguous [1, seqLen, headDim] tensors. Returns false if
+// gathered into contiguous [channels, seqLen, dim] tensors. Returns false if
 // the layer is out of range or the cache is empty for that layer.
 func (c *PagedKVCache[T]) GetKV(layer int) (*LayerKV[T], bool) {
 	if layer < 0 || layer >= c.numLayers {
@@ -117,25 +138,36 @@ func (c *PagedKVCache[T]) GetKV(layer int) (*LayerKV[T], bool) {
 		return nil, false
 	}
 
-	kOut := make([]T, seqLen*c.headDim)
-	vOut := make([]T, seqLen*c.headDim)
+	channels := c.channels
+	dim := c.perPosDim
+	if channels == 0 {
+		// Never appended; shouldn't happen since seqLen > 0.
+		return nil, false
+	}
+
+	totalElems := channels * seqLen * dim
+	kOut := make([]T, totalElems)
+	vOut := make([]T, totalElems)
 
 	for pos := range seqLen {
 		blockIdx := pos / c.blockSize
 		posInBlock := pos % c.blockSize
 		block := c.blockTable[blockIdx]
 
-		srcOffset := layer*c.blockSize*c.headDim + posInBlock*c.headDim
-		dstOffset := pos * c.headDim
-		copy(kOut[dstOffset:dstOffset+c.headDim], block.K[srcOffset:srcOffset+c.headDim])
-		copy(vOut[dstOffset:dstOffset+c.headDim], block.V[srcOffset:srcOffset+c.headDim])
+		srcBase := layer*c.blockSize*c.headDim + posInBlock*c.headDim
+		for ch := range channels {
+			srcOff := srcBase + ch*dim
+			dstOff := ch*seqLen*dim + pos*dim
+			copy(kOut[dstOff:dstOff+dim], block.K[srcOff:srcOff+dim])
+			copy(vOut[dstOff:dstOff+dim], block.V[srcOff:srcOff+dim])
+		}
 	}
 
-	kTensor, err := tensor.New([]int{1, seqLen, c.headDim}, kOut)
+	kTensor, err := tensor.New([]int{channels, seqLen, dim}, kOut)
 	if err != nil {
 		return nil, false
 	}
-	vTensor, err := tensor.New([]int{1, seqLen, c.headDim}, vOut)
+	vTensor, err := tensor.New([]int{channels, seqLen, dim}, vOut)
 	if err != nil {
 		return nil, false
 	}
@@ -166,6 +198,8 @@ func (c *PagedKVCache[T]) Free() {
 		c.pool.Free(b)
 	}
 	c.blockTable = c.blockTable[:0]
+	c.channels = 0
+	c.perPosDim = 0
 	for i := range c.layerCursors {
 		c.layerCursors[i] = 0
 	}
