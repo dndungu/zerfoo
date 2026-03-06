@@ -13,6 +13,7 @@ import (
 
 	"github.com/zerfoo/zerfoo/generate"
 	"github.com/zerfoo/zerfoo/inference"
+	layerreg "github.com/zerfoo/zerfoo/layers/registry"
 	"github.com/zerfoo/zerfoo/registry"
 )
 
@@ -40,6 +41,8 @@ func (r *dirRegistry) List() []registry.ModelInfo { return nil }
 func (r *dirRegistry) Delete(_ string) error { return nil }
 
 func main() {
+	layerreg.RegisterAll()
+
 	modelDir := flag.String("model", "", "path to model directory (config.json, tokenizer.json, model.zmf)")
 	prompt := flag.String("prompt", "The meaning of life is", "prompt text")
 	maxTokens := flag.Int("tokens", 64, "max tokens to generate")
