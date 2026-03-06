@@ -3,6 +3,7 @@ package generate
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -99,6 +100,7 @@ type fixedLogitsNode struct {
 	// tokenSequence is the sequence of token IDs to produce on each call.
 	// Wraps around if more calls than entries.
 	tokenSequence []int
+	mu            sync.Mutex
 	callCount     int
 }
 
@@ -118,10 +120,12 @@ func (n *fixedLogitsNode) Forward(_ context.Context, inputs ...*tensor.TensorNum
 		}
 	}
 
+	n.mu.Lock()
+	callCount := n.callCount
 	data := make([]float32, seqLen*n.vocabSize)
 	// For each position, set the target token to have the highest logit.
 	for pos := range seqLen {
-		targetToken := n.tokenSequence[n.callCount%len(n.tokenSequence)]
+		targetToken := n.tokenSequence[callCount%len(n.tokenSequence)]
 		offset := pos * n.vocabSize
 		for j := range n.vocabSize {
 			data[offset+j] = -10.0
@@ -130,10 +134,10 @@ func (n *fixedLogitsNode) Forward(_ context.Context, inputs ...*tensor.TensorNum
 			data[offset+targetToken] = 10.0
 		}
 		if pos == seqLen-1 {
-			// Only advance call count after processing the last position.
 			n.callCount++
 		}
 	}
+	n.mu.Unlock()
 
 	return tensor.New([]int{1, seqLen, n.vocabSize}, data)
 }
