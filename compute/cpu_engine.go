@@ -1019,6 +1019,27 @@ func (e *CPUEngine[T]) Transpose(_ context.Context, a *tensor.TensorNumeric[T], 
 	aData := a.Data()
 	rData := result.Data()
 
+	// Fast path for 2D transpose (axes=[1,0]): use cache-friendly blocked copy.
+	if len(originalShape) == 2 && axes[0] == 1 && axes[1] == 0 {
+		rows := originalShape[0]
+		cols := originalShape[1]
+		const blockSize = 64
+		parallelFor(rows, func(startRow, endRow int) {
+			for jb := 0; jb < cols; jb += blockSize {
+				jEnd := jb + blockSize
+				if jEnd > cols {
+					jEnd = cols
+				}
+				for i := startRow; i < endRow; i++ {
+					for j := jb; j < jEnd; j++ {
+						rData[j*rows+i] = aData[i*cols+j]
+					}
+				}
+			}
+		})
+		return result, nil
+	}
+
 	// Build inverse permutation: invAxes[oldAxis] = newAxisIndex
 	invAxes := make([]int, len(axes))
 	for newAxis, oldAxis := range axes {
