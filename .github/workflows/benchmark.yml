@@ -2,9 +2,13 @@ name: benchmark
 on:
   push:
     branches: [main]
+  pull_request:
   schedule:
     - cron: "0 6 * * 1" # weekly Monday 6am UTC
   workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: write
 concurrency:
   group: benchmark-${{ github.ref }}
   cancel-in-progress: true
@@ -44,29 +48,18 @@ jobs:
           name: benchmark-results-previous
           path: prev/
         continue-on-error: true
+      - name: Build comparison tool
+        run: go build -o bench-compare ./cmd/bench-compare/
       - name: Check for regressions
         if: steps.prev.outcome == 'success'
         run: |
-          python3 -c "
-          import json, sys
-          prev = {r['metric']: r['value'] for r in (json.loads(l) for l in open('prev/bench-results.json') if l.strip())}
-          curr = {r['metric']: r['value'] for r in (json.loads(l) for l in open('bench-results.json') if l.strip())}
-          regressions = []
-          for m, cv in curr.items():
-              pv = prev.get(m)
-              if pv and pv > 0:
-                  change = (cv - pv) / pv * 100
-                  direction = 'higher' if change > 0 else 'lower'
-                  if abs(change) > 5:
-                      regressions.append(f'{m}: {pv:.2f} -> {cv:.2f} ({change:+.1f}% {direction})')
-          if regressions:
-              print('Benchmark regressions detected (>5% change):')
-              for r in regressions:
-                  print(f'  - {r}')
-              sys.exit(1)
-          else:
-              print('No significant regressions detected.')
-          "
+          ./bench-compare prev/bench-results.json bench-results.json > regression-report.md || REGRESSED=true
+          cat regression-report.md
+          if [ "$REGRESSED" = "true" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body-file regression-report.md
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Save as previous baseline
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
