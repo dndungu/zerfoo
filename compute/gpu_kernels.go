@@ -92,7 +92,6 @@ func gpuBroadcastOp[T tensor.Numeric](
 
 	// Determine output shape and broadcast strides.
 	var M, D, saRow, saCol, sbRow, sbCol int
-	var outShape []int
 
 	switch {
 	case aM == bM && aD == bD:
@@ -100,35 +99,33 @@ func gpuBroadcastOp[T tensor.Numeric](
 		M, D = aM, aD
 		saRow, saCol = aD, 1
 		sbRow, sbCol = bD, 1
-		outShape = aShape
 	case bM == 1 && aD == bD:
 		// b is row-broadcast: [1,D] op [M,D].
 		M, D = aM, aD
 		saRow, saCol = aD, 1
 		sbRow, sbCol = 0, 1
-		outShape = aShape
 	case aM == 1 && aD == bD:
 		// a is row-broadcast: [1,D] op [M,D].
 		M, D = bM, bD
 		saRow, saCol = 0, 1
 		sbRow, sbCol = bD, 1
-		outShape = bShape
 	case aM == bM && bD == 1:
 		// b is column-broadcast: [M,1] op [M,D].
 		M, D = aM, aD
 		saRow, saCol = aD, 1
 		sbRow, sbCol = 1, 0
-		outShape = aShape
 	case aM == bM && aD == 1:
 		// a is column-broadcast: [M,1] op [M,D].
 		M, D = bM, bD
 		saRow, saCol = 1, 0
 		sbRow, sbCol = bD, 1
-		outShape = bShape
 	default:
 		// Unsupported broadcast pattern.
 		return cpuFallback(ctx, a, b, dst...)
 	}
+
+	// Compute proper N-D broadcast output shape (NumPy rules).
+	outShape := broadcastShape(aShape, bShape)
 
 	e.setDevice()
 
