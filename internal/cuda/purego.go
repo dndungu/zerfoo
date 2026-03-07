@@ -149,6 +149,16 @@ func DlopenKernels() (uintptr, error) {
 	return 0, fmt.Errorf("kernels: dlopen libkernels failed: %s", lastErr)
 }
 
+// DlopenPath opens a shared library at the given path via dlopen.
+// Returns the handle or an error if the library cannot be loaded.
+func DlopenPath(path string) (uintptr, error) {
+	h := dlopenImpl(path, rtldLazy|rtldGlobal)
+	if h == 0 {
+		return 0, fmt.Errorf("dlopen %s: %s", path, dlerrorImpl())
+	}
+	return h, nil
+}
+
 // Dlsym resolves a symbol from a dlopen handle. Returns the function
 // pointer address or an error if the symbol is not found.
 func Dlsym(handle uintptr, name string) (uintptr, error) {

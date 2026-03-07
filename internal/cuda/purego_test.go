@@ -69,6 +69,28 @@ func TestCcallDoesNotPanic(t *testing.T) {
 	// ccall(fn) would crash, so we just verify compilation.
 }
 
+func TestDlopenPathNonexistent(t *testing.T) {
+	_, err := DlopenPath("/tmp/libnonexistent_test_xyzzy.so")
+	if err == nil {
+		t.Fatal("expected DlopenPath to fail for nonexistent library")
+	}
+	t.Logf("DlopenPath error: %v", err)
+}
+
+func TestDlopenPathValid(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("libSystem test only runs on macOS")
+	}
+	h, err := DlopenPath("/usr/lib/libSystem.B.dylib")
+	if err != nil {
+		t.Fatalf("expected DlopenPath to succeed: %v", err)
+	}
+	if h == 0 {
+		t.Fatal("expected non-zero handle")
+	}
+	dlcloseImpl(h)
+}
+
 func TestDlopenImplWithLibSystem(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("libSystem test only runs on macOS")
