@@ -7,6 +7,12 @@ import (
 	"github.com/zerfoo/zerfoo/tensor"
 )
 
+// FusedRMSNormer is an optional interface for engines that support GPU-accelerated
+// fused RMSNorm. Layers can type-assert to this to use the fused kernel.
+type FusedRMSNormer interface {
+	FusedRMSNormGPU(input, weight *tensor.TensorNumeric[float32], epsilon float32) (*tensor.TensorNumeric[float32], error)
+}
+
 // Engine defines the interface for a computation engine (e.g., CPU, GPU).
 // All tensor operations should be routed through an Engine implementation to ensure
 // hardware interoperability and optimized performance.

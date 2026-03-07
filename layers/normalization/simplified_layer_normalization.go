@@ -53,6 +53,20 @@ func (sln *SimplifiedLayerNormalization[T]) Forward(ctx context.Context, inputs 
 	input := inputs[0]
 	sln.inputShape = input.Shape()
 
+	// GPU fused single-pass kernel for float32 on GPUEngine (inference hot path).
+	if fused, ok := sln.engine.(compute.FusedRMSNormer); ok {
+		if f32Input, iof := any(input).(*tensor.TensorNumeric[float32]); iof {
+			f32Gain, gOk := any(sln.gain.Value).(*tensor.TensorNumeric[float32])
+			f32Eps, eOk := any(sln.epsilon).(float32)
+			if gOk && eOk && f32Gain.Size() == f32Input.Shape()[len(f32Input.Shape())-1] {
+				out, err := fused.FusedRMSNormGPU(f32Input, f32Gain, f32Eps)
+				if err != nil {
+					return nil, err
+				}
+				return any(out).(*tensor.TensorNumeric[T]), nil
+			}
+		}
+	}
 	// Fused single-pass kernel for float32 on CPUEngine (inference hot path).
 	if _, isCPU := sln.engine.(*compute.CPUEngine[T]); isCPU {
 		if f32Input, ok := any(input).(*tensor.TensorNumeric[float32]); ok {
