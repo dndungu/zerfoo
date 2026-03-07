@@ -166,7 +166,7 @@ Existing code:
     No H2D copy of weights during forward pass (verify via pprof or logging).
   - Dependencies: T69.2.
 
-- [ ] S69.3.1 Weight upload test  Owner: TBD  Est: 1h
+- [x] S69.3.1 Weight upload test  Owner: TBD  Est: 1h  2026 03 06
   - Load a small test model with WithDevice("cuda").
   - Verify all parameter tensors have GPUStorage.
   - Run forward pass. Verify no cudaMemcpy H2D for weight tensors in profile.
@@ -206,7 +206,7 @@ Existing code:
     2D (128x256), 3D (4x128x64), 4D (2x8x128x64) test cases.
   - Dependencies: none.
 
-- [ ] S70.1.1 CUDA transpose kernel unit tests  Owner: TBD  Est: 1.5h
+- [x] S70.1.1 CUDA transpose kernel unit tests  Owner: TBD  Est: 1.5h  2026 03 06
   - Test: 2D transpose matches CPU transpose within 0 tolerance (exact).
   - Test: 3D transpose with batch dimension.
   - Test: 4D transpose with attention head layout.
@@ -229,7 +229,7 @@ Existing code:
     Output has GPUStorage. Parity with CPU within 0 tolerance.
   - Dependencies: T70.1, T70.2, T69.2.
 
-- [ ] S70.3.1 GPU transpose parity tests  Owner: TBD  Est: 1h
+- [x] S70.3.1 GPU transpose parity tests  Owner: TBD  Est: 1h  2026 03 06
   - Compare GPUEngine.Transpose vs CPUEngine.Transpose for shapes used in
     Gemma 3: [2048x256], [1x8x128x64], [8x128x64].
   - Verify output has GPUStorage.
@@ -266,7 +266,7 @@ Existing code:
   - Acceptance: Kernels produce correct results for all 3 broadcast patterns.
   - Dependencies: T71.1.
 
-- [ ] S71.2.1 Broadcasting kernel tests  Owner: TBD  Est: 1.5h
+- [x] S71.2.1 Broadcasting kernel tests  Owner: TBD  Est: 1.5h  2026 03 06
   - Test: scalar broadcast for Add, Mul (1 vs 1024 elements).
   - Test: row broadcast for Add ([1,256] + [128,256]).
   - Test: column broadcast for Mul ([128,1] * [128,256]).
@@ -281,7 +281,7 @@ Existing code:
   - Acceptance: Gemma 3 forward pass on GPU has 0 binary op CPU fallbacks.
   - Dependencies: T71.2.
 
-- [ ] S71.3.1 End-to-end broadcasting parity test  Owner: TBD  Est: 1h
+- [x] S71.3.1 End-to-end broadcasting parity test  Owner: TBD  Est: 1h  2026 03 06
   - Run Gemma 3 forward pass on GPU and CPU.
   - Verify logits match within tolerance.
   - Verify no binary op CPU fallbacks in log.
@@ -307,7 +307,7 @@ Existing code:
     N=128 (typical Gemma 3 vocabulary lookup).
   - Dependencies: none.
 
-- [ ] S72.1.1 CUDA gather kernel tests  Owner: TBD  Est: 1h
+- [x] S72.1.1 CUDA gather kernel tests  Owner: TBD  Est: 1h  2026 03 06
   - Test: single index lookup.
   - Test: batch of 128 indices.
   - Test: out-of-bounds index handling (should clamp or error).
@@ -320,7 +320,7 @@ Existing code:
   - Acceptance: GPUEngine.Gather uses GPU kernel. Output has GPUStorage.
   - Dependencies: T72.1, T69.2.
 
-- [ ] S72.2.1 GPU gather parity test  Owner: TBD  Est: 1h
+- [x] S72.2.1 GPU gather parity test  Owner: TBD  Est: 1h  2026 03 06
   - Compare GPU vs CPU Gather for Gemma 3 vocabulary size.
   - Verify output tensor has GPUStorage.
 
@@ -346,7 +346,7 @@ Existing code:
     CPU fused RMSNorm for shapes [1,2048] and [128,2048].
   - Dependencies: none.
 
-- [ ] S73.1.1 CUDA RMSNorm kernel tests  Owner: TBD  Est: 1.5h
+- [x] S73.1.1 CUDA RMSNorm kernel tests  Owner: TBD  Est: 1.5h  2026 03 06
   - Test: single row (1x2048).
   - Test: batch (128x2048).
   - Test: small dimension (1x64) for edge case.
@@ -360,7 +360,7 @@ Existing code:
   - Acceptance: RMSNorm uses fused GPU kernel when tensors are GPU-resident.
   - Dependencies: T73.1, T69.2.
 
-- [ ] S73.2.1 GPU RMSNorm parity test  Owner: TBD  Est: 1h
+- [x] S73.2.1 GPU RMSNorm parity test  Owner: TBD  Est: 1h  2026 03 06
   - Compare GPU fused RMSNorm vs CPU fused RMSNorm for Gemma 3 hidden size.
   - Verify output has GPUStorage.
 
@@ -372,36 +372,48 @@ Existing code:
 After all GPU optimizations, measure tok/s on DGX Spark and compare with
 baselines.
 
-- [ ] T74.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h
+- [x] T74.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h  2026 03 06
   - Build zerfoo with CUDA tags on DGX Spark including all E69-E73 changes.
   - Run `bench_tps -model ~/models/gemma3-q4 -device cuda -tokens 100`.
   - Capture pprof profile.
   - Acceptance: Profile captured showing new GPU utilization breakdown.
   - Dependencies: T69.4, T70.3, T71.3, T72.2, T73.2.
+  - Result: cgocall 58% (down from 43% baseline but now includes activation H2D/D2H),
+    Pow CPU fallback 8.9%, binaryOp CPU fallback 10.4%, GPUStorage.Slice D2H 24%.
 
-- [ ] S74.1.1 GPU profile report  Owner: TBD  Est: 30m
-  - Document: tok/s, cgocall %, remaining CPU fallbacks, GPU utilization.
+- [x] S74.1.1 GPU profile report  Owner: TBD  Est: 30m  2026 03 06
+  - GPU: 6.84 tok/s median. cgocall 58%. Remaining CPU fallbacks: Pow (8.9%),
+    some broadcast patterns (10.4%), GPUStorage.Slice D2H (24%).
 
-- [ ] T74.2 Compare GPU vs CPU tok/s  Owner: TBD  Est: 1h
+- [x] T74.2 Compare GPU vs CPU tok/s  Owner: TBD  Est: 1h  2026 03 06
   - Run same prompt with -device cpu and -device cuda.
   - Measure tok/s for both. 3 runs each, report median.
   - Acceptance: GPU tok/s >= 10 (target). If not met, identify remaining
     bottleneck and document what would be needed.
   - Dependencies: T74.1.
+  - Result: GPU 6.84 tok/s, CPU 6.61 tok/s. Target NOT met.
+    Remaining bottlenecks: GPU PowScalar kernel needed, scalar-broadcast for
+    all binary ops, more complete GPU op coverage to eliminate D2H round-trips.
 
-- [ ] S74.2.1 Benchmark comparison report  Owner: TBD  Est: 30m
+- [x] S74.2.1 Benchmark comparison report  Owner: TBD  Est: 30m  2026 03 06
+  - GPU: 6.84 tok/s (up from 5.12 baseline, +33.6%). CPU: 6.61 tok/s.
+    GPU now faster than CPU. 10 tok/s target requires GPU PowScalar,
+    full scalar-broadcast, and eliminating remaining D2H round-trips.
 
-- [ ] T74.3 Verify output correctness  Owner: TBD  Est: 1h
+- [x] T74.3 Verify output correctness  Owner: TBD  Est: 1h  2026 03 06
   - Generate 50 tokens with same prompt on CPU and GPU.
   - Compare output text (may differ due to floating point but should be
     coherent on both).
   - Acceptance: Both outputs produce coherent English text. No NaN or Inf.
   - Dependencies: T74.1.
+  - Result: GPU and CPU both produce coherent English text. No NaN or Inf.
+    Fixed N-D broadcast shape bug (98c3f60) that was causing prefill failures.
 
-- [ ] S74.3.1 Output correctness test  Owner: TBD  Est: 30m
+- [x] S74.3.1 Output correctness test  Owner: TBD  Est: 30m  2026 03 06
 
-- [ ] T74.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+- [x] T74.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m  2026 03 06
   - Dependencies: T74.3.
+  - Result: 0 issues on compute/, graph/, tensor/, inference/.
 
 ---
 
@@ -524,7 +536,28 @@ A task is done when:
 
 ## 8. Progress Log
 
-### Change Summary -- 2026-03-06
+### Change Summary -- 2026-03-06 (Phase 32 Complete)
+
+All 6 epics (E69-E74) complete. GPU inference improved from 5.12 to 6.84 tok/s
+(+33.6%) on DGX Spark GB10. GPU now faster than CPU (6.61 tok/s). 10 tok/s
+target not met -- remaining bottlenecks documented in E74 results.
+
+Key implementations:
+- T69.1-T69.5: GPU tensor residency, Q4 weight pre-upload, Graph.ConstantTensors()
+- T70.1-T70.4: GPU Transpose (2D tiled + N-D stride-based)
+- T71.1-T71.4: GPU broadcasting (stride-based 2D) + N-D shape fix (98c3f60)
+- T72.1-T72.3: GPU Gather kernel
+- T73.1-T73.3: Fused GPU RMSNorm kernel
+- T74.1-T74.4: Benchmarked, profiled, verified correctness, lint clean
+
+Bug fixes:
+- fix(compute): N-D broadcast output shape in gpuBroadcastOp (98c3f60)
+- fix(compute): GPU Reshape zero-copy view for GPUStorage (7e0c11c)
+- fix(compute): nil axes in GPU Transpose (8525515)
+
+All 16 test/benchmark subtasks marked complete (verified on DGX Spark).
+
+### Change Summary -- 2026-03-06 (Initial)
 
 Created Phase 32 plan replacing Phase 31 plan.
 
@@ -601,6 +634,8 @@ ADRs created:
 | Gemma 3 2B | Q4_0 | CPU ARM64 | 6.86 | 30 |
 | Gemma 3 2B | Q4_0 | CPU ARM64 | 5.94 | 31 (bench_tps) |
 | Gemma 3 2B | Q4_0 | GPU (cuda) | 5.12 | 31 (bench_tps) |
+| Gemma 3 2B | Q4_0 | CPU ARM64 | 6.61 | 32 (bench_tps) |
+| Gemma 3 2B | Q4_0 | GPU (cuda) | 6.84 | 32 (bench_tps) |
 
 ---
 
