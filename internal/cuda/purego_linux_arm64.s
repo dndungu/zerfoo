@@ -55,7 +55,7 @@ TEXT ·ccallTrampoline(SB),NOSPLIT,$0
 	// Push outgoing stack argument area (32 bytes for args[8]-args[11]).
 	// This creates a fresh region at RSP+0 that the C callee sees as its
 	// incoming stack arguments, without touching the Go-saved LR above.
-	SUB RSP, RSP, $32
+	SUB $32, RSP
 	MOVD 72(R19), R10
 	MOVD R10, 0(RSP)
 	MOVD 80(R19), R10
@@ -69,7 +69,7 @@ TEXT ·ccallTrampoline(SB),NOSPLIT,$0
 	CALL (R9)
 
 	// Pop outgoing stack argument area
-	ADD RSP, RSP, $32
+	ADD $32, RSP
 
 	// Store return value
 	MOVD R0, 104(R19)
