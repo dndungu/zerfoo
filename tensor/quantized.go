@@ -24,6 +24,12 @@ type Q4Storage struct {
 	blocks      []q4Block
 	len         int        // number of logical float32 elements (before padding)
 	cachedSlice []float32  // lazily populated on first Slice() call
+
+	// GPU-resident copy of the raw bytes (optional).
+	// Set by GPUEngine.UploadWeights to avoid per-op H2D copies.
+	gpuPtr      unsafe.Pointer
+	gpuByteSize int
+	gpuDeviceID int
 }
 
 // QuantizeQ4 quantizes a float32 slice into Q4_0 format.
@@ -142,6 +148,20 @@ func (q *Q4Storage) RawBytes() []byte {
 		copy(out[off+2:off+18], blk.data[:])
 	}
 	return out
+}
+
+// SetGPUPtr stores a pre-uploaded GPU device pointer for the raw bytes.
+// byteSize must match len(RawBytes()). The caller retains ownership of the pointer.
+func (q *Q4Storage) SetGPUPtr(ptr unsafe.Pointer, byteSize, deviceID int) {
+	q.gpuPtr = ptr
+	q.gpuByteSize = byteSize
+	q.gpuDeviceID = deviceID
+}
+
+// GPUPtr returns the cached GPU device pointer, byte size, and device ID.
+// Returns nil if no GPU copy exists.
+func (q *Q4Storage) GPUPtr() (unsafe.Pointer, int, int) {
+	return q.gpuPtr, q.gpuByteSize, q.gpuDeviceID
 }
 
 // BlockScaleF32 returns the dequantization scale for block i as float32.

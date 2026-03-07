@@ -49,10 +49,7 @@ func LoadFile(path string, opts ...Option) (*Model, error) {
 
 	// Upload model weights to GPU if the engine supports it.
 	if uploader, ok := eng.(compute.WeightUploader); ok {
-		var tensors []*tensor.TensorNumeric[float32]
-		for _, p := range g.Parameters() {
-			tensors = append(tensors, p.Value)
-		}
+		tensors := g.ConstantTensors()
 		if embWeight != nil {
 			tensors = append(tensors, embWeight)
 		}

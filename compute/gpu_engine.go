@@ -120,28 +120,48 @@ func (e *GPUEngine[T]) SetLogger(l log.Logger) {
 }
 
 // UploadWeights copies CPU-resident tensors to GPU device memory in place.
-// Tensors that already have GPUStorage are skipped. This is called once at
-// model load time to eliminate per-operation H2D copies during inference.
+// Tensors that already have GPUStorage are skipped. Q4 quantized weights
+// get their raw bytes uploaded and cached in Q4Storage to avoid per-op H2D.
+// This is called once at model load time.
 func (e *GPUEngine[T]) UploadWeights(tensors []*tensor.TensorNumeric[float32]) error {
 	e.setDevice()
 	uploaded := 0
+	q4Uploaded := 0
 	for _, t := range tensors {
 		if t == nil {
 			continue
 		}
-		// Skip tensors already on GPU.
-		if _, ok := t.GetStorage().(*tensor.GPUStorage[float32]); ok {
+		// Upload Q4 raw bytes to GPU and cache the pointer.
+		// Q4 weights are the biggest win because they're used in every MatMul
+		// and are expensive to re-upload (~18 bytes per 32 floats).
+		if qs, ok := any(t.GetStorage()).(*tensor.Q4Storage); ok {
+			if ptr, _, _ := qs.GPUPtr(); ptr != nil {
+				continue // already on GPU
+			}
+			rawBytes := qs.RawBytes()
+			devPtr, err := e.pool.Alloc(e.deviceID, len(rawBytes))
+			if err != nil {
+				return fmt.Errorf("alloc Q4 GPU (shape %v): %w", t.Shape(), err)
+			}
+			if err := e.runtime.Memcpy(devPtr, unsafe.Pointer(&rawBytes[0]), len(rawBytes), gpuapi.MemcpyHostToDevice); err != nil {
+				e.pool.Free(e.deviceID, devPtr, len(rawBytes))
+				return fmt.Errorf("upload Q4 (shape %v): %w", t.Shape(), err)
+			}
+			qs.SetGPUPtr(devPtr, len(rawBytes), e.deviceID)
+			q4Uploaded++
 			continue
 		}
-		gpuT, err := tensor.ToGPUDevice[float32](t, e.deviceID)
-		if err != nil {
-			return fmt.Errorf("upload weight (shape %v): %w", t.Shape(), err)
-		}
-		t.SetStorage(gpuT.GetStorage())
-		uploaded++
+		// Skip non-Q4 tensors. Many float32 weights are consumed by ops
+		// without GPU kernels (Pow, some broadcast patterns). Uploading
+		// them to GPU triggers costly D2H copies when those ops read
+		// data back. Only Q4 weights benefit because all Q4 MatMul runs
+		// on GPU and avoids per-op H2D of the heavy raw bytes.
 	}
-	if uploaded > 0 {
-		e.logger.Info("weights uploaded to GPU", "count", fmt.Sprintf("%d", uploaded), "device", fmt.Sprintf("%d", e.deviceID))
+	if uploaded > 0 || q4Uploaded > 0 {
+		e.logger.Info("weights uploaded to GPU",
+			"f32", fmt.Sprintf("%d", uploaded),
+			"q4", fmt.Sprintf("%d", q4Uploaded),
+			"device", fmt.Sprintf("%d", e.deviceID))
 	}
 	return nil
 }
@@ -349,17 +369,26 @@ func (e *GPUEngine[T]) matMulQ4(ctx context.Context, qs *tensor.Q4Storage, a, b 
 
 	e.setDevice()
 
-	// Upload Q4 raw bytes to GPU.
-	aBytes := qs.RawBytes()
-	devA, err := e.pool.Alloc(e.deviceID, len(aBytes))
-	if err != nil {
-		return e.cpu.MatMul(ctx, a, b, dst...)
+	// Use pre-uploaded Q4 GPU pointer if available; otherwise upload now.
+	var devA unsafe.Pointer
+	var freeA func()
+	if ptr, _, _ := qs.GPUPtr(); ptr != nil {
+		devA = ptr
+		freeA = func() {} // pre-uploaded; do not free
+	} else {
+		aBytes := qs.RawBytes()
+		var err error
+		devA, err = e.pool.Alloc(e.deviceID, len(aBytes))
+		if err != nil {
+			return e.cpu.MatMul(ctx, a, b, dst...)
+		}
+		freeA = func() { e.pool.Free(e.deviceID, devA, len(aBytes)) }
+		if err := e.runtime.Memcpy(devA, unsafe.Pointer(&aBytes[0]), len(aBytes), gpuapi.MemcpyHostToDevice); err != nil {
+			freeA()
+			return e.cpu.MatMul(ctx, a, b, dst...)
+		}
 	}
-	defer e.pool.Free(e.deviceID, devA, len(aBytes))
-
-	if err := e.runtime.Memcpy(devA, unsafe.Pointer(&aBytes[0]), len(aBytes), gpuapi.MemcpyHostToDevice); err != nil {
-		return e.cpu.MatMul(ctx, a, b, dst...)
-	}
+	defer freeA()
 
 	// Upload B (float32) to GPU.
 	devB, cleanupB, err := getDevicePtr(e, b)

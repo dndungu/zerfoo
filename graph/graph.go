@@ -219,6 +219,25 @@ func (g *Graph[T]) Output() Node[T] {
 	return g.output
 }
 
+// ConstantTensors returns all constant/parameter weight tensors in the graph.
+// These are tensors from nodes with OpType "Parameter" or "Constant".
+// Call after graph construction to collect tensors for GPU pre-upload.
+func (g *Graph[T]) ConstantTensors() []*tensor.TensorNumeric[T] {
+	ctx := context.Background()
+	var tensors []*tensor.TensorNumeric[T]
+	for _, n := range g.nodes {
+		if !isConstantNode[T](n) {
+			continue
+		}
+		t, err := n.Forward(ctx)
+		if err != nil || t == nil {
+			continue
+		}
+		tensors = append(tensors, t)
+	}
+	return tensors
+}
+
 // Nodes returns all the nodes in the graph.
 func (g *Graph[T]) Nodes() []Node[T] {
 	return g.nodes
