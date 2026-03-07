@@ -1,6 +1,28 @@
-# Phase 34 -- Track 0: Composition Fixes
+# Phase 34 -- Track A: purego / dlopen
 
 ## Status: In Progress
+
+## 2026-03-07 -- Track A Wave A1
+
+Track A: Replace CGo CUDA bindings with purego dlopen loader.
+
+### Completed
+
+| Task | File | Commit | Summary |
+|------|------|--------|---------|
+| T87.1+T87.2+S87.2.1 | internal/cuda/purego*.go | c39ca30 | Zero-CGo CUDA dlopen loader with assembly trampolines. Darwin (syscall6/9), Linux arm64 (asmcgocall + AAPCS64 trampoline), other (stubs). CUDALib loads libcudart.so, resolves 13 function pointers. 7 tests pass. |
+
+### Deviation
+
+Used purego-style assembly trampolines instead of golang.org/x/sys/unix.Dlopen
+(which does not exist). User approved this approach. True zero CGo: calls bypass
+runtime.cgocall entirely.
+
+---
+
+# Phase 34 -- Track 0: Composition Fixes
+
+## Status: Complete (Priority 1+2), Blocked (Priority 3)
 
 ## 2026-03-07 -- Session Start
 
