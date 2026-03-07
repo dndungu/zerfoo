@@ -125,3 +125,41 @@ const (
 	rtldLazy   = 0x1
 	rtldGlobal = 0x100
 )
+
+// kernelLibPaths lists paths to try for the custom kernels shared library.
+var kernelLibPaths = []string{
+	"libkernels.so",
+	"./libkernels.so",
+}
+
+// DlopenKernels loads the custom kernels shared library (libkernels.so)
+// and returns the dlopen handle. Returns an error if the library cannot
+// be found.
+func DlopenKernels() (uintptr, error) {
+	var lastErr string
+	for _, path := range kernelLibPaths {
+		h := dlopenImpl(path, rtldLazy|rtldGlobal)
+		if h != 0 {
+			return h, nil
+		}
+		lastErr = dlerrorImpl()
+	}
+	return 0, fmt.Errorf("kernels: dlopen libkernels failed: %s", lastErr)
+}
+
+// Dlsym resolves a symbol from a dlopen handle. Returns the function
+// pointer address or an error if the symbol is not found.
+func Dlsym(handle uintptr, name string) (uintptr, error) {
+	addr := dlsymImpl(handle, name)
+	if addr == 0 {
+		return 0, fmt.Errorf("dlsym %s: %s", name, dlerrorImpl())
+	}
+	return addr, nil
+}
+
+// Ccall calls a C function pointer with up to 12 arguments using the
+// platform-specific zero-CGo mechanism. Exported for use by the kernels
+// package.
+func Ccall(fn uintptr, args ...uintptr) uintptr {
+	return ccall(fn, args...)
+}
