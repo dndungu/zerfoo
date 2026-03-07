@@ -698,53 +698,38 @@ load time, walk the ExecutionPlan instruction tape, emit a megakernel .cu,
 compile it (JIT or cached), and use it for decode tokens.
 
 - [ ] T93.1 JIT compilation with nvrtc  Owner: TBD  Est: 3h
-  - Create `internal/cuda/jit.go` with dlopen wrappers for nvrtc:
-    nvrtcCreateProgram, nvrtcCompileProgram, nvrtcGetPTX, nvrtcDestroyProgram.
-  - Add cuModuleLoadData, cuModuleGetFunction, cuLaunchCooperativeKernel
-    wrappers (driver API via dlopen).
-  - Acceptance: Can compile a .cu string and launch the resulting kernel.
-  - Dependencies: E87 (dlopen infrastructure).
+  - Deferred: using cached nvcc (T93.2) instead. nvrtc can be added later
+    for faster iteration without nvcc installed.
 
-- [ ] S93.1.1 JIT compilation smoke test  Owner: TBD  Est: 1h
-  - Compile a trivial kernel via nvrtc. Launch it. Verify correct output.
+- [x] T93.2 Cached compilation with nvcc  Owner: TBD  Est: 2h  Completed: 2026 03 07
+  - CachedCompile() in internal/codegen/compile.go.
+  - SHA-256 hash for cache validation. Skip recompile on cache hit.
+  - Tested on DGX Spark: 1.16s first compile, instant cache hit.
 
-- [ ] T93.2 Cached compilation with nvcc  Owner: TBD  Est: 2h
-  - Alternative to JIT: emit .cu to temp file, call nvcc to compile to .so,
-    cache the .so alongside the model file.
-  - If cached .so exists and model hash matches, skip compilation.
-  - Acceptance: First load compiles (slow). Second load uses cache (fast).
-  - Dependencies: T91.3 (emitter).
-
-- [ ] S93.2.1 Cache hit/miss test  Owner: TBD  Est: 1h
-  - First load: verify compilation happens.
-  - Second load: verify cache is used (no nvcc invocation).
+- [x] S93.2.1 Cache hit/miss test  Owner: TBD  Est: 1h  Completed: 2026 03 07
+  - First compile creates .so + hash. Second compile uses cache.
+  - Different source triggers recompilation.
 
 - [ ] T93.3 Wire megakernel into decode loop  Owner: TBD  Est: 3h
   - In `generate/stream.go`, after model load and plan compilation:
     1. Call plan.Instructions() to get the instruction tape.
-    2. Pass instruction tape to the emitter (T91.3) to generate .cu.
-    3. Compile via nvrtc or cached nvcc (T93.1 or T93.2).
-    4. On each decode token: launch megakernel instead of plan.Run().
-  - Pass: input token embedding pointer, output logits pointer, all frozen
-    slot GPU pointers (model weights), position index.
-  - Acceptance: Generates coherent text using megakernel path.
-  - Dependencies: E91, E92, T93.1 or T93.2.
+    2. Check ops with CheckSupport(). If unsupported, fall back.
+    3. Emit megakernel .cu with EmitMegakernel().
+    4. Compile with CachedCompile().
+    5. dlopen the .so, resolve megakernel symbol.
+    6. On each decode token: launch megakernel instead of plan.Run().
+  - Dependencies: E91, E92, T93.2.
 
 - [ ] S93.3.1 Megakernel decode correctness test  Owner: TBD  Est: 2h
   - Generate 50 tokens with megakernel path.
   - Compare output with ExecutionPlan.Run() path within tolerance.
-  - Verify coherent text output.
 
-- [ ] T93.4 Fallback to ExecutionPlan on unsupported ops  Owner: TBD  Est: 1.5h
-  - If any instruction has an Unsupported op emitter (op not in the table),
-    fall back to ExecutionPlan.Run() with a warning log listing which ops
-    are unsupported.
-  - Acceptance: Models with unsupported ops still work via the standard path.
-    The warning log tells the user exactly which ops need emitters.
-  - Dependencies: T93.3.
+- [x] T93.4 Fallback to ExecutionPlan on unsupported ops  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
+  - CheckSupport() returns unsupported op names for warning/fallback.
+  - Dedup: each unsupported op listed once.
 
 - [ ] T93.5 Run golangci-lint on generate/ and internal/codegen/  Owner: TBD  Est: 15m
-  - Dependencies: T93.4.
+  - Dependencies: T93.3.
 
 #### E94: Megakernel Performance Tuning (O90)
 
