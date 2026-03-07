@@ -103,6 +103,13 @@ func (e *errEngine) Concat(ctx context.Context, inputs []*tensor.TensorNumeric[f
 	return e.Engine.Concat(ctx, inputs, axis, dst...)
 }
 
+func (e *errEngine) Tanh(ctx context.Context, a *tensor.TensorNumeric[float32], dst ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	if err := e.check("Tanh"); err != nil {
+		return nil, err
+	}
+	return e.Engine.Tanh(ctx, a, dst...)
+}
+
 func (e *errEngine) Ops() numeric.Arithmetic[float32] {
 	return numeric.Float32Ops{}
 }
@@ -314,7 +321,7 @@ func TestFastGelu_ForwardErrors(t *testing.T) {
 		{"MulScalar1", map[string]int{"MulScalar": 1}},
 		{"Add1", map[string]int{"Add": 1}},
 		{"MulScalar2", map[string]int{"MulScalar": 2}},
-		{"UnaryOp1", map[string]int{"UnaryOp": 1}},
+		{"Tanh1", map[string]int{"Tanh": 1}},
 		{"AddScalar1", map[string]int{"AddScalar": 1}},
 		{"Mul3", map[string]int{"Mul": 3}},
 		{"MulScalar3", map[string]int{"MulScalar": 3}},
