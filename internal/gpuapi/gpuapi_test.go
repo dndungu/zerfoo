@@ -129,6 +129,30 @@ func (stubKernelRunner) Softmax(_, _ unsafe.Pointer, _, _, _ int, _ gpuapi.Strea
 func (stubKernelRunner) GemmQ4F32(_, _, _ unsafe.Pointer, _, _, _ int, _ gpuapi.Stream) error {
 	return nil
 }
+func (stubKernelRunner) AddBroadcast(_, _, _ unsafe.Pointer, _, _, _, _, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) SubBroadcast(_, _, _ unsafe.Pointer, _, _, _, _, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) MulBroadcast(_, _, _ unsafe.Pointer, _, _, _, _, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) DivBroadcast(_, _, _ unsafe.Pointer, _, _, _, _, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) Transpose2D(_, _ unsafe.Pointer, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) TransposeND(_, _ unsafe.Pointer, _, _, _ []int32, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) Gather(_, _, _ unsafe.Pointer, _, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
+func (stubKernelRunner) RMSNorm(_, _, _ unsafe.Pointer, _ float32, _, _ int, _ gpuapi.Stream) error {
+	return nil
+}
 
 var _ gpuapi.KernelRunner = stubKernelRunner{}
 

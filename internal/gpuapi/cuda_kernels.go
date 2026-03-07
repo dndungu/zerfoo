@@ -95,5 +95,37 @@ func (k *CUDAKernels) GemmQ4F32(aQ4, b, c unsafe.Pointer, m, kk, n int, s Stream
 	return kernels.GemmQ4F32(aQ4, b, c, m, kk, n, streamPtr(s))
 }
 
+func (k *CUDAKernels) AddBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s Stream) error {
+	return kernels.AddBroadcast(a, b, c, saRow, saCol, sbRow, sbCol, M, D, streamPtr(s))
+}
+
+func (k *CUDAKernels) SubBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s Stream) error {
+	return kernels.SubBroadcast(a, b, c, saRow, saCol, sbRow, sbCol, M, D, streamPtr(s))
+}
+
+func (k *CUDAKernels) MulBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s Stream) error {
+	return kernels.MulBroadcast(a, b, c, saRow, saCol, sbRow, sbCol, M, D, streamPtr(s))
+}
+
+func (k *CUDAKernels) DivBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s Stream) error {
+	return kernels.DivBroadcast(a, b, c, saRow, saCol, sbRow, sbCol, M, D, streamPtr(s))
+}
+
+func (k *CUDAKernels) Transpose2D(input, output unsafe.Pointer, rows, cols int, s Stream) error {
+	return kernels.Transpose2D(input, output, rows, cols, streamPtr(s))
+}
+
+func (k *CUDAKernels) TransposeND(input, output unsafe.Pointer, inStrides, outShape, perm []int32, ndim, total int, s Stream) error {
+	return kernels.TransposeND(input, output, inStrides, outShape, perm, ndim, total, streamPtr(s))
+}
+
+func (k *CUDAKernels) Gather(table, indices, output unsafe.Pointer, N, D, V int, s Stream) error {
+	return kernels.Gather(table, indices, output, N, D, V, streamPtr(s))
+}
+
+func (k *CUDAKernels) RMSNorm(input, weight, output unsafe.Pointer, eps float32, rows, D int, s Stream) error {
+	return kernels.RMSNorm(input, weight, output, eps, rows, D, streamPtr(s))
+}
+
 // Compile-time interface assertion.
 var _ KernelRunner = (*CUDAKernels)(nil)

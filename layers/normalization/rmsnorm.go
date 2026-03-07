@@ -116,7 +116,22 @@ func (r *RMSNorm[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeri
 	r.inputTensor = input // Cache for backward pass
 	r.outputShape = input.Shape()
 
-	// Use fused single-pass kernel for float32 on CPUEngine (inference hot path).
+	// Use fused single-pass kernel for float32 (inference hot path).
+	// GPU path: uses FusedRMSNormer interface for single-kernel GPU RMSNorm.
+	if fused, ok := r.engine.(compute.FusedRMSNormer); ok {
+		if f32Input, iof := any(input).(*tensor.TensorNumeric[float32]); iof {
+			f32Weight, wOk := any(r.gain.Value).(*tensor.TensorNumeric[float32])
+			f32Eps, eOk := any(r.epsilon).(float32)
+			if wOk && eOk && f32Weight.Size() == f32Input.Shape()[len(f32Input.Shape())-1] {
+				out, err := fused.FusedRMSNormGPU(f32Input, f32Weight, f32Eps)
+				if err != nil {
+					return nil, err
+				}
+				return any(out).(*tensor.TensorNumeric[T]), nil
+			}
+		}
+	}
+	// CPU path: uses standalone FusedRMSNorm function.
 	if _, isCPU := r.engine.(*compute.CPUEngine[T]); isCPU {
 		if f32Input, ok := any(input).(*tensor.TensorNumeric[float32]); ok {
 			f32Weight, wOk := any(r.gain.Value).(*tensor.TensorNumeric[float32])

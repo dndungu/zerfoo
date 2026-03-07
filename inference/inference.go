@@ -249,6 +249,19 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		}
 	}
 
+	// Upload model weights to GPU if the engine supports it.
+	if uploader, ok := eng.(compute.WeightUploader); ok {
+		tensors := mdl.Graph.ConstantTensors()
+		if mdl.Embedding != nil {
+			for _, p := range mdl.Embedding.Parameters() {
+				tensors = append(tensors, p.Value)
+			}
+		}
+		if err := uploader.UploadWeights(tensors); err != nil {
+			return nil, fmt.Errorf("upload weights to GPU: %w", err)
+		}
+	}
+
 	m := assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen)
 	m.closer = mmapCloser
 	return m, nil

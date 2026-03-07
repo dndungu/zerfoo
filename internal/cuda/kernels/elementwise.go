@@ -7,6 +7,18 @@ package kernels
 #include <cuda_runtime.h>
 
 // Forward declarations of launcher functions from elementwise.cu
+extern cudaError_t launch_add_broadcast(const float* a, const float* b, float* c,
+    int stride_a_row, int stride_a_col, int stride_b_row, int stride_b_col,
+    int M, int D, cudaStream_t stream);
+extern cudaError_t launch_sub_broadcast(const float* a, const float* b, float* c,
+    int stride_a_row, int stride_a_col, int stride_b_row, int stride_b_col,
+    int M, int D, cudaStream_t stream);
+extern cudaError_t launch_mul_broadcast(const float* a, const float* b, float* c,
+    int stride_a_row, int stride_a_col, int stride_b_row, int stride_b_col,
+    int M, int D, cudaStream_t stream);
+extern cudaError_t launch_div_broadcast(const float* a, const float* b, float* c,
+    int stride_a_row, int stride_a_col, int stride_b_row, int stride_b_col,
+    int M, int D, cudaStream_t stream);
 extern cudaError_t launch_add(const float* a, const float* b, float* c, int n, cudaStream_t stream);
 extern cudaError_t launch_sub(const float* a, const float* b, float* c, int n, cudaStream_t stream);
 extern cudaError_t launch_mul(const float* a, const float* b, float* c, int n, cudaStream_t stream);
@@ -130,4 +142,28 @@ func SumAxis(input, output unsafe.Pointer, outer, inner, axisSize int, s unsafe.
 // Softmax launches the softmax kernel along an axis defined by outer/inner/axisSize strides.
 func Softmax(input, output unsafe.Pointer, outer, inner, axisSize int, s unsafe.Pointer) error {
 	return checkCUDA(C.launch_softmax((*C.float)(input), (*C.float)(output), C.int(outer), C.int(inner), C.int(axisSize), stream(s)), "softmax")
+}
+
+// AddBroadcast launches the broadcast add kernel: c[r,c] = a[r*sa_r + c*sa_c] + b[r*sb_r + c*sb_c].
+func AddBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s unsafe.Pointer) error {
+	return checkCUDA(C.launch_add_broadcast((*C.float)(a), (*C.float)(b), (*C.float)(c),
+		C.int(saRow), C.int(saCol), C.int(sbRow), C.int(sbCol), C.int(M), C.int(D), stream(s)), "add_broadcast")
+}
+
+// SubBroadcast launches the broadcast sub kernel.
+func SubBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s unsafe.Pointer) error {
+	return checkCUDA(C.launch_sub_broadcast((*C.float)(a), (*C.float)(b), (*C.float)(c),
+		C.int(saRow), C.int(saCol), C.int(sbRow), C.int(sbCol), C.int(M), C.int(D), stream(s)), "sub_broadcast")
+}
+
+// MulBroadcast launches the broadcast mul kernel.
+func MulBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s unsafe.Pointer) error {
+	return checkCUDA(C.launch_mul_broadcast((*C.float)(a), (*C.float)(b), (*C.float)(c),
+		C.int(saRow), C.int(saCol), C.int(sbRow), C.int(sbCol), C.int(M), C.int(D), stream(s)), "mul_broadcast")
+}
+
+// DivBroadcast launches the broadcast div kernel.
+func DivBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, s unsafe.Pointer) error {
+	return checkCUDA(C.launch_div_broadcast((*C.float)(a), (*C.float)(b), (*C.float)(c),
+		C.int(saRow), C.int(saCol), C.int(sbRow), C.int(sbCol), C.int(M), C.int(D), stream(s)), "div_broadcast")
 }

@@ -71,6 +71,104 @@ func makeGPUResult[T tensor.Numeric](e *GPUEngine[T], shape []int, devPtr unsafe
 	return t, nil
 }
 
+// gpuBroadcastOp runs a broadcast binary kernel on two float32 tensors.
+// Supports 2D broadcasting: row broadcast ([1,D] op [M,D]), column broadcast
+// ([M,1] op [M,D]), and same-shape. Falls back to CPU for unsupported patterns.
+func gpuBroadcastOp[T tensor.Numeric](
+	e *GPUEngine[T],
+	ctx context.Context,
+	a, b *tensor.TensorNumeric[T],
+	kernelFn func(devA, devB, devC unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, stream gpuapi.Stream) error,
+	cpuFallback func(context.Context, *tensor.TensorNumeric[T], *tensor.TensorNumeric[T], ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error),
+	dst ...*tensor.TensorNumeric[T],
+) (*tensor.TensorNumeric[T], error) {
+	aShape := a.Shape()
+	bShape := b.Shape()
+
+	// Flatten to 2D for broadcast analysis.
+	// For N-D tensors, treat as [product(all-but-last), last].
+	aM, aD := flattenTo2D(aShape)
+	bM, bD := flattenTo2D(bShape)
+
+	// Determine output shape and broadcast strides.
+	var M, D, saRow, saCol, sbRow, sbCol int
+
+	switch {
+	case aM == bM && aD == bD:
+		// Same shape.
+		M, D = aM, aD
+		saRow, saCol = aD, 1
+		sbRow, sbCol = bD, 1
+	case bM == 1 && aD == bD:
+		// b is row-broadcast: [1,D] op [M,D].
+		M, D = aM, aD
+		saRow, saCol = aD, 1
+		sbRow, sbCol = 0, 1
+	case aM == 1 && aD == bD:
+		// a is row-broadcast: [1,D] op [M,D].
+		M, D = bM, bD
+		saRow, saCol = 0, 1
+		sbRow, sbCol = bD, 1
+	case aM == bM && bD == 1:
+		// b is column-broadcast: [M,1] op [M,D].
+		M, D = aM, aD
+		saRow, saCol = aD, 1
+		sbRow, sbCol = 1, 0
+	case aM == bM && aD == 1:
+		// a is column-broadcast: [M,1] op [M,D].
+		M, D = bM, bD
+		saRow, saCol = 1, 0
+		sbRow, sbCol = bD, 1
+	default:
+		// Unsupported broadcast pattern.
+		return cpuFallback(ctx, a, b, dst...)
+	}
+
+	// Compute proper N-D broadcast output shape (NumPy rules).
+	outShape := broadcastShape(aShape, bShape)
+
+	e.setDevice()
+
+	devA, cleanupA, err := getDevicePtr(e, a)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupA()
+
+	devB, cleanupB, err := getDevicePtr(e, b)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupB()
+
+	outElems := M * D
+	byteSize := outElems * f32Size
+	devC, err := e.pool.Alloc(e.deviceID, byteSize)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := kernelFn(devA, devB, devC, saRow, saCol, sbRow, sbCol, M, D, e.stream); err != nil {
+		e.pool.Free(e.deviceID, devC, byteSize)
+		return nil, err
+	}
+
+	return makeGPUResult[T](e, outShape, devC, outElems, dst...)
+}
+
+// flattenTo2D flattens an N-D shape to [M, D] where M = product of all dims except last, D = last dim.
+func flattenTo2D(shape []int) (int, int) {
+	if len(shape) == 0 {
+		return 1, 1
+	}
+	D := shape[len(shape)-1]
+	M := 1
+	for i := 0; i < len(shape)-1; i++ {
+		M *= shape[i]
+	}
+	return M, D
+}
+
 // gpuBinaryOp runs a binary kernel on two equal-length float32 tensors.
 // Uses the device-resident pipeline: inputs via getDevicePtr, output as GPUStorage.
 func gpuBinaryOp[T tensor.Numeric](
@@ -211,43 +309,55 @@ func toFloat32[T tensor.Numeric](v T) float32 {
 // --- GPU-accelerated method overrides ---
 
 func (e *GPUEngine[T]) gpuAdd(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if !isFloat32[T]() || !sameShape(a, b) {
+	if !isFloat32[T]() {
 		return e.cpu.Add(ctx, a, b, dst...)
 	}
 
-	e.setDevice()
+	if sameShape(a, b) {
+		e.setDevice()
+		return gpuBinaryOp(e, ctx, a, b, e.kernels.Add, dst...)
+	}
 
-	return gpuBinaryOp(e, ctx, a, b, e.kernels.Add, dst...)
+	return gpuBroadcastOp(e, ctx, a, b, e.kernels.AddBroadcast, e.cpu.Add, dst...)
 }
 
 func (e *GPUEngine[T]) gpuSub(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if !isFloat32[T]() || !sameShape(a, b) {
+	if !isFloat32[T]() {
 		return e.cpu.Sub(ctx, a, b, dst...)
 	}
 
-	e.setDevice()
+	if sameShape(a, b) {
+		e.setDevice()
+		return gpuBinaryOp(e, ctx, a, b, e.kernels.Sub, dst...)
+	}
 
-	return gpuBinaryOp(e, ctx, a, b, e.kernels.Sub, dst...)
+	return gpuBroadcastOp(e, ctx, a, b, e.kernels.SubBroadcast, e.cpu.Sub, dst...)
 }
 
 func (e *GPUEngine[T]) gpuMul(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if !isFloat32[T]() || !sameShape(a, b) {
+	if !isFloat32[T]() {
 		return e.cpu.Mul(ctx, a, b, dst...)
 	}
 
-	e.setDevice()
+	if sameShape(a, b) {
+		e.setDevice()
+		return gpuBinaryOp(e, ctx, a, b, e.kernels.Mul, dst...)
+	}
 
-	return gpuBinaryOp(e, ctx, a, b, e.kernels.Mul, dst...)
+	return gpuBroadcastOp(e, ctx, a, b, e.kernels.MulBroadcast, e.cpu.Mul, dst...)
 }
 
 func (e *GPUEngine[T]) gpuDiv(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if !isFloat32[T]() || !sameShape(a, b) {
+	if !isFloat32[T]() {
 		return e.cpu.Div(ctx, a, b, dst...)
 	}
 
-	e.setDevice()
+	if sameShape(a, b) {
+		e.setDevice()
+		return gpuBinaryOp(e, ctx, a, b, e.kernels.Div, dst...)
+	}
 
-	return gpuBinaryOp(e, ctx, a, b, e.kernels.Div, dst...)
+	return gpuBroadcastOp(e, ctx, a, b, e.kernels.DivBroadcast, e.cpu.Div, dst...)
 }
 
 func (e *GPUEngine[T]) gpuPow(ctx context.Context, base, exponent *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {

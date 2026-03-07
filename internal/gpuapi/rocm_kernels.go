@@ -96,5 +96,37 @@ func (k *ROCmKernels) GemmQ4F32(aQ4, b, c unsafe.Pointer, m, kk, n int, s Stream
 	return fmt.Errorf("GemmQ4F32: not implemented for ROCm")
 }
 
+func (k *ROCmKernels) AddBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, _ Stream) error {
+	return fmt.Errorf("AddBroadcast: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) SubBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, _ Stream) error {
+	return fmt.Errorf("SubBroadcast: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) MulBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, _ Stream) error {
+	return fmt.Errorf("MulBroadcast: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) DivBroadcast(a, b, c unsafe.Pointer, saRow, saCol, sbRow, sbCol, M, D int, _ Stream) error {
+	return fmt.Errorf("DivBroadcast: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) Transpose2D(input, output unsafe.Pointer, rows, cols int, _ Stream) error {
+	return fmt.Errorf("Transpose2D: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) TransposeND(input, output unsafe.Pointer, inStrides, outShape, perm []int32, ndim, total int, _ Stream) error {
+	return fmt.Errorf("TransposeND: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) Gather(table, indices, output unsafe.Pointer, N, D, V int, _ Stream) error {
+	return fmt.Errorf("Gather: not implemented for ROCm")
+}
+
+func (k *ROCmKernels) RMSNorm(input, weight, output unsafe.Pointer, eps float32, rows, D int, _ Stream) error {
+	return fmt.Errorf("RMSNorm: not implemented for ROCm")
+}
+
 // Compile-time interface assertion.
 var _ KernelRunner = (*ROCmKernels)(nil)

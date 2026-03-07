@@ -47,6 +47,17 @@ func LoadFile(path string, opts ...Option) (*Model, error) {
 	meta.BOSTokenID = special.BOS
 	meta.EOSTokenID = special.EOS
 
+	// Upload model weights to GPU if the engine supports it.
+	if uploader, ok := eng.(compute.WeightUploader); ok {
+		tensors := g.ConstantTensors()
+		if embWeight != nil {
+			tensors = append(tensors, embWeight)
+		}
+		if err := uploader.UploadWeights(tensors); err != nil {
+			return nil, fmt.Errorf("upload weights to GPU: %w", err)
+		}
+	}
+
 	// Set embedding weight on the generator for token lookup.
 	_ = embWeight
 
