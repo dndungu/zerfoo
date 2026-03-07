@@ -23,9 +23,80 @@ type Instruction[T tensor.Numeric] struct {
 type ExecutionPlan[T tensor.Numeric] struct {
 	instructions []Instruction[T]
 	slots        []*tensor.TensorNumeric[T] // indexed output storage
+	slotShapes   [][]int                    // shapes from warmup pass
 	inputIdx     []int                      // which slots receive graph inputs
 	outputIdx    int                        // which slot holds the final output
 	frozenIdx    []int                      // slots holding frozen data (params)
+}
+
+// InstructionMeta is the exported metadata for a single compiled instruction.
+// It contains everything needed by a code generator without exposing the
+// Forward() closure.
+type InstructionMeta struct {
+	OpName    string // operation type (e.g. "Add", "MatMulNBits", "RMSNorm")
+	InputIdx  []int  // slot indices for inputs
+	OutputIdx int    // slot index for the output
+}
+
+// FrozenSlot describes a slot that holds frozen (constant) data such as
+// model weights. The Data field holds the tensor from the warmup pass.
+type FrozenSlot[T tensor.Numeric] struct {
+	SlotIdx int
+	Data    *tensor.TensorNumeric[T]
+}
+
+// Instructions returns exported metadata for each compute instruction in
+// the plan. The order matches the execution order.
+func (p *ExecutionPlan[T]) Instructions() []InstructionMeta {
+	metas := make([]InstructionMeta, len(p.instructions))
+	for i, inst := range p.instructions {
+		idx := make([]int, len(inst.InputIdx))
+		copy(idx, inst.InputIdx)
+		metas[i] = InstructionMeta{
+			OpName:    inst.OpName,
+			InputIdx:  idx,
+			OutputIdx: inst.OutputIdx,
+		}
+	}
+	return metas
+}
+
+// SlotShapes returns the shape of each slot as determined during compilation.
+// Nil entries indicate slots that were not populated during the warmup pass.
+func (p *ExecutionPlan[T]) SlotShapes() [][]int {
+	out := make([][]int, len(p.slotShapes))
+	for i, s := range p.slotShapes {
+		if s != nil {
+			cp := make([]int, len(s))
+			copy(cp, s)
+			out[i] = cp
+		}
+	}
+	return out
+}
+
+// FrozenSlots returns the frozen (constant/parameter) slots and their data.
+func (p *ExecutionPlan[T]) FrozenSlots() []FrozenSlot[T] {
+	frozen := make([]FrozenSlot[T], len(p.frozenIdx))
+	for i, idx := range p.frozenIdx {
+		frozen[i] = FrozenSlot[T]{
+			SlotIdx: idx,
+			Data:    p.slots[idx],
+		}
+	}
+	return frozen
+}
+
+// InputSlots returns the slot indices that receive graph inputs.
+func (p *ExecutionPlan[T]) InputSlots() []int {
+	idx := make([]int, len(p.inputIdx))
+	copy(idx, p.inputIdx)
+	return idx
+}
+
+// OutputSlot returns the slot index that holds the final output.
+func (p *ExecutionPlan[T]) OutputSlot() int {
+	return p.outputIdx
 }
 
 // Run executes the compiled plan. It sets input tensors into the slot array,
@@ -143,9 +214,18 @@ func (g *Graph[T]) Compile(ctx context.Context, inputs ...*tensor.TensorNumeric[
 		})
 	}
 
+	// Step 5: Record slot shapes from warmup memo.
+	slotShapes := make([][]int, len(g.nodes))
+	for n, t := range g.memo {
+		if idx, ok := nodeIdx[n]; ok && t != nil {
+			slotShapes[idx] = t.Shape()
+		}
+	}
+
 	return &ExecutionPlan[T]{
 		instructions: instructions,
 		slots:        slots,
+		slotShapes:   slotShapes,
 		inputIdx:     inputSlots,
 		outputIdx:    nodeIdx[g.output],
 		frozenIdx:    frozenIdx,

@@ -131,6 +131,93 @@ func TestExecutionPlanRunDiamond(t *testing.T) {
 	}
 }
 
+func TestInstructionMeta(t *testing.T) {
+	// Build graph: input -> Add(input, constant) -> output
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	defer func() { _ = engine.Close(context.Background()) }()
+	b := NewBuilder[float32](engine)
+
+	in := b.Input([]int{1, 4})
+
+	constData, _ := tensor.New[float32]([]int{1, 4}, []float32{10, 20, 30, 40})
+	constNode := &mockF32Node{
+		name:        "Constant",
+		outputShape: []int{1, 4},
+		forwardFunc: func(_ context.Context, _ ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+			return constData, nil
+		},
+	}
+	cst := b.AddNode(constNode)
+
+	addNode := &mockF32Node{
+		name:        "Add",
+		outputShape: []int{1, 4},
+		forwardFunc: func(_ context.Context, inputs ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+			a := inputs[0].Data()
+			bv := inputs[1].Data()
+			out := make([]float32, len(a))
+			for i := range a {
+				out[i] = a[i] + bv[i]
+			}
+			return tensor.New[float32](inputs[0].Shape(), out)
+		},
+	}
+	sum := b.AddNode(addNode, in, cst)
+
+	g, err := b.Build(sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input, _ := tensor.New[float32]([]int{1, 4}, []float32{1, 2, 3, 4})
+	ctx := context.Background()
+
+	plan, err := g.Compile(ctx, input)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	// T91.1 acceptance: Instructions() returns correct metadata.
+	metas := plan.Instructions()
+	if len(metas) != 1 {
+		t.Fatalf("Instructions: got %d, want 1", len(metas))
+	}
+	if metas[0].OpName != "Add" {
+		t.Errorf("OpName = %q, want %q", metas[0].OpName, "Add")
+	}
+	if len(metas[0].InputIdx) != 2 {
+		t.Errorf("InputIdx len = %d, want 2", len(metas[0].InputIdx))
+	}
+
+	// SlotShapes: all slots should have shapes from warmup.
+	shapes := plan.SlotShapes()
+	if len(shapes) == 0 {
+		t.Fatal("SlotShapes: empty")
+	}
+	// The output slot should be [1, 4].
+	outShape := shapes[metas[0].OutputIdx]
+	if len(outShape) != 2 || outShape[0] != 1 || outShape[1] != 4 {
+		t.Errorf("output slot shape = %v, want [1 4]", outShape)
+	}
+
+	// FrozenSlots: should include the constant.
+	frozen := plan.FrozenSlots()
+	if len(frozen) != 1 {
+		t.Fatalf("FrozenSlots: got %d, want 1", len(frozen))
+	}
+	if frozen[0].Data == nil {
+		t.Error("FrozenSlot data is nil")
+	}
+
+	// InputIdx and OutputIdx.
+	if len(plan.InputSlots()) != 1 {
+		t.Errorf("InputSlots: got %d, want 1", len(plan.InputSlots()))
+	}
+	if plan.OutputSlot() < 0 {
+		t.Error("OutputSlot is negative")
+	}
+}
+
 func TestGraphCompile(t *testing.T) {
 	// Build graph: input -> double -> add3 -> output
 	engine := compute.NewCPUEngine(numeric.Float32Ops{})
