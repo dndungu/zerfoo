@@ -133,6 +133,38 @@ func BenchmarkCPUEngineSum(b *testing.B) {
 	}
 }
 
+func BenchmarkBinaryOpSameShape(b *testing.B) {
+	ctx := context.Background()
+	e := newEngineF32()
+	a := allocF32([]int{1, 2048})
+	bb := allocF32([]int{1, 2048})
+	fillUniform(e, a, -1, 1)
+	fillUniform(e, bb, -1, 1)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.Add(ctx, a, bb); err != nil {
+			b.Fatalf("Add error: %v", err)
+		}
+	}
+}
+
+func BenchmarkBinaryOpBroadcast(b *testing.B) {
+	ctx := context.Background()
+	e := newEngineF32()
+	a := allocF32([]int{1, 2048})
+	bb := allocF32([]int{1, 1})
+	fillUniform(e, a, -1, 1)
+	fillUniform(e, bb, -1, 1)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.Add(ctx, a, bb); err != nil {
+			b.Fatalf("Add error: %v", err)
+		}
+	}
+}
+
 func BenchmarkCPUEngineSoftmax(b *testing.B) {
 	ctx := context.Background()
 	e := newEngineF32()
@@ -143,6 +175,52 @@ func BenchmarkCPUEngineSoftmax(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := e.Softmax(ctx, a, 1); err != nil { // softmax over last axis
 			b.Fatalf("Softmax error: %v", err)
+		}
+	}
+}
+
+// Scalar op baseline (shape [1,2048], Intel i7-6660U @ 2.40GHz, 4 threads):
+//   BenchmarkMulScalarF32-4   40725   37393 ns/op   8408 B/op   6 allocs/op
+//   BenchmarkAddScalarF32-4   36465   37188 ns/op   8408 B/op   6 allocs/op
+//   BenchmarkDivScalarF32-4   40666   37410 ns/op   8408 B/op   6 allocs/op
+func BenchmarkMulScalarF32(b *testing.B) {
+	ctx := context.Background()
+	eng := newEngineF32()
+	a := allocF32([]int{1, 2048})
+	fillUniform(eng, a, -1, 1)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := eng.MulScalar(ctx, a, 2.5); err != nil {
+			b.Fatalf("MulScalar error: %v", err)
+		}
+	}
+}
+
+func BenchmarkAddScalarF32(b *testing.B) {
+	ctx := context.Background()
+	eng := newEngineF32()
+	a := allocF32([]int{1, 2048})
+	fillUniform(eng, a, -1, 1)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := eng.AddScalar(ctx, a, 1.0); err != nil {
+			b.Fatalf("AddScalar error: %v", err)
+		}
+	}
+}
+
+func BenchmarkDivScalarF32(b *testing.B) {
+	ctx := context.Background()
+	eng := newEngineF32()
+	a := allocF32([]int{1, 2048})
+	fillUniform(eng, a, -1, 1)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := eng.DivScalar(ctx, a, 3.0); err != nil {
+			b.Fatalf("DivScalar error: %v", err)
 		}
 	}
 }

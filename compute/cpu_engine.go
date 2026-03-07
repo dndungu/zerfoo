@@ -503,15 +503,27 @@ func (e *CPUEngine[T]) binaryOp(ctx context.Context, a, b *tensor.TensorNumeric[
 		return nil, err
 	}
 
-	// Expand shapes/strides to out rank
+	aData := a.Data()
+	bData := b.Data()
+	rData := result.Data()
+
+	// Fast path: identical shapes -- direct element-wise loop, no coordinate decode.
+	if shapesEqual(a.Shape(), b.Shape()) {
+		if err := parallelForCtx(ctx, len(aData), func(start, end int) {
+			for i := start; i < end; i++ {
+				rData[i] = op(aData[i], bData[i])
+			}
+		}); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+
+	// Broadcast path: expand shapes/strides to out rank and decode coordinates.
 	R := len(outShape)
 	aShape, aStrides := expandShapeStrides(a.Shape(), makeStrides(a.Shape()), R)
 	bShape, bStrides := expandShapeStrides(b.Shape(), makeStrides(b.Shape()), R)
 	outStrides := makeStrides(outShape)
-
-	aData := a.Data()
-	bData := b.Data()
-	rData := result.Data()
 
 	total := 1
 	for _, d := range outShape {
@@ -734,6 +746,18 @@ func makeStrides(shape []int) []int {
 }
 
 // Helper: broadcast two shapes following NumPy rules.
+func shapesEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func broadcastShapes(a, b []int) ([]int, error) {
 	// Align right
 	maxRank := len(a)
