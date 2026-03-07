@@ -1106,6 +1106,8 @@ ADR files in `docs/adr/`.
 | [017](adr/017-dgx-spark-hardware-validation.md) | DGX Spark Hardware Validation | 20 | ARM64 build fixes, sm_121 BLOCK_SIZE=32, TRT 10 API, benchmark results |
 | [018](adr/018-model-parity-testing.md) | Model Parity Testing | 21 | 18 ONNX fixes, 18 PASS (6 model families), 4 SKIP, parity automation script |
 | [019](adr/019-phase22-bf16-unified-siglip.md) | BF16 GEMM, Unified Memory, SigLIP Fix | 22 | BF16 cuBLAS GemmEx, cudaMallocManaged, Squeeze scalar fix |
+| [020](adr/020-q4-quantized-dot-product.md) | Q4 Quantized Dot Product | 29 | NEON nibble-extract + FMA, row-level assembly, B-operand GEMV |
+| [021](adr/021-graph-compilation-worker-pool.md) | Graph Compilation and Worker Pool | 30 | Pre-compiled instruction sequence, persistent worker pool, buffer arena |
 
 ---
 
@@ -1229,3 +1231,294 @@ LoadModelFromZMF, and refactored cmd/zerfoo-predict for testability (0% -> 76.6%
 Six tests require >= 2 CUDA devices and skip on the single-GPU DGX Spark GB10.
 See [ADR-017](adr/017-dgx-spark-hardware-validation.md) Section "Multi-GPU Test
 Coverage Gap" for the full inventory and hardware/software prerequisites.
+
+### 15.7 Performance Optimization (Phase 25)
+
+Phase 25 built all core performance primitives for inference throughput:
+
+| Epic | Result |
+|------|--------|
+| E25: Mmap loading | Zero-copy model load via `syscall.Mmap` |
+| E26: Pre-alloc KV cache | 0 allocs/token in decode loop (ring buffer) |
+| E27: Q4/Q8 tensor storage | 8x/4.5x compression vs float32 |
+| E28: Q4/Q8 CPU MatMul | Fused dequant+SIMD multiply |
+| E29: NEON/AVX2 SGEMM | ~2x faster than gonum BLAS (`internal/xblas/`) |
+| E30: Parallel graph executor | Concurrent independent branch execution |
+| E31: Continuous batching | Channel-based batch scheduler in `serve/` |
+| E32: CUDA Q4 kernel | 2383 GFLOPS on DGX Spark GB10 (sm_121) |
+| E33: Benchmark suite | tok/s, GFLOPS, memory allocs benchmarks |
+
+Key files: `compute/pool.go`, `internal/xblas/sgemm_neon_arm64.s`,
+`internal/xblas/sgemm_avx2_amd64.s`, `internal/cuda/kernels/q4_gemm.cu`.
+
+### 15.8 End-to-End Inference Validation (Phase 26)
+
+Phase 26 validated Q4 inference on real models and added serving primitives:
+
+| Epic | Result |
+|------|--------|
+| E34: PagedAttention | Block pool + PagedKVCache (46% memory of pre-alloc) |
+| E35: Speculative decoding | SpeculativeGenerator with adaptive draft length |
+| E36: End-to-End Q4 pipeline | Gemma 3 2B Q4: 1.96 -> 3.60 tok/s (1.84x via blocked transpose) |
+| E37: GGUF model import | Parser + loader + arch mapping (llama/gemma) |
+| E38: Performance CI | bench.sh + GH Actions workflow + DGX GPU job |
+
+Baseline performance: Gemma 3 2B Q4 at 3.60 tok/s on DGX Spark ARM64 CPU.
+CPU profile showed Transpose at 62%, GEMM at 16%, GC/malloc at 5%.
+
+Key files: `generate/paged_kv_cache.go`, `generate/speculative.go`,
+`model/gguf/parser.go`, `model/gguf/loader.go`, `model/gguf/arch.go`.
+
+### 15.9 Inference Throughput Optimization (Phase 27)
+
+Phase 27 targeted CPU bottleneck elimination. Kernel-level work complete;
+end-to-end benchmarks deferred to Phase 28 (require DGX Spark).
+
+| Epic | Result |
+|------|--------|
+| E39: Transpose elimination | `FoldConstantTransposes` graph pass + blocked 4D transpose (35x faster) |
+| E40: Tensor arena | `TensorPool` with ref-counted release in `graph.Forward` |
+| E43: Operator fusion | Fused RMSNorm (single-pass), RoPE (single-pass), SiLU-gate |
+
+Deferred from Phase 27:
+- E41 (GPU inference pipeline) -- requires DGX Spark, deferred to Phase 29.
+- E42 (GGUF end-to-end) -- superseded by Phase 28 E44 with refined scope.
+- T39.3, T40.3, T43.4 (end-to-end benchmarks) -- carried forward to Phase 28 E48.
+
+Key files: `graph/optimize.go` (FoldConstantTransposes), `compute/pool.go`
+(TensorPool), `compute/fused_rmsnorm.go`, `compute/fused_rope.go`,
+`compute/fused_silugate.go`.
+
+Fused kernel details:
+- **FusedRMSNorm**: `x * rsqrt(mean(x^2) + eps) * weight` in one pass. Returns
+  per-row scales for backward compatibility. Gated on CPUEngine + float32.
+- **FusedRoPE**: Single-pass rotary embedding. Supports full and partial rotation.
+  Gated on CPUEngine + float32.
+- **FusedSiLUGate**: `silu(gate) * up` in one pass. No engine gating (pure tensor op).
+
+### 15.10 Make It Actually Work (Phase 28)
+
+Phase 28 closed the gap between README promises and reality. All five epics
+completed 2026-03-06.
+
+| Epic | Result |
+|------|--------|
+| E44: GGUF End-to-End Inference | Graph builders for Llama and Gemma (shared transformer loop in `arch_common.go`). GGUF tokenizer extraction. Unified `LoadFile()`. |
+| E45: Model Hub & Auto-Download | HF pull wired into default `LocalRegistry`. Model aliases for 6 models. `findGGUF()` auto-detection. |
+| E46: Chat Template Engine | Per-architecture formatters (Gemma, LLaMA 3, Mistral, Qwen 2.5, DeepSeek, Phi-4). Auto-detection from GGUF `general.architecture`. |
+| E47: K-Quant Dequantization | Q4_K (144B/256val), Q5_K (176B/256val), Q6_K (210B/256val). Wired into GGUF loader. |
+| E48: Phase 27 Deferred Benchmarks | DGX Spark GB10: 3.80 tok/s (Gemma 3 2B Q4_0). Transpose folding: 8.8% runtime (was 62%). 15 tok/s NOT met. |
+
+Key files:
+- `inference/arch_llama.go`, `inference/arch_gemma.go`, `inference/arch_common.go` -- graph builders
+- `inference/inference.go` -- Load(), LoadFile(), model aliases, chat formatters
+- `inference/gguf.go` -- GGUF-to-Model metadata conversion, `chatTemplateForArch()`
+- `tensor/quantized_kquant.go` -- K-quant dequantization (Q4_K, Q5_K, Q6_K)
+- `model/gguf/loader.go` -- GGUF tensor loading with K-quant dispatch
+- `registry/pull.go` -- HuggingFace download with progress, auth, .gguf filter
+
+Model alias registry (`inference/inference.go`):
+- `gemma-3-{1b,2b}-q4` -> google/gemma-3-*-it-qat-q4_0-gguf
+- `llama-3-{1b,8b}-q4` -> meta-llama/Llama-3.*-Instruct-GGUF
+- `mistral-7b-q4` -> mistralai/Mistral-7B-Instruct-v0.3-GGUF
+- `qwen-2.5-7b-q4` -> Qwen/Qwen2.5-7B-Instruct-GGUF
+
+Performance at Phase 28 end (DGX Spark GB10, Gemma 3 2B Q4_0, CPU ARM64):
+- 3.80 tok/s (up from 3.60 in Phase 26, +5.6% from transpose folding)
+- 79,537 allocs/token, 39.4 GB/op
+- Profile: MatMul 19.6%, Runtime Transpose 8.8%, GC+memclr 6.9%, Element-wise 3.5%
+- Bottleneck: Q4 dequantize-to-float32 before every MatMul dominates memory bandwidth
+- TensorPool exists but NOT wired into graph forward loop
+
+### 15.11 CPU Throughput Optimization (Phase 29)
+
+Phase 29 targeted 4x CPU throughput (3.80 -> 15 tok/s). Achieved 6.5 tok/s
+(1.7x improvement). Compute kernels are well-optimized; remaining bottleneck
+is framework overhead (~150ms/token). See [ADR-020](adr/020-q4-quantized-dot-product.md).
+
+| Epic | Result |
+|------|--------|
+| E49: NEON Q4 Dot Product | q4DotBlockSIMD (per-block) + q4DotRowSIMD (row-level) ARM64 assembly. GemmF32Q4NT for B-operand Q4 GEMV. Parallel GEMV across N dimension. |
+| E50: TensorPool Wiring | Pool created in NewGenerator, attached via graph.WithPool(). Allocation benchmark added. |
+| E51: KV Cache Decode | Already optimal (single-token Q/K/V projection, append+return). RoPE position offset bug fixed. |
+| E52: NEON Fused Ops | Transpose layer data-pointer cache (3.53 -> 5.42 tok/s). Decode dim=1 short-circuit. T52.2/T52.3 (RMSNorm/SiLU NEON) deferred as low priority (<1% CPU each). |
+| E53: DGX Benchmark | 6.5 tok/s (100-token avg). 15 tok/s NOT achieved -- framework overhead dominates. |
+
+Key files:
+- `internal/xblas/q4dot_arm64.s` -- NEON q4DotBlockSIMD + q4DotRowSIMD assembly
+- `internal/xblas/q4dot_arm64.go`, `q4dot_generic.go`, `q4dot.go` -- Go declarations + scalar fallback
+- `internal/xblas/gemm_quant.go` -- GemmF32Q4NT, GemmQ4F32Fused, parallel GEMV
+
+Architecture decisions:
+- **B-operand Q4 GEMV:** Model weights are always B operand. Transpose layer passes
+  Q4 storage through with transposed shape. Engine detects Q4 on B, dispatches to
+  GemmF32Q4NT which calls q4DotRowSIMD per output element.
+- **Row-level assembly:** q4DotRowSIMD processes entire Q4 row in single call,
+  eliminating 4 Go function calls per block x 248K blocks overhead.
+- **FCVT encoding fix:** `0x1E22E0E7` was FCVT H7,S7 (wrong direction). Correct
+  encoding for FCVT S7,H7 (half->single): `0x1EE240E7`.
+
+Post-optimization profile (DGX Spark GB10, 30 tokens):
+
+| Component | % CPU | Wall ms/token |
+|-----------|-------|---------------|
+| sgemmAccRowNeon (SGEMM) | 35.2% | ~12 |
+| q4DotRowSIMD (Q4 GEMV) | 34.6% | ~12 |
+| binaryOp (Mul/Add) | 6.7% | ~2 |
+| Transpose | 3.9% | ~3 |
+| GC/malloc | ~5% | ~15 |
+| Other (graph, scheduling) | ~15% | ~130 |
+
+**Bottleneck analysis:** Compute (GEMM) accounts for ~70% CPU but only ~24ms wall
+time per token (parallelized). The remaining ~150ms/token is framework overhead:
+graph traversal (~780 node executions/token with interface dispatch, shape validation,
+pool acquire/release), goroutine scheduling (130 MatMul calls/token each spawning/
+joining 20 goroutines), and memory management (GC despite TensorPool).
+
+To reach 15 tok/s (67ms/token) requires architectural changes: graph compilation,
+persistent worker pools, fused operation batching, zero-copy tensor views.
+
+### 15.12 Graph Compilation and Worker Pool (Phase 30)
+
+Phase 30 implemented graph compilation and a persistent worker pool to reduce
+framework overhead. Achieved 6.86 tok/s (5% improvement over Phase 29's 6.5).
+15 tok/s target NOT achieved -- root cause analysis revealed framework overhead
+was only ~5% of total, not the estimated ~50ms. GEMV kernels dominate at 74%.
+See [ADR-021](adr/021-graph-compilation-worker-pool.md).
+
+| Epic | Result |
+|------|--------|
+| E54: Persistent Worker Pool | `internal/workerpool/pool.go`. Eliminated 2600 goroutine create/join per token. Wired into xblas GEMV and CPUEngine parallelFor. |
+| E55: Graph Compiler | `graph/compile.go`. ExecutionPlan with pre-compiled instruction sequence. OpType-to-kernel mapping for all Gemma 3 operators. Wired into Generator decode loop via `GenerateStream`. |
+| E56: Buffer Arena | Slot-based ExecutionPlan (deviated from pre-allocated arena). Slots store node.Forward() results directly, eliminating memo map + dependency map lookups. Zero-alloc goal deferred. |
+| E57: Instruction Fusion | N/A. Gemma 3 graph uses high-level nodes (RMSNorm, Linear, GQA, SwiGLU) that already fuse element-wise ops internally. No bare fusible patterns exist. |
+| E58: DGX Benchmark | 6.86 tok/s (100-token avg). Profile: sgemmAccRowNeon 39.86%, q4DotRowSIMD 33.65%, binaryOp 7.26%, ExecutionPlan.Run 9.66% cum. |
+
+Key files:
+- `internal/workerpool/pool.go` -- persistent worker pool with Submit/Close
+- `graph/compile.go` -- Graph.Compile(), ExecutionPlan, Instruction types
+- `generate/generator.go` -- compiled plan wired into GenerateStream decode loop
+
+**Root cause analysis:** The original ~130ms framework overhead estimate was
+incorrect. It was measured by subtracting single-thread kernel time from wall
+time, not accounting for 20-core parallel execution. Actual framework overhead
+is ~5% of total. Next performance improvement requires faster GEMV kernels
+(NEON scheduling, cache blocking, memory layout), not framework changes.
+
+Post-Phase 30 profile (DGX Spark GB10, 50 tokens):
+
+| Component | % CPU | Notes |
+|-----------|-------|-------|
+| sgemmAccRowNeon (F32 GEMV) | 39.86% | Dominant compute kernel |
+| q4DotRowSIMD (Q4 GEMV) | 33.65% | Second dominant kernel |
+| binaryOp (element-wise) | 7.26% | Mul/Add/Sub |
+| Transpose | 2.56% | Residual from non-folded cases |
+| ExecutionPlan.Run | 9.66% cum | Compiled path active |
+| Graph.Forward | 5.63% cum | Prefill + warmup only |
+
+### 15.13 Inference Validation and Training Improvements (Phase 31)
+
+Phase 31 validated GPU inference, closed PagedAttention gaps, added benchmark
+regression detection, and delivered five training improvements for the Audacity
+Numerai pipeline. PR #41 merged to main.
+
+| Epic | Result |
+|------|--------|
+| E59: PagedAttention GQA v2 | Block-table KV reader in GQA (Option B). 8-seq load test: 0 alloc/op in paged path. Benchmark: block-table 40% fewer allocs vs gather-copy. |
+| E62: GPU Q4 Profile | CPU 5.94 tok/s, GPU 5.12 tok/s (slower). Root cause: 43% cgocall overhead, only MatMul on GPU, all other ops fall back to CPU. |
+| E63: CI Regression (partial) | Benchmark comparison script + regression detection workflow. DGX self-hosted runner NOT set up. |
+| E64: Smoothed Early Stopping | Exponential smoothing (alpha=0.3) on val_corr. Patience based on smoothed metric. |
+| E65: EMA Optimizer | EMA[T] wrapper with shadow params, SwapWeights for validation. decay=0.999 default. |
+| E66: Cosine Warm Restarts | CosineWarmRestarts scheduler. T0/TMult/EtaMin/EtaMax. Wired into Audacity. |
+| E67: SWA Optimizer | SWA[T] wrapper with epoch-boundary averaging. startEpoch gating. Wired into Audacity. |
+| E68: Feature Dropout | FeatureDropout[T] layer. Column-wise inverted dropout. Registered in layer registry. Wired into Audacity model graph. |
+
+Incomplete (carried to Phase 32 or deferred):
+- E60: Speculative decoding validation (deferred -- needs draft model).
+- E61: GGUF real-model inference (deferred -- needs HF downloads).
+- E62 T62.2-T62.5: GPU fallback fixes (carried to Phase 32 as primary focus).
+- E63 T63.2-T63.5: DGX runner, GPU CI (deferred).
+
+Key files:
+- `layers/attention/grouped_query_attention.go` -- BlockTableReader interface
+- `serve/loadtest_test.go` -- 8-sequence concurrent load test
+- `training/optimizer/ema.go` -- EMA[T] optimizer wrapper
+- `training/optimizer/swa.go` -- SWA[T] optimizer wrapper
+- `layers/regularization/feature_dropout.go` -- FeatureDropout[T] layer
+- `audacity/internal/training/lr_schedule.go` -- CosineWarmRestarts
+- `audacity/internal/training/early_stopping.go` -- smoothed tracking
+- `.github/workflows/benchmark.yml` -- regression comparison step
+- `cmd/bench-compare/` -- benchmark result comparison tool
+
+GPU Profile (DGX Spark GB10, Gemma 3 2B Q4, -device cuda):
+
+| Component | % Time | Notes |
+|-----------|--------|-------|
+| runtime.cgocall | 43% | CUDA kernel launches + H2D/D2H transfers |
+| Q4 dequantize | 9.4% | CPU fallback |
+| Transpose | 8.1% | CPU fallback |
+| Binary ops | 4.4% | CPU fallback (broadcasting path) |
+| MatMul (GPU) | ~30% | Only op actually on GPU |
+
+Performance baselines at Phase 31 end:
+
+| Model | Quant | Device | tok/s | Phase |
+|-------|-------|--------|-------|-------|
+| Gemma 3 2B | Q4_0 | CPU ARM64 | 6.86 | 30 |
+| Gemma 3 2B | Q4_0 | CPU ARM64 | 5.94 | 31 (bench_tps) |
+| Gemma 3 2B | Q4_0 | GPU (cuda) | 5.12 | 31 (bench_tps) |
+
+Training improvements added in Phase 31 (Audacity pipeline):
+
+| Feature | Config Flag | Default |
+|---------|-------------|---------|
+| EMA | --ema-decay | 0.999 |
+| Smoothed early stopping | --smooth-alpha | 0.3 |
+| Cosine warm restarts | --lr-schedule=cosine-warm-restarts, --lr-t0, --lr-tmult | T0=5, TMult=2 |
+| SWA | --swa-start | disabled |
+| Feature dropout | --feature-dropout | 0.0 |
+
+### 15.14 GPU-First Inference Pipeline (Phase 32)
+
+Phase 32 eliminated the major CPU fallbacks during GPU inference, improving
+Gemma 3 2B Q4 throughput from 5.12 to 6.84 tok/s (+33.6%) on DGX Spark GB10.
+GPU inference is now faster than CPU (6.61 tok/s).
+
+Decision rationale: docs/adr/022-gpu-first-inference-pipeline.md.
+
+Key implementations:
+- GPU tensor residency: intermediate tensors stay GPU-resident via GPUStorage.
+  `makeGPUResult`/`getDevicePtr` in compute/gpu_kernels.go.
+- Q4 weight pre-upload: `GPUEngine.UploadWeights()` uploads Q4 blocks to GPU
+  at model load time. `Q4Storage.SetGPUPtr/GPUPtr` caches device pointers.
+  Only Q4 weights uploaded (float32 stays CPU to avoid D2H for non-GPU ops).
+- `Graph.ConstantTensors()` collects all weight tensors from Parameter/Constant
+  nodes for bulk upload. `parameterNode.Parameters()` returns nil (ONNX constants
+  are not trainable), so `ConstantTensors()` calls Forward() on each node.
+- GPU Transpose kernel: 2D tiled shared-memory + N-D stride-based in
+  `internal/cuda/kernels/transpose.cu`. Wired into GPUEngine.Transpose.
+- GPU Gather kernel: embedding lookup on GPU in `internal/cuda/kernels/gather.cu`.
+- GPU broadcasting: stride-based 2D broadcasting for Add/Sub/Mul/Div in
+  `compute/gpu_kernels.go gpuBroadcastOp`. `broadcastShape()` computes NumPy-style
+  output shape preserving N-D leading dimensions.
+- Fused GPU RMSNorm kernel: single-pass with shared-memory reduction in
+  `internal/cuda/kernels/rmsnorm.cu`. `FusedRMSNormer` interface in compute/engine.go.
+
+Bug fixes:
+- N-D broadcast output shape: `flattenTo2D` lost leading dims (e.g. [1,1,1,1]+[2,1]
+  gave [2,1] not [1,1,2,1]). Fixed with `broadcastShape()`.
+- GPU Reshape zero-copy view for GPUStorage tensors.
+- Nil axes handling in GPU Transpose (default to reverse permutation).
+
+Performance at Phase 32 end:
+
+| Model | Quant | Device | tok/s | Phase |
+|-------|-------|--------|-------|-------|
+| Gemma 3 2B | Q4_0 | CPU ARM64 | 6.61 | 32 (bench_tps) |
+| Gemma 3 2B | Q4_0 | GPU (cuda) | 6.84 | 32 (bench_tps) |
+
+Remaining GPU bottlenecks (pprof):
+- cgocall: 58% (activation H2D/D2H from CPU fallback ops)
+- Pow CPU fallback: 8.9% (no GPU scalar-broadcast Pow)
+- binaryOp CPU fallback: 10.4% (unsupported broadcast patterns)
+- GPUStorage.Slice D2H: 24% (CPU fallback ops reading GPU tensor data)
