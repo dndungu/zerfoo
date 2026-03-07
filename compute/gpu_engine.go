@@ -420,6 +420,14 @@ func (e *GPUEngine[T]) Transpose(ctx context.Context, a *tensor.TensorNumeric[T]
 	shape := a.Shape()
 	rank := len(shape)
 
+	// Default: reverse axes (same as CPU Transpose with nil axes).
+	if len(axes) == 0 {
+		axes = make([]int, rank)
+		for i := range rank {
+			axes[i] = rank - 1 - i
+		}
+	}
+
 	if len(axes) != rank {
 		return e.cpu.Transpose(ctx, a, axes, dst...)
 	}
