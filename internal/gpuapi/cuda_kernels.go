@@ -79,6 +79,14 @@ func (k *CUDAKernels) DivScalar(a unsafe.Pointer, scalar float32, c unsafe.Point
 	return kernels.DivScalar(a, scalar, c, n, streamPtr(s))
 }
 
+func (k *CUDAKernels) SubScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, s Stream) error {
+	return kernels.SubScalar(a, scalar, c, n, streamPtr(s))
+}
+
+func (k *CUDAKernels) PowScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, s Stream) error {
+	return kernels.PowScalar(a, scalar, c, n, streamPtr(s))
+}
+
 func (k *CUDAKernels) Fill(data unsafe.Pointer, value float32, n int, s Stream) error {
 	return kernels.Fill(data, value, n, streamPtr(s))
 }

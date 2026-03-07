@@ -28,6 +28,9 @@ type KernelRunner interface {
 	MulScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, stream Stream) error
 	DivScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, stream Stream) error
 
+	SubScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, stream Stream) error
+	PowScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, stream Stream) error
+
 	// Fill sets all n elements to value.
 	Fill(data unsafe.Pointer, value float32, n int, stream Stream) error
 

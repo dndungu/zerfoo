@@ -88,6 +88,14 @@ func (k *OpenCLKernels) DivScalar(a unsafe.Pointer, scalar float32, c unsafe.Poi
 	return k.prog.DivScalar(a, scalar, c, n)
 }
 
+func (k *OpenCLKernels) SubScalar(_ unsafe.Pointer, _ float32, _ unsafe.Pointer, _ int, _ Stream) error {
+	return fmt.Errorf("SubScalar: not implemented for OpenCL")
+}
+
+func (k *OpenCLKernels) PowScalar(_ unsafe.Pointer, _ float32, _ unsafe.Pointer, _ int, _ Stream) error {
+	return fmt.Errorf("PowScalar: not implemented for OpenCL")
+}
+
 func (k *OpenCLKernels) Fill(data unsafe.Pointer, value float32, n int, _ Stream) error {
 	return k.prog.Fill(data, value, n)
 }
