@@ -234,9 +234,7 @@ __device__ void dev_transpose(float* out, const float* in,
                                int ndim, int total) {
     for (int idx = threadIdx.x; idx < total; idx += blockDim.x) {
         // Compute source multi-index from flat idx.
-        int remaining = idx;
         int src_idx = 0;
-        int stride = 1;
 
         // For 2D transpose (most common): just swap row/col.
         if (ndim == 2) {
@@ -252,7 +250,7 @@ __device__ void dev_transpose(float* out, const float* in,
         } else {
             // General N-D transpose: compute permuted index.
             // (Simplified; full implementation would compute strides)
-            src_idx = remaining;
+            src_idx = idx;
         }
 
         out[idx] = in[src_idx];
