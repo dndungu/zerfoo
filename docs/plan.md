@@ -327,7 +327,7 @@ Existing code:
 - `generate/generator.go` -- Autoregressive generation loop.
 - DGX Spark models: `~/models/gemma3-q4/model.zmf`.
 
-- [ ] T62.1 Profile GPU inference pipeline  Owner: TBD  Est: 3h
+- [x] T62.1 Profile GPU inference pipeline  Owner: TBD  Est: 3h  (2026-03-06)
   - Run `cmd/zerfoo-predict` on DGX Spark with CUDA build tags.
   - Enable pprof and CUDA profiling (nsys or ncu).
   - Identify: which ops run on GPU vs CPU fallback, data transfer overhead,
@@ -335,7 +335,12 @@ Existing code:
   - Acceptance: Profile captured showing GPU utilization breakdown.
   - Dependencies: none (requires DGX Spark access).
 
-- [ ] S62.1.1 GPU profile report  Owner: TBD  Est: 30m
+- [x] S62.1.1 GPU profile report  Owner: TBD  Est: 30m  (2026-03-06)
+  - CPU baseline: 5.94 tok/s, GPU with -device cuda: 5.12 tok/s (slower)
+  - 43% of GPU time in cgocall (CUDA kernel launches + host-device transfers)
+  - 9.4% Q4 dequantize on CPU, 8.1% Transpose on CPU, 4.4% binary ops on CPU
+  - Root cause: GPUEngine only accelerates MatMul; all other ops fall back to CPU
+  - Fix priorities: (1) keep tensors on GPU, (2) GPU element-wise ops, (3) GPU Q4 dequant
 
 - [ ] T62.2 Fix GPU fallback bottlenecks  Owner: TBD  Est: 4h
   - From T62.1 profile, identify ops that fall back to CPU unnecessarily.
