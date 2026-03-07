@@ -218,6 +218,75 @@ func TestInstructionMeta(t *testing.T) {
 	}
 }
 
+func TestExecutionPlanMegakernelFn(t *testing.T) {
+	tests := []struct {
+		name       string
+		setFn      bool
+		wantValues []float32
+	}{
+		{
+			name:       "megakernel overrides instruction loop",
+			setFn:      true,
+			wantValues: []float32{99, 99, 99, 99},
+		},
+		{
+			name:       "nil megakernel uses instruction loop",
+			setFn:      false,
+			wantValues: []float32{12, 14, 16, 18}, // (x*2)+10
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			double := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+				in := inputs[0].Data()
+				out := make([]float32, len(in))
+				for i := range in {
+					out[i] = in[i] * 2
+				}
+				return tensor.New[float32](inputs[0].Shape(), out)
+			}
+			add10 := func(_ context.Context, inputs []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+				in := inputs[0].Data()
+				out := make([]float32, len(in))
+				for i := range in {
+					out[i] = in[i] + 10
+				}
+				return tensor.New[float32](inputs[0].Shape(), out)
+			}
+
+			plan := &ExecutionPlan[float32]{
+				instructions: []Instruction[float32]{
+					{Forward: double, InputIdx: []int{0}, OutputIdx: 1, OpName: "Double"},
+					{Forward: add10, InputIdx: []int{1}, OutputIdx: 2, OpName: "Add10"},
+				},
+				slots:     make([]*tensor.TensorNumeric[float32], 3),
+				inputIdx:  []int{0},
+				outputIdx: 2,
+			}
+
+			if tt.setFn {
+				plan.SetMegakernelFn(func(_ context.Context, _ []*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+					return tensor.New[float32]([]int{1, 4}, []float32{99, 99, 99, 99})
+				})
+			}
+
+			input, _ := tensor.New[float32]([]int{1, 4}, []float32{1, 2, 3, 4})
+			result, err := plan.Run(context.Background(), input)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			got := result.Data()
+			for i, want := range tt.wantValues {
+				if got[i] != want {
+					t.Errorf("result[%d] = %v, want %v", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
 func TestGraphCompile(t *testing.T) {
 	// Build graph: input -> double -> add3 -> output
 	engine := compute.NewCPUEngine(numeric.Float32Ops{})

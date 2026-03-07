@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/zerfoo/zerfoo/tensor"
 )
@@ -21,12 +22,13 @@ type Instruction[T tensor.Numeric] struct {
 // interpreted node-by-node Forward() loop. Node outputs are stored in an
 // indexed slot array instead of a map, eliminating map lookups.
 type ExecutionPlan[T tensor.Numeric] struct {
-	instructions []Instruction[T]
-	slots        []*tensor.TensorNumeric[T] // indexed output storage
-	slotShapes   [][]int                    // shapes from warmup pass
-	inputIdx     []int                      // which slots receive graph inputs
-	outputIdx    int                        // which slot holds the final output
-	frozenIdx    []int                      // slots holding frozen data (params)
+	instructions  []Instruction[T]
+	slots         []*tensor.TensorNumeric[T] // indexed output storage
+	slotShapes    [][]int                    // shapes from warmup pass
+	inputIdx      []int                      // which slots receive graph inputs
+	outputIdx     int                        // which slot holds the final output
+	frozenIdx     []int                      // slots holding frozen data (params)
+	megakernelFn  atomic.Value               // stores func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) or nil
 }
 
 // InstructionMeta is the exported metadata for a single compiled instruction.
@@ -99,9 +101,21 @@ func (p *ExecutionPlan[T]) OutputSlot() int {
 	return p.outputIdx
 }
 
+// SetMegakernelFn sets an optional megakernel function that, when set,
+// replaces the per-instruction execution loop in Run(). This allows a fused
+// kernel to transparently handle the entire plan execution.
+func (p *ExecutionPlan[T]) SetMegakernelFn(fn func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error)) {
+	p.megakernelFn.Store(fn)
+}
+
 // Run executes the compiled plan. It sets input tensors into the slot array,
 // executes each instruction in sequence, and returns the output.
 func (p *ExecutionPlan[T]) Run(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	if v := p.megakernelFn.Load(); v != nil {
+		fn := v.(func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error))
+		return fn(ctx, inputs)
+	}
+
 	if len(inputs) != len(p.inputIdx) {
 		return nil, fmt.Errorf("compiled plan: expected %d inputs, got %d", len(p.inputIdx), len(inputs))
 	}
