@@ -157,7 +157,7 @@ Existing code:
   - Test chain of 3 ops (MatMul -> Add -> Softmax) to verify tensors flow
     GPU->GPU without intermediate D2H.
 
-- [ ] T69.3 Upload model weights to GPU at load time  Owner: TBD  Est: 3h
+- [x] T69.3 Upload model weights to GPU at load time  Owner: TBD  Est: 3h  2026 03 06
   - Modify `inference.Load()` (or the model loading path) to copy all model
     weight tensors to GPU when device is "cuda".
   - After upload, model parameters have GPUStorage. Forward pass reads weights
@@ -183,7 +183,7 @@ Existing code:
   - Generate 10 tokens on GPU. Verify output matches CPU generation.
   - Profile: cgocall % should drop significantly from 43% baseline.
 
-- [ ] T69.5 Run golangci-lint on compute/ and tensor/  Owner: TBD  Est: 15m
+- [x] T69.5 Run golangci-lint on compute/ and tensor/  Owner: TBD  Est: 15m  2026 03 06
   - Dependencies: T69.4.
 
 ### E70: GPU Transpose Kernel (O70)
@@ -196,7 +196,7 @@ Existing code:
 - `internal/cuda/kernels/elementwise.go` -- existing kernel launchers.
 - `layers/transpose/transpose.go` -- Transpose layer.
 
-- [ ] T70.1 Write CUDA transpose kernel  Owner: TBD  Est: 3h
+- [x] T70.1 Write CUDA transpose kernel  Owner: TBD  Est: 3h  2026 03 06
   - Create `internal/cuda/kernels/transpose.cu` with:
     - 2D transpose: shared-memory tiled transpose (32x32 tiles).
     - 3D transpose: permute dims [0,2,1] (batch of 2D transposes).
@@ -213,14 +213,14 @@ Existing code:
   - Test: non-square matrices (128x256, 256x128).
   - Test: edge cases (1x1, 1xN, Nx1).
 
-- [ ] T70.2 Write Go wrapper for transpose kernel  Owner: TBD  Est: 1.5h
+- [x] T70.2 Write Go wrapper for transpose kernel  Owner: TBD  Est: 1.5h  2026 03 06
   - Create `internal/cuda/kernels/transpose.go` (build tag: `//go:build cuda`).
   - CGo wrapper calling the CUDA kernel.
   - Signature: `func Transpose(input, output unsafe.Pointer, shape []int, perm []int, stream unsafe.Pointer) error`
   - Acceptance: Go wrapper compiles and calls kernel correctly.
   - Dependencies: T70.1.
 
-- [ ] T70.3 Wire GPU transpose into GPUEngine  Owner: TBD  Est: 2h
+- [x] T70.3 Wire GPU transpose into GPUEngine  Owner: TBD  Est: 2h  2026 03 06
   - Replace the CPU fallback in `compute/gpu_engine.go` Transpose method.
   - When input has GPUStorage, use the CUDA transpose kernel.
   - When input has CPUStorage, fall back to CPU (or copy H2D, transpose, keep
@@ -234,7 +234,7 @@ Existing code:
     Gemma 3: [2048x256], [1x8x128x64], [8x128x64].
   - Verify output has GPUStorage.
 
-- [ ] T70.4 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m
+- [x] T70.4 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
   - Dependencies: T70.3.
 
 ### E71: GPU Element-wise Broadcasting (O71)
@@ -247,7 +247,7 @@ Existing code:
 - `compute/gpu_kernels.go` -- element-wise kernel launchers.
 - `internal/cuda/kernels/elementwise.cu` -- CUDA element-wise kernels.
 
-- [ ] T71.1 Identify broadcasting patterns in Gemma 3 inference  Owner: TBD  Est: 1h
+- [x] T71.1 Identify broadcasting patterns in Gemma 3 inference  Owner: TBD  Est: 1h  2026 03 06
   - Profile or log the shapes of operands that trigger the sameShape() fallback
     during Gemma 3 2B Q4 forward pass.
   - Common patterns: scalar broadcast (1 vs N), row broadcast (1xK vs MxK),
@@ -255,9 +255,9 @@ Existing code:
   - Acceptance: List of specific shape pairs that trigger CPU fallback.
   - Dependencies: none.
 
-- [ ] S71.1.1 Broadcasting pattern report  Owner: TBD  Est: 30m
+- [x] S71.1.1 Broadcasting pattern report  Owner: TBD  Est: 30m  2026 03 06
 
-- [ ] T71.2 Add broadcasting to CUDA element-wise kernels  Owner: TBD  Est: 3h
+- [x] T71.2 Add broadcasting to CUDA element-wise kernels  Owner: TBD  Est: 3h  2026 03 06
   - Modify `internal/cuda/kernels/elementwise.cu` to handle:
     - Scalar broadcast: one operand has 1 element, other has N.
     - Row broadcast: shapes [1,K] op [M,K] (or [M,K] op [1,K]).
@@ -273,7 +273,7 @@ Existing code:
   - Test: same-shape still works (no regression).
   - Compare with CPU results within 1e-5.
 
-- [ ] T71.3 Remove sameShape guard in GPUEngine binary ops  Owner: TBD  Est: 1.5h
+- [x] T71.3 Remove sameShape guard in GPUEngine binary ops  Owner: TBD  Est: 1.5h  2026 03 06
   - Modify `compute/gpu_engine.go` binary op methods (Add, Sub, Mul, Div) to
     use GPU broadcasting kernels instead of falling back to CPU.
   - Keep CPU fallback only for unsupported broadcast patterns (e.g., both
@@ -286,7 +286,7 @@ Existing code:
   - Verify logits match within tolerance.
   - Verify no binary op CPU fallbacks in log.
 
-- [ ] T71.4 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m
+- [x] T71.4 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
   - Dependencies: T71.3.
 
 ### E72: GPU Gather Kernel (O72)
@@ -299,7 +299,7 @@ Existing code:
 - `layers/gather/gather.go` -- Gather layer (embedding lookup).
 - `layers/embeddings/token_embedding.go` -- TokenEmbedding using Gather.
 
-- [ ] T72.1 Write CUDA gather kernel  Owner: TBD  Est: 2h
+- [x] T72.1 Write CUDA gather kernel  Owner: TBD  Est: 2h  2026 03 06
   - Create `internal/cuda/kernels/gather.cu`:
     - Input: embedding table (V x D), indices (N), output (N x D).
     - Each thread block handles one index, copies D elements.
@@ -313,7 +313,7 @@ Existing code:
   - Test: out-of-bounds index handling (should clamp or error).
   - Compare with CPU Gather output (exact match for integer indices).
 
-- [ ] T72.2 Write Go wrapper and wire into GPUEngine  Owner: TBD  Est: 2h
+- [x] T72.2 Write Go wrapper and wire into GPUEngine  Owner: TBD  Est: 2h  2026 03 06
   - Create `internal/cuda/kernels/gather.go` with CGo wrapper.
   - Replace CPU fallback in `compute/gpu_engine.go` Gather method.
   - When embedding table has GPUStorage and indices are provided, use GPU kernel.
@@ -324,7 +324,7 @@ Existing code:
   - Compare GPU vs CPU Gather for Gemma 3 vocabulary size.
   - Verify output tensor has GPUStorage.
 
-- [ ] T72.3 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m
+- [x] T72.3 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
   - Dependencies: T72.2.
 
 ### E73: Fused GPU RMSNorm Kernel (O73)
@@ -337,7 +337,7 @@ Existing code:
 - `layers/normalization/rms_norm.go` -- RMSNorm layer.
 - `internal/cuda/kernels/elementwise.go` -- existing kernel launchers.
 
-- [ ] T73.1 Write CUDA fused RMSNorm kernel  Owner: TBD  Est: 3h
+- [x] T73.1 Write CUDA fused RMSNorm kernel  Owner: TBD  Est: 3h  2026 03 06
   - Create `internal/cuda/kernels/rmsnorm.cu`:
     - Input: x (M x D), weight (D), eps, output (M x D).
     - Each thread block handles one row: compute mean(x^2), rsqrt, scale.
@@ -353,7 +353,7 @@ Existing code:
   - Test: weight vector applied correctly.
   - Compare with CPU fused RMSNorm within 1e-5.
 
-- [ ] T73.2 Write Go wrapper and wire into GPUEngine  Owner: TBD  Est: 2h
+- [x] T73.2 Write Go wrapper and wire into GPUEngine  Owner: TBD  Est: 2h  2026 03 06
   - Create `internal/cuda/kernels/rmsnorm.go` with CGo wrapper.
   - Add `FusedRMSNorm` method to GPUEngine (or intercept in the RMSNorm
     layer when engine is GPUEngine).
@@ -364,7 +364,7 @@ Existing code:
   - Compare GPU fused RMSNorm vs CPU fused RMSNorm for Gemma 3 hidden size.
   - Verify output has GPUStorage.
 
-- [ ] T73.3 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m
+- [x] T73.3 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
   - Dependencies: T73.2.
 
 ### E74: End-to-End GPU Benchmark (O74)
