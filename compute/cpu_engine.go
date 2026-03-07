@@ -15,6 +15,7 @@ import (
 
 	float16 "github.com/zerfoo/float16"
 	float8 "github.com/zerfoo/float8"
+	"github.com/zerfoo/zerfoo/internal/workerpool"
 	"github.com/zerfoo/zerfoo/internal/xblas"
 	"github.com/zerfoo/zerfoo/log"
 	metrics "github.com/zerfoo/zerfoo/metrics/runtime"
@@ -28,6 +29,7 @@ type CPUEngine[T tensor.Numeric] struct {
 	logger     log.Logger
 	collector  metrics.Collector
 	memTracker *MemoryTracker
+	pool       *workerpool.Pool
 }
 
 // Default histogram buckets for operation duration (seconds).
@@ -52,6 +54,9 @@ func (e *CPUEngine[T]) TanhPrime(ctx context.Context, a, upstream *tensor.Tensor
 	}, dst...)
 }
 
+// computePool is the shared worker pool for parallelFor. Set by NewCPUEngine.
+var computePool *workerpool.Pool
+
 // parallelFor splits [0,total) into chunks and runs fn(start,end) across workers.
 // It avoids goroutine overhead for small ranges.
 func parallelFor(total int, fn func(start, end int)) {
@@ -73,6 +78,20 @@ func parallelFor(total int, fn func(start, end int)) {
 		workers = 1
 	}
 	chunk := (total + workers - 1) / workers
+	if computePool != nil {
+		tasks := make([]func(), 0, workers)
+		for start := 0; start < total; start += chunk {
+			end := start + chunk
+			if end > total {
+				end = total
+			}
+			tasks = append(tasks, func() {
+				fn(start, end)
+			})
+		}
+		computePool.Submit(tasks)
+		return
+	}
 	var wg sync.WaitGroup
 	for start := 0; start < total; start += chunk {
 		end := start + chunk
@@ -80,10 +99,10 @@ func parallelFor(total int, fn func(start, end int)) {
 			end = total
 		}
 		wg.Add(1)
-		go func(s, e int) {
+		go func() {
 			defer wg.Done()
-			fn(s, e)
-		}(start, end)
+			fn(start, end)
+		}()
 	}
 	wg.Wait()
 }
@@ -117,6 +136,26 @@ func parallelForCtx(ctx context.Context, total int, fn func(start, end int)) err
 	}
 	chunk := (total + workers - 1) / workers
 
+	if computePool != nil {
+		tasks := make([]func(), 0, workers)
+		for start := 0; start < total; start += chunk {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			end := start + chunk
+			if end > total {
+				end = total
+			}
+			tasks = append(tasks, func() {
+				fn(start, end)
+			})
+		}
+		computePool.Submit(tasks)
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	canceled := false
 
@@ -137,10 +176,10 @@ func parallelForCtx(ctx context.Context, total int, fn func(start, end int)) err
 			end = total
 		}
 		wg.Add(1)
-		go func(s, e int) {
+		go func() {
 			defer wg.Done()
-			fn(s, e)
-		}(start, end)
+			fn(start, end)
+		}()
 	}
 	wg.Wait()
 
@@ -357,13 +396,19 @@ func (e *CPUEngine[T]) MulScalar(_ context.Context, a *tensor.TensorNumeric[T], 
 // NewCPUEngine constructs a new CPUEngine for the given numeric operations.
 // A no-op logger and no-op collector are used by default; call SetLogger/SetCollector to override.
 func NewCPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T]) *CPUEngine[T] {
+	n := runtime.NumCPU()
+	pool := workerpool.New(n)
+	computePool = pool
+	xblas.InitPool(n)
 	return &CPUEngine[T]{
 		ops:        ops,
 		logger:     log.Nop(),
 		collector:  metrics.Nop(),
 		memTracker: NewMemoryTracker(0),
+		pool:       pool,
 	}
 }
+
 
 // SetLogger replaces the engine's logger.
 func (e *CPUEngine[T]) SetLogger(l log.Logger) {
@@ -393,7 +438,15 @@ func (e *CPUEngine[T]) MemoryTracker() *MemoryTracker {
 }
 
 // Close is a no-op for CPUEngine. It satisfies the shutdown.Closer interface.
-func (e *CPUEngine[T]) Close(_ context.Context) error { return nil }
+func (e *CPUEngine[T]) Close(_ context.Context) error {
+	if e.pool != nil {
+		e.pool.Close()
+		e.pool = nil
+	}
+	xblas.ShutdownPool()
+	computePool = nil
+	return nil
+}
 
 // Ops returns the arithmetic ops for this engine.
 func (e *CPUEngine[T]) Ops() numeric.Arithmetic[T] { return e.ops }
@@ -1023,6 +1076,11 @@ func (e *CPUEngine[T]) Transpose(_ context.Context, a *tensor.TensorNumeric[T], 
 	if len(originalShape) == 2 && axes[0] == 1 && axes[1] == 0 {
 		rows := originalShape[0]
 		cols := originalShape[1]
+		// When either dimension is 1, layout is identical — just copy.
+		if rows == 1 || cols == 1 {
+			copy(rData, aData)
+			return result, nil
+		}
 		const blockSize = 64
 		parallelFor(rows, func(startRow, endRow int) {
 			for jb := 0; jb < cols; jb += blockSize {
@@ -1049,6 +1107,14 @@ func (e *CPUEngine[T]) Transpose(_ context.Context, a *tensor.TensorNumeric[T], 
 		dim1 := originalShape[1]
 		dim2 := originalShape[2]
 		D := originalShape[3]
+
+		// When either swapped dimension is 1 (common in decode with seq_len=1),
+		// the data layout is identical — just copy without transposing.
+		if dim1 == 1 || dim2 == 1 {
+			copy(rData, aData)
+			return result, nil
+		}
+
 		batchStride := dim1 * dim2 * D
 		const blockSize = 32
 		parallelFor(B, func(startB, endB int) {
@@ -1672,6 +1738,29 @@ func (e *CPUEngine[T]) tryQuantizedMatMul(
 				}
 				batchA := tensor.QuantizeQ8(af32[aOff : aOff+m*k])
 				xblas.GemmQ8F32(m, n, k, batchA, bF[bOff:bOff+k*n], rF[cOff:cOff+m*n])
+			}
+		}
+		return true
+	default:
+		// Not handled on A; fall through to check B.
+	}
+
+	// Check B for Q4 storage. This handles the case where a graph-level
+	// Transpose node passes through Q4 storage with shape [K,N] but
+	// data in [N,K] layout. GemmF32Q4NT reads the Q4 blocks directly
+	// from the original [N,K] weight layout using NEON q4DotBlockSIMD.
+	storB := b.GetStorage()
+	switch qsB := any(storB).(type) {
+	case *tensor.Q4Storage:
+		aF := any(a.Data()).([]float32)
+		rF := any(result.Data()).([]float32)
+		if batchSize == 1 {
+			xblas.GemmF32Q4NT(m, n, k, aF, qsB, rF)
+		} else {
+			for i := range batchSize {
+				aOff := i * m * k
+				cOff := i * m * n
+				xblas.GemmF32Q4NT(m, n, k, aF[aOff:aOff+m*k], qsB, rF[cOff:cOff+m*n])
 			}
 		}
 		return true

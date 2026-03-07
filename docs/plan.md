@@ -1,167 +1,100 @@
-# Zerfoo Performance Optimization Plan -- Phases 25, 26, and 27
+# Zerfoo Development Plan -- Phase 31: Inference Validation and Training Improvements
 
 ## 1. Context
 
 ### Problem Statement
 
-Zerfoo is a Go-based ML framework with 40+ packages, a 34-method compute
-Engine[T] interface, CPU and CUDA GPU backends, gRPC-based distributed
-training, and comprehensive test coverage (95%+ across testable packages).
-Phases 1-24 are complete (see docs/adr/001-019, docs/design.md).
+Two independent areas need work:
 
-Phase 25 built all core performance primitives: mmap loading, pre-allocated KV
-cache, Q4/Q8 quantization, NEON/AVX2 SIMD GEMM, fused Q4 dequant+multiply,
-CUDA Q4 dequant-GEMM (2383 GFLOPS on GB10), parallel graph execution, and
-continuous batching.
+**Inference gaps:** Phase 26 delivered PagedAttention, speculative decoding,
+GGUF import, and performance CI as scaffolding. None were validated with real
+models or benchmarked end-to-end. Speculative decoding has no measured speedup.
+GGUF loader was tested with synthetic files only. PagedAttention's GQA
+integration uses gather-copy (Option A) instead of direct block-table reads
+(Option B). GPU Q4 inference has never been measured end-to-end.
 
-Phase 26 validated end-to-end Q4 inference on Gemma 3 2B (3.60 tok/s on DGX
-Spark ARM64 CPU), added PagedAttention, speculative decoding, GGUF parser, and
-performance CI dashboard.
+**Training gaps:** After 19 Numerai experiments on DGX Spark, the best training
+val_corr is 0.010551 (Exp 15, 4-layer model). Full out-of-time validation shows
+Mean CORR of only 0.002 (Sharpe 0.171). Top 20 Numerai models have mmcRep of
+0.010-0.014. The 5x gap between training val_corr and full validation stems
+from two structural issues: (1) val_corr oscillation -- every experiment shows
+extreme oscillation between positive and negative val_corr across epochs, and
+early stopping picks the unstable peak; (2) noisy targets -- the model overfits
+to noise in the 40-era validation split.
 
-Phase 27 targets a 4.2x CPU throughput improvement (3.60 -> >= 15 tok/s) and
-GPU inference enablement (>= 60 tok/s) by eliminating the dominant bottlenecks
-identified in Phase 26 profiling:
+See docs/design.md for full architecture context and Phases 1-30 history.
 
-CPU profile breakdown (after Phase 26 blocked 2D transpose optimization):
+### What Was Delivered (Phases 26-30)
 
-| Component | % CPU | Notes |
-|-----------|-------|-------|
-| Transpose (3D/4D) | 62% | Attention permute patterns, weight transposes on every forward pass |
-| GEMM (sgemmAccRowNeon) | 16% | Actual compute -- the useful work |
-| binaryOp | 3% | Element-wise add/mul |
-| GC / malloc | 5% | 2.5M allocs per generation, 39GB total |
-| Other | 14% | Model loading, tokenization, decoding |
-
-Key bottlenecks in priority order:
-
-1. **Redundant weight transposes.** Weight matrices are transposed on every
-   forward pass even though weights never change. The ONNX-to-ZMF conversion
-   emits explicit Transpose nodes for weight layout. Folding these at load
-   time eliminates 62% of CPU time.
-
-2. **Excessive allocation.** Every forward pass creates new tensors for all
-   intermediate results (2.5M allocs for 32 tokens). A tensor arena that
-   reuses buffers by shape eliminates GC pressure and cache thrashing.
-
-3. **No GPU inference path.** The CUDA backend has cuBLAS SGEMM and a custom
-   Q4 GEMM kernel (2383 GFLOPS) but has never been wired into end-to-end
-   model inference. GPU should yield 10-50x over CPU.
-
-4. **No GGUF end-to-end.** The GGUF parser/loader (E37) can read weights and
-   metadata but cannot build a computation graph. Architecture-specific
-   graph template builders are needed to run inference from GGUF files.
-
-5. **No operator fusion.** Common multi-op patterns (RMSNorm, RoPE,
-   SiLU-gate) execute as separate ops with intermediate tensor
-   materialization.
-
-### Phase 25 Summary (COMPLETE)
-
-| Epic | Result |
-|------|--------|
-| E25: Mmap loading | Zero-copy model load via syscall.Mmap |
-| E26: Pre-alloc KV cache | 0 allocs/token decode loop |
-| E27: Q4/Q8 tensor storage | 8x/4.5x compression vs float32 |
-| E28: Q4/Q8 CPU MatMul | Fused dequant+SIMD multiply, ~16% faster GEMV |
-| E29: NEON/AVX2 SGEMM | ~2x faster than gonum BLAS |
-| E30: Parallel graph executor | Concurrent independent branch execution |
-| E31: Continuous batching | Channel-based batch scheduler in serve/ |
-| E32: CUDA Q4 kernel | 2383 GFLOPS on DGX Spark GB10 (sm_121) |
-| E33: Benchmark suite | tok/s, GFLOPS, memory allocs benchmarks |
-
-### Phase 26 Summary (COMPLETE)
-
-| Epic | Result |
-|------|--------|
-| E34: PagedAttention | Block pool + PagedKVCache + Generator integration (46% memory of pre-alloc) |
-| E35: Speculative Decoding | SpeculativeGenerator with adaptive draft length |
-| E36: End-to-End Q4 Pipeline | Gemma 3 2B Q4: 1.96 -> 3.60 tok/s (1.84x via blocked transpose) |
-| E37: GGUF Model Import | Parser + loader + arch mapping (llama/gemma) |
-| E38: Performance CI Dashboard | bench.sh + GH Actions workflow + DGX GPU job |
-
-### Phase Summary (Previous Work)
-
-| Phase | Description | ADRs |
-|-------|-------------|------|
-| 1-9 | Production readiness, distributed training, model import, inference library, multi-arch | 001-006 |
-| 10-13 | Multi-GPU, cuDNN, TensorRT, CUTLASS flash attention | 007-010 |
-| 14-19 | GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8 GEMM, TRT dynamic shapes | 011-016 |
-| 20 | DGX Spark GB10 validation (66 packages, ARM64, sm_121, CUDA 13.0) | 017 |
-| 21 | Model parity (18 PASS across 6 families, 18 ONNX fixes) | 018 |
-| 22 | BF16 cuBLAS GEMM (1.5x faster), unified memory (200-5000x alloc speedup), SigLIP fix | 019 |
-| 23 | Test coverage push (9 packages at 100%, 42 of 50 at >= 95%) | -- |
-| 24 | FFN bias fix, embedding loading, cmd/zerfoo-predict refactor | -- |
+| Phase | Key Result |
+|-------|------------|
+| Phase 26 | PagedAttention (46% memory), speculative decoding scaffolding, GGUF parser/loader, performance CI workflow |
+| Phase 27-28 | Transpose elimination, TensorPool, fused ops, GGUF end-to-end, model hub, chat templates, K-quant |
+| Phase 29 | NEON Q4 dot product, 6.5 tok/s Gemma 3 2B Q4 |
+| Phase 30 | Worker pool, graph compiler, 6.86 tok/s (5% over Phase 29). 15 tok/s NOT achieved -- GEMV kernels dominate at 74%, framework overhead is only ~5% |
 
 ### Objectives
 
-Phase 25 (COMPLETE):
-O39: Mmap-based model loading. Eliminate heap allocation for model weights.
-O40: Pre-allocated KV cache. Zero allocation during autoregressive decode.
-O41: Quantized inference pipeline (Q4_0, Q8_0). Run 4-bit models end-to-end.
-O42: Parallel graph execution. Execute independent graph branches concurrently.
-O43: Optimized CPU GEMM. Use NEON (ARM64) and AVX2 (x86-64) SIMD intrinsics.
-O44: Continuous batching in the serve package.
-O45: Benchmark suite with tok/s metric. Measure and track performance parity.
+**Inference:**
 
-Phase 26 (COMPLETE):
-O46: End-to-end quantized inference on a real model with measured tok/s.
-O47: PagedAttention for efficient multi-sequence KV memory.
-O48: Speculative decoding for 2-3x single-request decode speedup.
-O49: GGUF model import for ecosystem compatibility.
-O50: Automated performance regression tracking in CI.
+- O59: Validate speculative decoding on real models with measured tok/s speedup.
+- O60: Wire PagedAttention into GQA for non-contiguous block reads (Option B)
+  and benchmark multi-sequence serving.
+- O61: End-to-end GGUF inference with real HuggingFace models (Llama 3.2 1B,
+  Gemma 3 2B) and measured tok/s.
+- O62: DGX Spark GPU inference pipeline for Q4 models via CUDA kernels.
+- O63: Performance CI with regression alerting and DGX self-hosted runner.
 
-Phase 27 (NEW):
-O51: Gemma 3 2B Q4 >= 15 tok/s on DGX Spark CPU (ARM64).
-O52: Gemma 3 2B Q4 >= 60 tok/s on DGX Spark GPU (GB10).
-O53: Load and run inference from a GGUF file without any external conversion.
-O54: Decode loop allocation < 100 allocs/token.
-O55: Fused RMSNorm, RoPE, and SiLU-gate kernels.
+**Training:**
+
+- O64: Smooth val_corr oscillation via EMA of model weights.
+- O65: Prevent premature early stopping via smoothed val_corr tracking.
+- O66: Better loss landscape exploration via cosine warm restarts.
+- O67: Flatter minima via stochastic weight averaging (SWA).
+- O68: Regime-robust predictions via feature dropout.
 
 ### Non-Goals
 
-- Training performance optimization (inference focus).
-- Multi-node inference (requires second DGX Spark).
-- Pipeline parallelism / tensor parallelism.
-- FP4 kernels (blocked on upstream CUTLASS SM121 FP4 fixes).
-- Vulkan or SYCL backends.
-- New quantization formats (Q4_K_M, Q5_K, Q6_K) -- Phase 28 candidate.
-- Prompt caching / prefix sharing (future phase, after PagedAttention).
-- Vision model inference (focus on text-only LLMs).
-- Breaking changes to the Engine[T] or Node[T] interfaces.
-- Replacing gRPC with a different RPC framework.
-- Adding third-party test frameworks (testify, etc.).
-- SSM/Mamba architectures (Falcon Mamba, RWKV, Jamba).
-- Multi-GPU inference orchestration.
-- Mobile / WebAssembly targets.
+- Training performance optimization beyond the listed improvements.
+- Multi-node or multi-GPU inference.
+- Pipeline or tensor parallelism.
+- FP4 kernels (blocked on upstream CUTLASS SM121 fixes).
+- Vulkan, SYCL, or ROCm backends.
+- Q4_K_M, Q5_K, or other advanced quantization formats beyond existing K-quant.
+- Prompt caching / prefix sharing.
+- Vision model inference (text-only LLMs).
+- Per-parameter learning rates (P3 priority, deferred).
+- Gradient accumulation (P3 priority, deferred).
+- GEMV kernel optimization (identified as bottleneck in Phase 30, separate phase).
 
 ### Constraints and Assumptions
 
-- Use Go standard library only where possible. Minimize new dependencies.
-- All CUDA code behind `//go:build cuda` build tags.
-- All ROCm code behind `//go:build rocm` build tags.
-- All OpenCL code behind `//go:build opencl` build tags.
-- Pre-commit hook rejects commits spanning multiple directories.
-- All changes must pass golangci-lint, go vet, and gofmt.
-- Tests must pass with -race flag.
-- Table-driven tests using the standard testing package.
-- DGX Spark GB10 at ssh ndungu@192.168.86.250 for GPU validation.
-- Target models: Gemma 3 2B (Q4 ZMF at ~/models/gemma3-q4/ on DGX), Llama 3.2 1B (GGUF).
-- GGUF parser is pure Go (no CGo dependency on llama.cpp).
-- PagedAttention block size: 16 tokens (matches vLLM default).
-- Assembly (NEON/AVX2) files use Go's plan9 assembler syntax with build tags.
+- Go standard library only where possible. No cobra, viper, testify.
+- Build tags for GPU code (`//go:build cuda`).
+- Pre-commit hook rejects multi-directory commits.
+- golangci-lint, go vet, gofmt required for all changes.
+- Tests must pass with `-race` flag.
+- Table-driven tests using the standard `testing` package.
+- DGX Spark GB10 at `ssh ndungu@192.168.86.250` for GPU validation.
+- Go 1.25.0, CUDA 13.0, sm_121 (Blackwell) on DGX Spark.
+- Target models: Gemma 3 2B (ZMF + GGUF), Llama 3.2 1B (GGUF).
+- Phase 30 is complete. Baseline: 6.86 tok/s Gemma 3 2B Q4 CPU ARM64.
+- Training improvements target the Audacity training pipeline
+  (`audacity/internal/training/`).
 
 ### Success Metrics
 
-| Metric | Phase 26 Baseline | Phase 27 Target | How Measured |
-|--------|-------------------|-----------------|-------------|
-| CPU tok/s (Gemma 3 2B Q4) | 3.60 | >= 15 | BenchmarkGemma3Q4TokPerSec on DGX Spark |
-| GPU tok/s (Gemma 3 2B Q4) | untested | >= 60 | GPU benchmark on DGX Spark GB10 |
-| Allocs per token | ~80,000 | < 100 | go test -bench -benchmem |
-| Transpose % of CPU | 62% | < 5% | pprof CPU profile |
-| GGUF end-to-end | parser only | full inference | LoadGGUFModel -> Generate |
-| Model load time (7B) | < 0.5s (mmap) | maintained | Benchmark in model/ |
-| KV cache allocs/token | 0 per token | maintained | Go benchmark -benchmem |
-| KV memory per sequence | ~used_tokens * dim * layers (paged) | maintained | PagedAttention benchmark |
+| Metric | Current | Target | How Measured |
+|--------|---------|--------|-------------|
+| Speculative decode speedup | unmeasured | >= 1.5x | E60 benchmark: speculative vs baseline tok/s |
+| Multi-sequence memory (8 seqs) | unmeasured | <= 50% of pre-alloc | E59 benchmark with PagedAttention |
+| Concurrent requests p99 latency | untested | < 2x of single-request | E59 load test on serve/ |
+| GGUF Llama 3.2 1B tok/s (CPU) | N/A | >= 30 | E61 benchmark on Apple M-series |
+| GGUF Gemma 3 2B tok/s (CPU) | N/A | >= 15 | E61 benchmark on Apple M-series |
+| GPU Q4 tok/s (2B) | unmeasured | >= 60 | E62 benchmark on DGX Spark |
+| CI regression detection | manual | automated PR comment | E63 workflow |
+| Numerai full val CORR | 0.002 | >= 0.006 | Out-of-time validation after E64-E68 |
+| Val_corr oscillation amplitude | +/-0.008 | +/-0.003 | Epoch-level val_corr std dev |
 
 ---
 
@@ -171,454 +104,659 @@ O55: Fused RMSNorm, RoPE, and SiLU-gate kernels.
 
 | ID | Deliverable | Rationale |
 |----|-------------|-----------|
-| D66 | Mmap ZMF loader | COMPLETE (Phase 25) |
-| D67 | Pre-allocated KV cache with ring buffer | COMPLETE (Phase 25) |
-| D68 | Q4_0 and Q8_0 tensor storage and dequant | COMPLETE (Phase 25) |
-| D69 | Quantized MatMul kernel (CPU Q4_0 * FP32) | COMPLETE (Phase 25) |
-| D70 | NEON SGEMM kernel (ARM64) | COMPLETE (Phase 25) |
-| D71 | AVX2 SGEMM kernel (x86-64) | COMPLETE (Phase 25) |
-| D72 | Parallel graph executor | COMPLETE (Phase 25) |
-| D73 | Continuous batching in serve/ | COMPLETE (Phase 25) |
-| D74 | tok/s benchmark suite | COMPLETE (Phase 25) |
-| D75 | Quantized CUDA dequant-GEMM kernel | COMPLETE (Phase 25) |
-| D76 | End-to-end Q4 inference pipeline | COMPLETE (Phase 26) |
-| D77 | PagedAttention KV cache | COMPLETE (Phase 26) |
-| D78 | Speculative decoding | COMPLETE (Phase 26) |
-| D79 | GGUF model parser and loader | COMPLETE (Phase 26) |
-| D80 | Performance CI dashboard | COMPLETE (Phase 26) |
-| D81 | Weight transpose elimination | Transpose < 5% of CPU profile |
-| D82 | Tensor arena / buffer pool | < 100 allocs/token in decode loop |
-| D83 | GPU inference pipeline | >= 60 tok/s on Gemma 3 2B Q4 (GB10) |
-| D84 | GGUF end-to-end inference | Load GGUF, generate text, no external tools |
-| D85 | Fused operators (RMSNorm, RoPE, SiLU-gate) | Single-pass kernels, >= 2x micro-benchmark |
+| D301 | PagedAttention GQA integration + load test | Close Option B gap from E34 |
+| D302 | Speculative decoding real-model validation | Close unmeasured speedup gap from E35 |
+| D303 | GGUF end-to-end inference with real models | Close synthetic-only gap from E37 |
+| D304 | GPU Q4 inference pipeline | First GPU end-to-end tok/s measurement |
+| D305 | CI regression alerting with DGX runner | Close manual-only gap from E38 |
+| D306 | EMA optimizer wrapper | Smooth val_corr oscillation |
+| D307 | Smoothed early stopping | Prevent premature stopping on noise |
+| D308 | Cosine warm restarts scheduler | Better loss landscape exploration |
+| D309 | SWA optimizer wrapper | Flatter minima for generalization |
+| D310 | Feature dropout layer | Regime-robust feature selection |
 
 ### Out of Scope
 
-- Advanced quantization (Q4_K_M, Q5_K, Q6_K) -- Phase 28 candidate.
-- Prompt caching / prefix sharing -- future phase after PagedAttention.
+- Advanced quantization formats (Q4_K_M, Q5_K, Q6_K beyond existing).
+- Prompt caching / prefix sharing.
 - Multi-GPU KV cache partitioning.
 - Vision encoder inference.
-- Training loop optimization.
-- Multi-node inference.
-- Mobile / WebAssembly targets.
+- Mixup data augmentation (P2 priority, deferred).
+- Huber loss / multi-loss scheduling (P2 priority, deferred).
+- Per-parameter learning rates (P3 priority, deferred).
+- Gradient accumulation (P3 priority, deferred).
 
 ---
 
 ## 3. Checkable Work Breakdown
 
-### Phase 25 -- COMPLETE
+### E59: PagedAttention GQA Integration and Load Test (O60)
 
-### E25: Mmap-Based Model Loading (O39)
+Wire PagedAttention block-table reads directly into GroupQueryAttention,
+eliminating the gather-to-contiguous copy. Then validate with a multi-sequence
+load test.
 
-- [x] T25.1 Add mmap file reader to model/ package  Owner: TBD  Est: 2h  2026-03-05
-- [x] S25.1.1 Unit tests for MmapReader  Owner: TBD  Est: 1h  2026-03-05
-- [x] T25.2 Add streaming protobuf decoder for ZMF  Owner: TBD  Est: 3h  2026-03-05
-- [x] S25.2.1 Unit tests for LoadZMFMmap  Owner: TBD  Est: 1h  2026-03-05
-- [x] T25.3 Integrate mmap loader into inference.Load  Owner: TBD  Est: 1h  2026-03-05
-- [x] S25.3.1 Tests for inference.Load with mmap  Owner: TBD  Est: 30m  2026-03-05
-- [x] T25.4 Run golangci-lint on model/  Owner: TBD  Est: 15m  2026-03-05
+Existing code:
+- `generate/paged_kv.go` -- PagedKVCache with Append/GetKV/Free/Truncate.
+- `generate/block_pool.go` -- BlockPool with Alloc/Free/Cap.
+- `generate/generator.go:58` -- WithPagedKV option.
+- `layers/attention/grouped_query_attention.go` -- GQA layer.
 
-### E26: Pre-Allocated KV Cache (O40)
+- [x] T59.1 Add block-table KV reader to GQA  Owner: TBD  Est: 4h  (2026-03-06)
+  - Modify `layers/attention/grouped_query_attention.go` to accept a
+    `BlockTableReader` interface:
+    ```go
+    type BlockTableReader interface {
+        ReadKV(layer int, seqLen int) (k, v *tensor.TensorNumeric[T])
+    }
+    ```
+  - When `BlockTableReader` is set, GQA reads K/V directly from paged blocks
+    instead of a contiguous cache tensor. Uses block table to iterate blocks
+    and compute attention scores per-block.
+  - Acceptance: GQA produces correct attention output with block-table reads.
+    Output matches contiguous-cache path within 1e-6.
+  - Dependencies: none (builds on existing PagedKVCache).
 
-- [x] T26.1 Implement ring-buffer KV cache  Owner: TBD  Est: 3h  2026-03-05
-- [x] S26.1.1 Unit tests for ring-buffer KV cache  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T26.2 Update generate.Generator to use pre-allocated cache  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] S26.2.1 Tests for generator with pre-allocated cache  Owner: TBD  Est: 1h  2026-03-05
-- [x] T26.3 Update GQA attention to use view-based cache  Owner: TBD  Est: 2h  2026-03-05
-- [x] S26.3.1 Tests for GQA with view cache  Owner: TBD  Est: 1h  2026-03-05
-- [x] T26.4 Run golangci-lint on generate/ and layers/attention/  Owner: TBD  Est: 15m  2026-03-05
+- [x] S59.1.1 GQA block-table correctness tests  Owner: TBD  Est: 2h  (2026-03-06)
+  - Test: 16 tokens (1 block), compare to contiguous path.
+  - Test: 33 tokens (3 blocks), verify cross-block attention is correct.
+  - Test: 128 tokens (8 blocks), verify full sequence attention.
+  - All tests compare block-table vs contiguous output within 1e-6.
 
-### E27: Quantized Tensor Storage (O41)
+- [x] T59.2 Benchmark block-table vs gather-copy  Owner: TBD  Est: 2h
+  - Benchmark GQA forward pass with:
+    A. Gather blocks to contiguous buffer, then standard attention.
+    B. Block-table direct reads (T59.1).
+  - Measure: ns/op, allocs/op for sequence lengths 128, 512, 1024.
+  - Acceptance: Block-table path has fewer allocs/op. ns/op comparison
+    documented (may not be faster due to non-contiguous memory access).
+  - Dependencies: T59.1.
 
-- [x] T27.1 Add Q4_0 block format to tensor/  Owner: TBD  Est: 3h  2026-03-05
-- [x] S27.1.1 Unit tests for Q4_0 quantization  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T27.2 Add Q8_0 block format to tensor/  Owner: TBD  Est: 2h  2026-03-05
-- [x] S27.2.1 Unit tests for Q8_0 quantization  Owner: TBD  Est: 1h  2026-03-05
-- [x] T27.3 Add quantized tensor loading to ZMF loader  Owner: TBD  Est: 2h  2026-03-05
-- [x] S27.3.1 Tests for quantized ZMF loading  Owner: TBD  Est: 1h  2026-03-05
-- [x] T27.4 Add zonnx quantization pass  Owner: TBD  Est: 2h  2026-03-05
-- [x] S27.4.1 Tests for zonnx quantization  Owner: TBD  Est: 1h  2026-03-05
-- [x] T27.5 Run golangci-lint on tensor/ and model/  Owner: TBD  Est: 15m  2026-03-05
+- [x] S59.2.1 Benchmark report  Owner: TBD  Est: 30m
 
-### E28: Quantized CPU MatMul Kernel (O41, O43)
+- [x] T59.3 Multi-sequence load test  Owner: TBD  Est: 3h
+  - Create `serve/loadtest_test.go` with a test that:
+    1. Starts the HTTP server with `WithPagedKV`.
+    2. Sends 8 concurrent chat completion requests via HTTP.
+    3. Measures p50, p95, p99 latency and peak memory.
+  - Compare metrics with and without PagedAttention.
+  - Acceptance: PagedAttention uses <= 50% memory of pre-allocated cache for
+    8 sequences of mixed length (128-1024 tokens). p99 latency < 2x single.
+  - Dependencies: T59.1.
 
-- [x] T28.1 Implement Q4_0 x FP32 MatMul in Go  Owner: TBD  Est: 3h  2026-03-05
-- [x] S28.1.1 Unit and benchmark tests  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T28.2 Implement Q8_0 x FP32 MatMul in Go  Owner: TBD  Est: 2h  2026-03-05
-- [x] S28.2.1 Unit and benchmark tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T28.3 Wire quantized MatMul into CPUEngine  Owner: TBD  Est: 2h  2026-03-05
-- [x] S28.3.1 Integration tests for quantized MatMul via Engine  Owner: TBD  Est: 1h  2026-03-05
-- [x] T28.4 Run golangci-lint on internal/xblas/ and compute/  Owner: TBD  Est: 15m  2026-03-05
+- [x] S59.3.1 Load test validation  Owner: TBD  Est: 1h
+  - Verify all 8 requests complete successfully.
+  - Verify memory measurements are consistent across 3 runs.
 
-### E29: SIMD-Optimized CPU GEMM (O43)
+- [x] T59.4 Run golangci-lint on layers/attention/ and serve/  Owner: TBD  Est: 15m
+  - Dependencies: T59.3.
 
-- [x] T29.1 NEON SGEMM kernel for ARM64  Owner: TBD  Est: 4h  2026-03-05
-- [x] S29.1.1 Tests for NEON SGEMM  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T29.2 AVX2 SGEMM kernel for x86-64  Owner: TBD  Est: 4h  2026-03-05
-- [x] S29.2.1 Tests for AVX2 SGEMM  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T29.3 Wire SIMD GEMM into xblas.GemmF32  Owner: TBD  Est: 1h  2026-03-05
-- [x] S29.3.1 Integration tests  Owner: TBD  Est: 30m  2026-03-05
-- [x] T29.4 Fused Q4 dequant+multiply kernel  Owner: TBD  Est: 3h  2026-03-05
-- [x] S29.4.1 Tests for fused Q4 kernel  Owner: TBD  Est: 1h  2026-03-05
-- [x] T29.5 Run golangci-lint on internal/xblas/  Owner: TBD  Est: 15m  2026-03-05
+### E60: Speculative Decoding Real-Model Validation (O59)
 
-### E30: Parallel Graph Execution (O42)
+The speculative decoding implementation exists (`generate/speculative.go`,
+`generate/adaptive.go`) but has never been benchmarked on real models.
+This epic validates the implementation and measures speedup.
 
-- [x] T30.1 Build dependency-aware parallel executor  Owner: TBD  Est: 4h  2026-03-05
-- [x] S30.1.1 Unit tests for parallel executor  Owner: TBD  Est: 2h  2026-03-05
-- [x] T30.2 Add ForwardMode option to Graph  Owner: TBD  Est: 1h  2026-03-05
-- [x] S30.2.1 Tests for ForwardMode  Owner: TBD  Est: 30m  2026-03-05
-- [x] T30.3 Run golangci-lint on graph/  Owner: TBD  Est: 15m  2026-03-05
+Existing code:
+- `generate/speculative.go` -- SpeculativeGenerator with draft/target loop.
+- `generate/adaptive.go` -- adaptiveDraftLen with rolling acceptance rate.
+- `serve/server.go:27-30` -- WithDraftModel server option.
 
-### E31: Continuous Batching (O44)
-
-- [x] T31.1 Implement batch scheduler in serve/  Owner: TBD  Est: 4h  2026-03-05
-- [x] S31.1.1 Unit tests for batch scheduler  Owner: TBD  Est: 2h  2026-03-05
-- [x] T31.2 Implement batched forward pass in generate/  Owner: TBD  Est: 3h  2026-03-05
-- [x] S31.2.1 Tests for batched generation  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T31.3 Wire batch scheduler into serve HTTP handler  Owner: TBD  Est: 2h  2026-03-05
-- [x] S31.3.1 Integration tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T31.4 Run golangci-lint on serve/ and generate/  Owner: TBD  Est: 15m  2026-03-05
-
-### E32: Quantized CUDA Kernel (O41)
-
-- [x] T32.1 CUDA Q4_0 dequant-GEMM kernel  Owner: TBD  Est: 4h  2026-03-05
-- [x] S32.1.1 Tests and benchmarks (CUDA-gated)  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T32.2 Wire CUDA Q4 GEMM into GPUEngine  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] S32.2.1 Integration tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T32.3 Run golangci-lint on compute/ and internal/cuda/  Owner: TBD  Est: 15m  2026-03-05
-
-### E33: Benchmark Suite (O45)
-
-- [x] T33.1 Create tok/s benchmark framework  Owner: TBD  Est: 2h  2026-03-05
-- [x] S33.1.1 Benchmark validation tests  Owner: TBD  Est: 30m  2026-03-05
-- [x] T33.2 Add CPU GEMM micro-benchmarks  Owner: TBD  Est: 1h  2026-03-05
-- [x] S33.2.1 Verify benchmark correctness  Owner: TBD  Est: 30m  2026-03-05
-- [x] T33.3 Add memory profiling benchmark  Owner: TBD  Est: 1h  2026-03-05
-- [x] T33.4 Run golangci-lint on tests/benchmark/  Owner: TBD  Est: 15m  2026-03-05
-
-### Phase 26 -- COMPLETE
-
-### E36: End-to-End Quantized Inference Pipeline (O46)
-
-- [x] T36.1 Create Q4 quantized ZMF model from Gemma 3 2B  Owner: TBD  Est: 2h  2026-03-05
-  - Used `zmf-quantize` tool (zonnx) to quantize F32 ZMF to Q4. Fixed quantizer
-    to skip norm/embed/bias/small tensors (caused NaN). Model: 4GB F32 -> 1.5GB Q4.
-- [x] S36.1.1 Smoke test: load Q4 model and run single forward pass  Owner: TBD  Est: 1h  2026-03-05
-- [x] T36.2 Profile and fix Q4 inference bottlenecks  Owner: TBD  Est: 4h  2026-03-05
-  - Baseline: 1.96 tok/s (Q4), 2.23 tok/s (F32) on DGX Spark ARM64.
-  - Top bottleneck: CPUEngine.Transpose at 90% of CPU time.
-- [x] S36.2.1 Benchmark: tok/s for Q4 Gemma 3 2B on CPU and GPU  Owner: TBD  Est: 1h  2026-03-05
-- [x] T36.3 Optimize hot path based on profiling  Owner: TBD  Est: 4h  2026-03-05
-  - Added cache-friendly blocked 2D transpose (64x64 tiles) for axes=[1,0].
-  - Result: 1.96 -> 3.60 tok/s (Q4), 2.23 -> 3.51 tok/s (F32) -- 1.84x speedup.
-- [x] S36.3.1 Before/after benchmark comparison  Owner: TBD  Est: 30m  2026-03-05
-- [x] T36.4 Run golangci-lint on affected packages  Owner: TBD  Est: 15m  2026-03-05
-
-### E34: PagedAttention (O47)
-
-- [x] T34.1 Design paged KV cache data structure  Owner: TBD  Est: 2h  2026-03-05
-- [x] S34.1.1 Unit tests for PagedKVCache  Owner: TBD  Est: 2h  2026-03-05
-- [x] T34.2 Block pool with configurable max memory  Owner: TBD  Est: 2h  2026-03-05
-- [x] S34.2.1 Unit tests for BlockPool  Owner: TBD  Est: 1h  2026-03-05
-- [x] T34.3 Integrate PagedKVCache into Generator  Owner: TBD  Est: 3h  2026-03-05
-- [x] S34.3.1 Integration tests for paged generation  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T34.4 Wire paged KV into attention layers  Owner: TBD  Est: 3h  2026-03-05
-- [x] S34.4.1 GQA + paged KV correctness tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T34.5 Memory efficiency benchmark  Owner: TBD  Est: 1h  2026-03-05
-  - Paged uses 46% of pre-allocated (target <= 50%).
-- [x] S34.5.1 Benchmark report  Owner: TBD  Est: 30m  2026-03-05
-- [x] T34.6 Run golangci-lint on generate/ and layers/attention/  Owner: TBD  Est: 15m  2026-03-05
-
-### E35: Speculative Decoding (O48)
-
-- [x] T35.1 Implement draft-verify decode loop  Owner: TBD  Est: 4h  2026-03-05
-- [x] S35.1.1 Unit tests for speculative decode  Owner: TBD  Est: 2h  2026-03-05
-- [x] T35.2 Token verification with KV cache rollback  Owner: TBD  Est: 3h  2026-03-05
-- [x] S35.2.1 KV rollback correctness tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T35.3 Adaptive draft length  Owner: TBD  Est: 2h  2026-03-05
-- [x] S35.3.1 Adaptive length tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T35.4 Wire speculative decoding into serve/  Owner: TBD  Est: 2h  2026-03-05
-- [x] S35.4.1 Integration tests for speculative serve  Owner: TBD  Est: 1h  2026-03-05
-- [x] T35.5 Benchmark: speculative vs baseline decode  Owner: TBD  Est: 1h  2026-03-05
-  - Baseline: 3.53 tok/s, Speculative (k=4, same model): 2.17 tok/s.
-- [x] S35.5.1 Benchmark report  Owner: TBD  Est: 30m  2026-03-05
-- [x] T35.6 Run golangci-lint on generate/ and serve/  Owner: TBD  Est: 15m  2026-03-05
-
-### E37: GGUF Model Import (O49)
-
-- [x] T37.1 Implement GGUF file parser  Owner: TBD  Est: 4h  2026-03-05
-- [x] S37.1.1 Unit tests for GGUF parser  Owner: TBD  Est: 2h  2026-03-05
-- [x] T37.2 GGUF tensor loader with Q4_0/Q8_0 support  Owner: TBD  Est: 3h  2026-03-05
-- [x] S37.2.1 Tensor loading tests  Owner: TBD  Est: 1.5h  2026-03-05
-- [x] T37.3 GGUF architecture mapping  Owner: TBD  Est: 3h  2026-03-05
-- [x] S37.3.1 Architecture mapping tests  Owner: TBD  Est: 1h  2026-03-05
-- [x] T37.4 Integrate GGUF loader into inference.Load  Owner: TBD  Est: 2h  2026-03-05
-- [x] S37.4.1 End-to-end GGUF inference test  Owner: TBD  Est: 1h  2026-03-05
-- [x] T37.5 Run golangci-lint on model/gguf/ and inference/  Owner: TBD  Est: 15m  2026-03-05
-
-### E38: Performance CI Dashboard (O50)
-
-- [x] T38.1 Create benchmark runner script  Owner: TBD  Est: 2h  2026-03-05
-- [x] S38.1.1 Validate benchmark script output  Owner: TBD  Est: 30m  2026-03-05
-- [x] T38.2 GitHub Actions workflow for benchmarks  Owner: TBD  Est: 2h  2026-03-05
-- [x] S38.2.1 Workflow validation  Owner: TBD  Est: 30m  2026-03-05
-- [x] T38.3 DGX Spark GPU benchmark integration  Owner: TBD  Est: 2h  2026-03-05
-- [x] S38.3.1 GPU benchmark validation  Owner: TBD  Est: 30m  2026-03-05
-- [x] T38.4 Run golangci-lint on scripts/  Owner: TBD  Est: 15m  2026-03-05
-
-### Phase 27 -- NEW
-
-### E39: Eliminate Redundant Transposes (O51)
-
-- [x] T39.1 Fold weight transposes at model load time  Owner: TBD  Est: 4h
-  - Created `graph/optimize.go` with `FoldConstantTransposes` pass.
-  - Detects Transpose nodes with Parameter/Constant inputs, pre-applies the
-    transpose at load time, rewires all consumers, removes dead nodes.
-  - Handles any permutation (2D, 3D/4D). Wired into `model.BuildFromZMF`.
-  - Commits: d4bd2df, b6ad94c.
-
-- [x] S39.1.1 Unit tests for transpose folding  Owner: TBD  Est: 1h
-  - 5 tests in `graph/optimize_test.go`: constant input folding, dynamic input
-    not folded, output within 1e-6 tolerance, multiple consumers, no-op graph.
-
-- [x] T39.2 Fast path for 3D/4D attention transposes  Owner: TBD  Est: 3h
-  - Added blocked 4D transpose for axes=[0,2,1,3] using 32x32 tiling.
-  - Copies contiguous D-element rows for cache efficiency.
-  - Benchmark: 35x faster than generic path (1.6ms vs 55.8ms for 4x8x512x64).
-  - Commit: 17dd56b.
-
-- [x] S39.2.1 Benchmark: 3D/4D transpose speedup  Owner: TBD  Est: 30m
-  - BenchmarkCPUEngineTranspose4D in compute/cpu_engine_bench_test.go.
-  - Correctness test TestCPUEngine_Transpose4D in compute/cpu_engine_test.go.
-
-- [ ] T39.3 End-to-end benchmark after transpose elimination  Owner: TBD  Est: 1h
-  - Run Gemma 3 2B Q4 with transpose folding enabled on DGX Spark.
-  - Profile with pprof to verify Transpose is < 5% of CPU.
-  - Measure tok/s improvement.
-  - Acceptance: measurable speedup, Transpose no longer dominant in profile.
-  - Dependencies: T39.1, T39.2. **Requires DGX Spark access.**
-
-- [ ] S39.3.1 Before/after profile comparison  Owner: TBD  Est: 30m
-
-- [x] T39.4 Run golangci-lint on model/ and compute/  Owner: TBD  Est: 15m
-  - 0 lint issues on graph/, model/, compute/.
-
-### E40: Tensor Arena / Zero-Alloc Forward (O54)
-
-- [x] T40.1 Design and implement TensorPool  Owner: TBD  Est: 4h
-  - Created `compute/pool.go` with `TensorPool[T]` type.
-  - Shape-keyed mutex-guarded free lists. Acquire zeroes returned buffers.
-  - Commit: fab02f3.
-
-- [x] S40.1.1 Unit tests for TensorPool  Owner: TBD  Est: 1h
-  - 5 tests + 2 benchmarks in `compute/pool_test.go`.
-
-- [x] T40.2 Wire pool into graph executor  Owner: TBD  Est: 4h
-  - Added `WithPool(TensorReleaser)` to `graph.Graph`.
-  - Forward computes reference counts, releases intermediates when refcount
-    hits zero. Protects inputs, output, and constant/parameter nodes.
-  - Commit: c2a7e6f.
-
-- [x] S40.2.1 Allocation benchmark: before/after pool  Owner: TBD  Est: 30m
-  - 5 integration tests in `graph/pool_integration_test.go`.
-  - Pool benchmark in `compute/pool_test.go` shows 0 allocs for reuse cycle.
-
-- [ ] T40.3 Benchmark tok/s with pool enabled  Owner: TBD  Est: 1h
-  - Run Gemma 3 2B Q4 with tensor pool.
-  - Verify tok/s improvement from reduced GC pressure.
-  - Acceptance: < 100 allocs/token. Measurable tok/s improvement.
-  - Dependencies: T40.2.
-
-- [ ] S40.3.1 Allocation profile comparison  Owner: TBD  Est: 30m
-
-- [x] T40.4 Run golangci-lint on compute/ and graph/  Owner: TBD  Est: 15m
-
-### E41: GPU Inference Pipeline (O52)
-
-- [ ] T41.1 Validate GPU forward pass on Gemma 3 2B  Owner: TBD  Est: 4h
-  - Load Gemma 3 2B Q4 ZMF with `inference.Load(..., WithDevice("cuda"))`.
-  - Run single forward pass. Verify output shape and non-NaN values.
-  - Identify and fix any ops that fall back to CPU (log warnings for
-    unsupported GPU ops).
-  - Acceptance: forward pass completes on GPU without CPU fallback for
-    core ops (MatMul, Add, Mul, Softmax, RMSNorm, RoPE, Gather).
+- [ ] T60.1 Identify or create a draft model  Owner: TBD  Est: 3h
+  - Option A: Use a smaller Gemma 3 model (if available in GGUF/ZMF).
+  - Option B: Create a "tiny" model by truncating Gemma 3 2B to 2-4 layers.
+    Save as ZMF. The truncated model is fast but low quality -- acceptable
+    for speculative drafting.
+  - Option C: Use Llama 3.2 1B as draft for a larger target (if available).
+  - Acceptance: A draft model exists that runs >= 10x faster than the target.
   - Dependencies: none.
-  - Risk: some ops may not have GPU implementations yet (R53).
 
-- [ ] S41.1.1 GPU forward pass smoke test  Owner: TBD  Est: 1h
+- [ ] S60.1.1 Draft model smoke test  Owner: TBD  Est: 1h
+  - Load draft model, generate 20 tokens, verify no errors.
+  - Measure draft-only tok/s as baseline.
 
-- [ ] T41.2 Profile and fix GPU bottlenecks  Owner: TBD  Est: 4h
-  - Profile with CUDA events or nsys.
-  - Typical issues: excessive CPU-GPU synchronization, small kernel launches,
-    data transfers for unsupported ops, sub-optimal memory layout.
+- [ ] T60.2 Benchmark speculative vs baseline decode  Owner: TBD  Est: 2h
+  - Run identical prompts (10 prompts, 100 tokens each) with:
+    A. Standard Generator (baseline).
+    B. SpeculativeGenerator with draft model from T60.1.
+  - Measure: tok/s, acceptance rate, average accepted tokens per step.
+  - Acceptance: Results documented. Speedup >= 1.5x if acceptance rate > 50%.
+  - Dependencies: T60.1.
+
+- [ ] S60.2.1 Benchmark report with speedup analysis  Owner: TBD  Est: 30m
+
+- [ ] T60.3 Profile and optimize speculative overhead  Owner: TBD  Est: 3h
+  - If speedup < 1.5x, profile the speculative loop:
+    - Draft model forward pass cost relative to target.
+    - KV cache rollback overhead.
+    - Token verification loop overhead.
+  - Fix top bottleneck (e.g., avoid rebuilding draft KV cache from scratch
+    if only rolling back a few positions).
+  - Acceptance: Measurable improvement over T60.2 baseline, or documented
+    explanation if speculative approach is not beneficial for this model pair.
+  - Dependencies: T60.2.
+
+- [ ] S60.3.1 Before/after profile comparison  Owner: TBD  Est: 30m
+
+- [ ] T60.4 Validate streaming with speculative decode  Owner: TBD  Est: 2h
+  - Use `serve/` HTTP server with `WithDraftModel`.
+  - Send a streaming chat completion request via SSE.
+  - Verify tokens stream incrementally as they are verified (not batched).
+  - Acceptance: SSE events arrive for each accepted token batch, not delayed
+    until full generation completes.
+  - Dependencies: T60.2.
+
+- [ ] S60.4.1 Streaming speculative decode test  Owner: TBD  Est: 1h
+  - Verify SSE event count matches number of verification rounds.
+  - Verify final output matches non-streaming speculative generation.
+
+- [ ] T60.5 Run golangci-lint on generate/ and serve/  Owner: TBD  Est: 15m
+  - Dependencies: T60.4.
+
+### E61: GGUF End-to-End Inference Validation (O61)
+
+The GGUF parser, loader, and architecture mapping exist (`model/gguf/`), and
+`inference.Load()` detects `.gguf` files. This epic validates the full pipeline
+with real HuggingFace GGUF models.
+
+Existing code:
+- `model/gguf/parser.go:72` -- `Parse(r io.ReadSeeker) (*File, error)`.
+- `model/gguf/loader.go` -- Tensor loading with Q4_0/Q8_0/F32/F16 support.
+- `model/gguf/arch.go` -- Architecture mapping for llama/gemma.
+- `model/gguf/tokenizer.go` -- GGUF tokenizer extraction.
+- `inference/gguf.go` -- `LoadGGUF()` and `ToModelMetadata()`.
+- `inference/inference.go:67-72` -- HuggingFace model aliases.
+- `inference/inference.go:197-199` -- GGUF detection in `Load()`.
+
+- [ ] T61.1 Download and validate Llama 3.2 1B Q4_0 GGUF  Owner: TBD  Est: 2h
+  - Use `inference.Pull("llama-3-1b-q4")` to download from HuggingFace.
+  - Call `inference.Load("llama-3-1b-q4")` and verify:
+    - Model metadata (num_layers, hidden_size, num_heads) is correct.
+    - Tokenizer loads and encodes/decodes correctly.
+    - A single forward pass produces valid logits (not NaN/Inf).
+  - Acceptance: Llama 3.2 1B loads from GGUF and produces valid logits.
+  - Dependencies: none.
+
+- [ ] S61.1.1 Llama 3.2 1B GGUF load test  Owner: TBD  Est: 1h
+  - Verify metadata matches expected Llama 3.2 1B config.
+  - Verify tokenizer roundtrip for 5 test strings.
+
+- [ ] T61.2 Benchmark Llama 3.2 1B GGUF inference  Owner: TBD  Est: 2h
+  - Generate 100 tokens with standard prompts.
+  - Measure tok/s on Apple M-series CPU.
+  - Compare with Gemma 3 2B ZMF performance (expect faster due to fewer params).
+  - Acceptance: tok/s measured and documented. Target >= 30 tok/s on M-series.
+  - Dependencies: T61.1.
+
+- [ ] S61.2.1 Benchmark report  Owner: TBD  Est: 30m
+
+- [ ] T61.3 Validate Gemma 3 2B GGUF inference  Owner: TBD  Est: 2h
+  - Use `inference.Pull("gemma-3-2b-q4")` to download GGUF variant.
+  - Load and generate tokens. Compare output quality with ZMF-loaded Gemma 3.
+  - Acceptance: GGUF-loaded Gemma 3 2B produces coherent text. tok/s within
+    10% of ZMF-loaded variant (mmap overhead should be similar).
+  - Dependencies: T61.1.
+
+- [ ] S61.3.1 GGUF vs ZMF output comparison  Owner: TBD  Est: 1h
+  - Generate 50 tokens from same prompt with both loaders.
+  - Verify logits match within tolerance (quantization rounding may differ).
+
+- [ ] T61.4 Fix GGUF loader issues found during validation  Owner: TBD  Est: 4h
+  - Buffer for issues found during T61.1-T61.3:
+    - Architecture mapping mismatches.
+    - Tensor name translation errors.
+    - Quantization format differences between GGUF Q4_0 and Zerfoo Q4.
+    - Tokenizer vocabulary mismatches.
+  - Acceptance: All validation tests from T61.1-T61.3 pass after fixes.
+  - Dependencies: T61.1, T61.2, T61.3.
+
+- [ ] S61.4.1 Regression tests for fixed issues  Owner: TBD  Est: 1h
+
+- [ ] T61.5 Run golangci-lint on model/gguf/ and inference/  Owner: TBD  Est: 15m
+  - Dependencies: T61.4.
+
+### E62: GPU Q4 Inference Pipeline (O62)
+
+Run end-to-end Q4 inference on DGX Spark GB10 using CUDA kernels.
+Phase 25 delivered the CUDA Q4 dequant-GEMM kernel (2383 GFLOPS). This epic
+wires it into the full inference pipeline.
+
+Existing code:
+- `internal/cuda/kernels/` -- CUDA Q4 dequant-GEMM kernel.
+- `compute/gpu_engine.go` -- GPUEngine with CUDA acceleration.
+- `generate/generator.go` -- Autoregressive generation loop.
+- DGX Spark models: `~/models/gemma3-q4/model.zmf`.
+
+- [x] T62.1 Profile GPU inference pipeline  Owner: TBD  Est: 3h  (2026-03-06)
+  - Run `cmd/zerfoo-predict` on DGX Spark with CUDA build tags.
+  - Enable pprof and CUDA profiling (nsys or ncu).
+  - Identify: which ops run on GPU vs CPU fallback, data transfer overhead,
+    kernel launch overhead.
+  - Acceptance: Profile captured showing GPU utilization breakdown.
+  - Dependencies: none (requires DGX Spark access).
+
+- [x] S62.1.1 GPU profile report  Owner: TBD  Est: 30m  (2026-03-06)
+  - CPU baseline: 5.94 tok/s, GPU with -device cuda: 5.12 tok/s (slower)
+  - 43% of GPU time in cgocall (CUDA kernel launches + host-device transfers)
+  - 9.4% Q4 dequantize on CPU, 8.1% Transpose on CPU, 4.4% binary ops on CPU
+  - Root cause: GPUEngine only accelerates MatMul; all other ops fall back to CPU
+  - Fix priorities: (1) keep tensors on GPU, (2) GPU element-wise ops, (3) GPU Q4 dequant
+
+- [ ] T62.2 Fix GPU fallback bottlenecks  Owner: TBD  Est: 4h
+  - From T62.1 profile, identify ops that fall back to CPU unnecessarily.
+  - Common issues:
+    - Host-to-device copies for each op instead of keeping tensors on GPU.
+    - Missing GPU implementation for element-wise ops used in attention.
+    - KV cache on CPU requiring copies for each attention step.
   - Fix top 3 bottlenecks.
-  - Acceptance: GPU profile shows > 80% time in compute kernels.
-  - Dependencies: T41.1.
+  - Acceptance: Fewer CPU fallbacks in profile. Measurable GPU utilization
+    improvement.
+  - Dependencies: T62.1.
 
-- [ ] S41.2.1 GPU profile analysis  Owner: TBD  Est: 1h
+- [ ] S62.2.1 Before/after GPU utilization comparison  Owner: TBD  Est: 30m
 
-- [ ] T41.3 GPU generation benchmark  Owner: TBD  Est: 2h
-  - Run full generation (32 tokens) on GPU.
-  - Measure tok/s. Target >= 60 tok/s.
-  - Compare with CPU baseline.
-  - Acceptance: GPU tok/s >= 10x CPU tok/s.
-  - Dependencies: T41.2.
+- [ ] T62.3 Benchmark GPU Q4 inference tok/s  Owner: TBD  Est: 2h
+  - Run Gemma 3 2B Q4 on DGX Spark with all fixes from T62.2.
+  - Measure: tok/s (100-token average), GPU memory usage, GPU utilization %.
+  - Compare with CPU-only baseline on the same machine.
+  - Acceptance: GPU tok/s documented. Target >= 60 tok/s for Gemma 3 2B Q4.
+  - Dependencies: T62.2.
 
-- [ ] S41.3.1 CPU vs GPU benchmark report  Owner: TBD  Est: 30m
+- [ ] S62.3.1 GPU benchmark report  Owner: TBD  Est: 30m
 
-- [ ] T41.4 Run golangci-lint on compute/ and inference/  Owner: TBD  Est: 15m
+- [ ] T62.4 GPU PagedAttention integration  Owner: TBD  Est: 4h
+  - Ensure PagedKVCache works with GPU tensors:
+    - Block pool allocates GPU memory.
+    - Block-table reads work with GPU-resident KV data.
+    - Attention computation stays on GPU end-to-end.
+  - Acceptance: GPU inference with PagedAttention produces correct output.
+    No host-device copies in the KV cache hot path.
+  - Dependencies: T62.2, T59.1.
 
-### E42: GGUF End-to-End Inference (O53)
+- [ ] S62.4.1 GPU paged attention correctness test  Owner: TBD  Est: 1h
 
-- [ ] T42.1 Graph template builder for Llama architecture  Owner: TBD  Est: 6h
-  - Create `inference/gguf_builder.go` with
-    `BuildLlamaGraph(model *GGUFModel, engine Engine) (*graph.Graph, error)`.
-  - Build the standard Llama graph: Embed -> [RMSNorm -> Attn -> RMSNorm ->
-    MLP] x N -> RMSNorm -> LMHead.
-  - Map GGUF tensor names (already canonical from E37 name mapping) to
-    graph node parameters.
-  - Support GQA (num_kv_heads < num_heads).
-  - Acceptance: Llama 3.2 1B GGUF loads and produces non-NaN logits.
-  - Dependencies: E37.
+- [ ] T62.5 Run golangci-lint on compute/ and internal/cuda/  Owner: TBD  Est: 15m
+  - Dependencies: T62.4.
 
-- [ ] S42.1.1 Llama GGUF forward pass test  Owner: TBD  Est: 1h
+### E63: Performance CI Regression Alerting (O63)
 
-- [ ] T42.2 Graph template builder for Gemma architecture  Owner: TBD  Est: 3h
-  - Extend for Gemma: shared embed/lm_head weight, GeGLU activation
-    (GeLU instead of SiLU), embedding scaling by sqrt(hidden_size).
-  - Acceptance: Gemma 3 2B GGUF loads and produces non-NaN logits.
-  - Dependencies: T42.1.
+The benchmark script and GitHub Actions workflow exist. This epic adds
+regression detection with PR comments and validates the DGX self-hosted runner.
 
-- [ ] S42.2.1 Gemma GGUF forward pass test  Owner: TBD  Est: 1h
+Existing code:
+- `scripts/bench.sh` -- Benchmark runner producing JSON output.
+- `.github/workflows/benchmark.yml` -- GH Actions workflow.
 
-- [ ] T42.3 Tokenizer loading for GGUF models  Owner: TBD  Est: 3h
-  - Extract tokenizer vocabulary from GGUF metadata (tokenizer.ggml.tokens,
-    tokenizer.ggml.scores, tokenizer.ggml.merges).
-  - Build a BPETokenizer from GGUF metadata without needing tokenizer.json.
-  - Fallback: if GGUF tokenizer data is absent, look for tokenizer.json in
-    the same directory as the GGUF file.
-  - Acceptance: tokenizer encodes/decodes correctly for Llama and Gemma.
+- [x] T63.1 Add regression comparison to benchmark workflow  Owner: TBD  Est: 3h  (2026-03-06)
+  - Modify `.github/workflows/benchmark.yml` to:
+    1. Download previous benchmark results from GitHub Actions artifacts.
+    2. Compare current results with previous.
+    3. If any metric regresses by > 5%, post a PR comment with details.
+  - Use `gh api` or a lightweight Go script (`cmd/bench-compare/`) for
+    comparison logic.
+  - Acceptance: PR with a deliberate regression (e.g., sleep in hot path)
+    triggers a warning comment.
   - Dependencies: none.
 
-- [ ] S42.3.1 GGUF tokenizer encode/decode tests  Owner: TBD  Est: 1h
+- [x] S63.1.1 Regression detection test  Owner: TBD  Est: 1h  (2026-03-06)
+  - Create test benchmark data with a 10% regression.
+  - Verify comparison script detects and reports it.
 
-- [ ] T42.4 Unified GGUF load function  Owner: TBD  Est: 2h
-  - Create `inference.LoadGGUFModel(path string, opts ...Option) (*Model, error)`.
-  - Dispatches to architecture-specific builder based on GGUF metadata
-    `general.architecture`.
-  - Wires tokenizer, graph, engine, and generator into a ready-to-use Model.
-  - Acceptance: `LoadGGUFModel("model.gguf")` -> `model.Generate(ctx, prompt)`.
-  - Dependencies: T42.1, T42.2, T42.3.
+- [ ] T63.2 Set up DGX Spark as self-hosted GitHub Actions runner  Owner: TBD  Est: 2h
+  - Install and configure `actions-runner` on DGX Spark.
+  - Add `self-hosted` and `dgx-spark` labels.
+  - Verify runner connects to GitHub and can pick up jobs.
+  - Acceptance: A test workflow with `runs-on: [self-hosted, dgx-spark]`
+    completes successfully.
+  - Dependencies: none (requires admin access to DGX Spark).
+  - Risk: Network/firewall issues may block runner registration.
 
-- [ ] S42.4.1 End-to-end GGUF generation test  Owner: TBD  Est: 1h
+- [ ] S63.2.1 Self-hosted runner validation  Owner: TBD  Est: 30m
 
-- [ ] T42.5 Run golangci-lint on inference/ and model/gguf/  Owner: TBD  Est: 15m
+- [ ] T63.3 Add GPU benchmark job to workflow  Owner: TBD  Est: 2h
+  - Add a separate job in `.github/workflows/benchmark.yml` that:
+    1. Runs on `[self-hosted, dgx-spark]`.
+    2. Builds with CUDA tags (`go build -tags cuda ./...`).
+    3. Runs GPU benchmarks (CUDA Q4 GEMM, end-to-end GPU tok/s).
+    4. Stores results alongside CPU benchmarks.
+  - Acceptance: GPU benchmarks appear in CI artifacts.
+  - Dependencies: T63.1, T63.2.
 
-### E43: Operator Fusion (O55)
+- [ ] S63.3.1 GPU CI benchmark validation  Owner: TBD  Est: 30m
 
-- [x] T43.1 Fused RMSNorm kernel  Owner: TBD  Est: 3h
-  - Create `compute/fused_rmsnorm.go` that computes
-    `x * rsqrt(mean(x^2) + eps) * weight` in a single pass over the data.
-  - Avoids materializing the squared, mean, and rsqrt intermediate tensors.
-  - Wire into the RMSNorm layer as an optimized path when engine supports it.
-  - Acceptance: output matches unfused RMSNorm within 1e-5. Benchmark shows
-    >= 2x improvement for typical hidden sizes (1152, 2048, 4096).
+- [ ] T63.4 Historical benchmark tracking  Owner: TBD  Est: 2h
+  - Store benchmark results in a JSON file committed to the repo
+    (e.g., `bench_results/history.json`) or use GitHub Pages for a
+    simple dashboard.
+  - Each CI run appends results with commit SHA and timestamp.
+  - Acceptance: Historical data queryable for the last 20 runs.
+  - Dependencies: T63.1.
+
+- [ ] S63.4.1 History query test  Owner: TBD  Est: 30m
+
+- [ ] T63.5 Run golangci-lint on scripts/ and cmd/bench-compare/  Owner: TBD  Est: 15m
+  - Dependencies: T63.4.
+
+### E64: Smoothed Early Stopping (O65)
+
+Current early stopping uses raw val_corr, which oscillates wildly (+0.010 one
+epoch, -0.006 the next). A smoothed tracking metric prevents premature stopping
+and picks more stable checkpoints.
+
+Existing code:
+- `audacity/internal/training/early_stopping.go` -- current implementation.
+
+- [x] T64.1 Add exponential smoothing to early stopping  Owner: TBD  Est: 2h  (pre-existing)
+  - Modify `audacity/internal/training/early_stopping.go`:
+    - Add `smoothedBest float64` and `alpha float64` fields.
+    - Track `smoothed = alpha * raw_val + (1-alpha) * smoothed`.
+    - Base early stopping patience on smoothed val_corr, not raw.
+    - Default alpha = 0.3 (responds to real trends, filters noise).
+  - Save checkpoint when smoothed val_corr is best, not raw.
+  - Acceptance: With synthetic oscillating val_corr data, smoothed early
+    stopping continues training longer than raw early stopping.
   - Dependencies: none.
 
-- [x] S43.1.1 Fused RMSNorm correctness and benchmark tests  Owner: TBD  Est: 1h
+- [x] S64.1.1 Smoothed early stopping unit tests  Owner: TBD  Est: 1h  (pre-existing)
+  - Test: oscillating val_corr [0.01, -0.006, 0.008, -0.004, 0.009, -0.003]
+    does not trigger early stopping with patience=5, alpha=0.3.
+  - Test: steadily declining val_corr does trigger early stopping.
+  - Test: alpha=1.0 matches raw behavior (backwards compatibility).
+  - Test: both raw and smoothed metrics are logged.
 
-- [x] T43.2 Fused RoPE kernel  Owner: TBD  Est: 3h
-  - Create `compute/fused_rope.go` that applies rotary position embeddings
-    in a single pass: interleave cos/sin multiply and rotate in one loop.
-  - Avoid creating separate cos, sin, split, and rotate intermediate tensors.
-  - Acceptance: output matches unfused RoPE within 1e-5. Benchmark shows
-    >= 2x improvement.
+- [x] T64.2 Log both raw and smoothed val_corr  Owner: TBD  Est: 30m  (2026-03-06)
+  - Add logging to show both raw and smoothed values each epoch.
+  - Acceptance: Training output shows both metrics.
+  - Dependencies: T64.1.
+
+- [x] T64.3 Run golangci-lint on audacity/internal/training/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
+  - Dependencies: T64.2.
+
+### E65: EMA of Model Weights (O64)
+
+Exponential Moving Average maintains a smoothed copy of model weights.
+Instead of using the "lucky peak" checkpoint that oscillates, EMA captures
+the stable signal across all training steps.
+
+Existing code:
+- `training/optimizer/adamw.go` -- current AdamW optimizer.
+- `training/optimizer/ema.go` -- already exists (check contents).
+
+- [x] T65.1 Implement EMA optimizer wrapper  Owner: TBD  Est: 4h  (pre-existing)
+  - Create or complete `training/optimizer/ema.go` with:
+    ```go
+    type EMA[T tensor.Float] struct {
+        inner   optimizer.Optimizer[T]
+        decay   float64           // typical: 0.999
+        shadow  []*tensor.TensorNumeric[T]
+        engine  compute.Engine[T]
+    }
+    func NewEMA[T tensor.Float](inner Optimizer[T], decay float64, engine Engine[T]) *EMA[T]
+    func (e *EMA[T]) Step(params, grads []*tensor.TensorNumeric[T]) error
+    func (e *EMA[T]) SwapWeights(params []*tensor.TensorNumeric[T])
+    ```
+  - `Step()` calls `inner.Step(params, grads)`, then updates shadow:
+    `shadow[i] = decay * shadow[i] + (1-decay) * params[i]`
+  - `SwapWeights()` swaps live and shadow params for validation/inference.
+  - Uses `engine.Copy()`, `engine.MulScalar()`, `engine.Add()` which exist.
+  - Acceptance: After 100 optimizer steps on noisy gradients, shadow params
+    are smoother than live params (lower variance across steps).
   - Dependencies: none.
 
-- [x] S43.2.1 Fused RoPE correctness and benchmark tests  Owner: TBD  Est: 1h
+- [x] S65.1.1 EMA unit tests  Owner: TBD  Est: 2h  (pre-existing)
+  - Test: shadow params converge to running average of live params.
+  - Test: SwapWeights correctly exchanges live and shadow.
+  - Test: SwapWeights twice restores original state.
+  - Test: decay=0.0 makes shadow equal to current params.
+  - Test: decay=1.0 makes shadow never change from initial.
+  - Benchmark: EMA overhead per Step (expect < 10% of optimizer cost).
 
-- [x] T43.3 Fused SiLU-gate kernel  Owner: TBD  Est: 2h
-  - Create `compute/fused_silugate.go` that computes
-    `silu(gate_proj(x)) * up_proj(x)` as a single element-wise pass after
-    the two MatMuls.
-  - Fuses: silu activation + element-wise multiply into one kernel.
-  - Acceptance: output matches unfused path within 1e-5. Benchmark shows
-    improvement for MLP forward.
+- [x] T65.2 Wire EMA into Audacity training loop  Owner: TBD  Est: 2h  (pre-existing)
+  - Modify training loop to:
+    1. Wrap optimizer with EMA when `--ema-decay` flag is set.
+    2. Before validation: call `SwapWeights()` to use shadow params.
+    3. After validation: call `SwapWeights()` to restore live params.
+    4. At end of training: final `SwapWeights()` so saved model uses EMA.
+  - Acceptance: Training with `--ema-decay=0.999` produces a model.
+    Validation uses EMA weights.
+  - Dependencies: T65.1.
+
+- [x] S65.2.1 EMA training integration test  Owner: TBD  Est: 1h  (pre-existing)
+  - Train 5 epochs with EMA on synthetic data.
+  - Verify final saved model contains EMA weights, not live weights.
+
+- [x] T65.3 Run golangci-lint on training/optimizer/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
+  - Dependencies: T65.2.
+
+### E66: Cosine Annealing with Warm Restarts (O66)
+
+The current cosine schedule decays LR from max to 0. Warm restarts reset LR
+periodically, allowing the model to escape local minima and explore multiple
+basins. Combined with EMA/SWA, each restart explores a new basin.
+
+Existing code:
+- `audacity/internal/training/lr_schedule.go` -- current LR schedulers.
+
+- [x] T66.1 Implement CosineAnnealingWarmRestarts  Owner: TBD  Est: 3h  (2026-03-06)
+  - Add to `audacity/internal/training/lr_schedule.go`:
+    ```go
+    type CosineWarmRestarts struct {
+        T0     int     // initial cycle length in epochs
+        TMult  int     // cycle length multiplier (1 = fixed, 2 = doubling)
+        EtaMin float64 // minimum learning rate
+        EtaMax float64 // maximum learning rate
+    }
+    func (c *CosineWarmRestarts) LR(epoch int) float64
+    ```
+  - With TMult=2 and T0=5: cycles are 5, 10, 20 epochs.
+  - At each cycle start, LR resets to EtaMax.
+  - Within cycle: LR = EtaMin + 0.5*(EtaMax-EtaMin)*(1 + cos(pi*t/T)).
+  - Acceptance: LR values follow expected cosine warm restart pattern.
   - Dependencies: none.
 
-- [x] S43.3.1 Fused SiLU-gate correctness and benchmark tests  Owner: TBD  Est: 1h
+- [x] S66.1.1 Cosine warm restarts unit tests  Owner: TBD  Est: 1h  (2026-03-06)
+  - Test: T0=5, TMult=1: LR resets every 5 epochs.
+  - Test: T0=5, TMult=2: cycles are 5, 10, 20.
+  - Test: LR at cycle start equals EtaMax.
+  - Test: LR at cycle end equals EtaMin.
+  - Test: LR at cycle midpoint equals (EtaMax+EtaMin)/2.
 
-- [ ] T43.4 End-to-end benchmark with all fusions enabled  Owner: TBD  Est: 1h
-  - Run Gemma 3 2B Q4 with all fusions + transpose folding + tensor pool.
-  - Measure final tok/s. Compare against Phase 26 baseline (3.60 tok/s).
-  - Acceptance: >= 15 tok/s on DGX Spark CPU.
-  - Dependencies: T43.1, T43.2, T43.3, E39, E40.
+- [x] T66.2 Wire warm restarts into training config  Owner: TBD  Est: 1h
+  - Add `--lr-schedule=cosine-warm-restarts`, `--lr-t0`, `--lr-tmult` flags.
+  - Acceptance: Training with `--lr-schedule=cosine-warm-restarts --lr-t0=5`
+    shows LR resets in training log.
+  - Dependencies: T66.1.
 
-- [ ] S43.4.1 Final performance report  Owner: TBD  Est: 30m
+- [x] T66.3 Run golangci-lint on audacity/internal/training/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
+  - Dependencies: T66.2.
 
-- [x] T43.5 Run golangci-lint on compute/  Owner: TBD  Est: 15m
+### E67: Stochastic Weight Averaging (O67)
+
+SWA averages model weights from multiple training checkpoints. It finds wider
+optima that generalize better than sharp optima found by standard Adam/SGD.
+Different from EMA: SWA averages at epoch boundaries, EMA averages every step.
+
+- [x] T67.1 Implement SWA optimizer wrapper  Owner: TBD  Est: 3h  (2026-03-06)
+  - Create `training/optimizer/swa.go` with:
+    ```go
+    type SWA[T tensor.Float] struct {
+        inner       optimizer.Optimizer[T]
+        avgParams   []*tensor.TensorNumeric[T]
+        nAveraged   int
+        startEpoch  int
+        engine      compute.Engine[T]
+    }
+    func NewSWA[T tensor.Float](inner Optimizer[T], startEpoch int, engine Engine[T]) *SWA[T]
+    func (s *SWA[T]) Step(params, grads []*tensor.TensorNumeric[T]) error
+    func (s *SWA[T]) UpdateAverage(params []*tensor.TensorNumeric[T], epoch int)
+    func (s *SWA[T]) SwapWeights(params []*tensor.TensorNumeric[T])
+    ```
+  - `UpdateAverage()` called at epoch end: `avg = (avg*n + params) / (n+1)`.
+  - Only averages after `startEpoch`.
+  - `SwapWeights()` swaps live and SWA params.
+  - Uses `engine.Add()`, `engine.MulScalar()`, `engine.Copy()`.
+  - Acceptance: After averaging 10 checkpoints, SWA params are the arithmetic
+    mean of those checkpoints.
+  - Dependencies: none.
+
+- [x] S67.1.1 SWA unit tests  Owner: TBD  Est: 1.5h  (2026-03-06)
+  - Test: UpdateAverage computes correct running mean.
+  - Test: epochs before startEpoch do not contribute to average.
+  - Test: SwapWeights exchanges live and SWA params.
+  - Test: nAveraged increments correctly.
+
+- [x] T67.2 Wire SWA into Audacity training loop  Owner: TBD  Est: 2h
+  - Modify training loop:
+    1. When `--swa-start` flag is set, wrap optimizer with SWA.
+    2. At each epoch end (after startEpoch), call `UpdateAverage()`.
+    3. Before validation: `SwapWeights()` for SWA evaluation.
+    4. At end of training: final `SwapWeights()` so saved model uses SWA.
+  - Acceptance: Training with `--swa-start=10` averages checkpoints from
+    epoch 10 onwards. Saved model uses SWA weights.
+  - Dependencies: T67.1.
+
+- [x] S67.2.1 SWA training integration test  Owner: TBD  Est: 1h
+  - Train 20 epochs with SWA starting at epoch 10.
+  - Verify final model is average of checkpoints 10-19.
+
+- [x] T67.3 Run golangci-lint on training/optimizer/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
+  - Dependencies: T67.2.
+
+### E68: Feature Dropout (O68)
+
+Standard dropout drops neurons in hidden layers. Feature dropout drops entire
+input features (columns) during training, forcing the model to not rely on any
+single feature. Important for Numerai where feature importance shifts across
+market regimes.
+
+- [x] T68.1 Implement FeatureDropout layer  Owner: TBD  Est: 3h  (2026-03-06)
+  - Create `layers/regularization/feature_dropout.go`:
+    ```go
+    type FeatureDropout[T tensor.Float] struct {
+        Rate    float64  // fraction of features to drop (0.05-0.10)
+        engine  compute.Engine[T]
+    }
+    func (f *FeatureDropout[T]) Forward(ctx context.Context, input *tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error)
+    ```
+  - During training: randomly zero out entire columns (feature dimension,
+    axis=1) of the input tensor. Apply 1/(1-rate) scaling.
+  - During inference: pass through unchanged.
+  - Uses context to detect training vs inference mode.
+  - Acceptance: With rate=0.1 and 100 features, ~10 features are zeroed
+    per forward pass. Different features are zeroed each call.
+  - Dependencies: none.
+
+- [x] S68.1.1 FeatureDropout unit tests  Owner: TBD  Est: 1.5h  (2026-03-06)
+  - Test: training mode zeros approximately rate*n_features columns.
+  - Test: inference mode passes input through unchanged.
+  - Test: scaling factor 1/(1-rate) is applied to non-dropped features.
+  - Test: different random features are dropped each call.
+  - Test: rate=0.0 passes through unchanged.
+  - Test: rate=1.0 zeros all features.
+
+- [x] T68.2 Register FeatureDropout in layer registry  Owner: TBD  Est: 30m  (2026-03-06)
+  - Add to `layers/registry/register.go`.
+  - Acceptance: Layer can be loaded from ZMF model file.
+  - Dependencies: T68.1.
+
+- [x] T68.3 Wire into Audacity model graph  Owner: TBD  Est: 1h
+  - Add `--feature-dropout` flag to control rate.
+  - Insert FeatureDropout before the first linear layer in the model.
+  - Acceptance: Training with `--feature-dropout=0.05` logs that feature
+    dropout is active. Model trains without errors.
+  - Dependencies: T68.1.
+
+- [x] S68.3.1 Feature dropout training test  Owner: TBD  Est: 1h
+  - Train 3 epochs with feature dropout on synthetic data.
+  - Verify loss decreases (model still learns with dropped features).
+
+- [x] T68.4 Run golangci-lint on layers/regularization/  Owner: TBD  Est: 15m  (2026-03-06, 0 issues)
+  - Dependencies: T68.3.
 
 ---
 
-## 4. Timeline and Milestones
+## 4. Parallel Work
+
+All 10 epics fall into 6 independent tracks. Tracks share no dependencies
+except at documented sync points, so they can execute concurrently.
+
+| Track | Epics | Description | Sync Points |
+|-------|-------|-------------|-------------|
+| A: PagedAttention + GPU | E59 then E62 | GQA block-table reads, then GPU inference pipeline | E62.T62.4 waits on E59.T59.1 |
+| B: Speculative Decode | E60 | Real-model speculative validation and benchmarking | none |
+| C: GGUF Validation | E61 | End-to-end GGUF with real HuggingFace models | none |
+| D: CI Regression | E63 | Benchmark regression alerting and DGX runner | none |
+| E: Training Smoothing | E64, E65 | Smoothed early stopping and EMA of weights | none (E64 and E65 are independent of each other) |
+| F: Training Exploration | E66, E67, E68 | Warm restarts, SWA, and feature dropout | M37 milestone waits on E65 from Track E |
+
+### Within-Epic Parallelism
+
+These tasks within their epics can execute concurrently:
+
+| Epic | Parallel Tasks | Shared Prerequisite |
+|------|----------------|---------------------|
+| E60 | T60.3, T60.4 | Both depend on T60.2 only |
+| E61 | T61.2, T61.3 | Both depend on T61.1 only |
+| E63 | T63.1, T63.2 | Both have no dependencies |
+| E68 | T68.2, T68.3 | Both depend on T68.1 only |
+
+### Maximum Parallelism Summary
+
+With unlimited workers, all 6 tracks start immediately. The only ordering
+constraint is:
+
+1. **Track A sequencing:** E59 must complete T59.1 before E62.T62.4 begins.
+   E62.T62.1-T62.3 can start immediately (no dependency on E59).
+2. **Track F milestone gate:** M37 exit criteria require E65 complete, but
+   E66, E67, E68 task-level work has no dependency on E65 and can start
+   immediately. Only the milestone sign-off waits.
+
+With a single worker, recommended serial order (maximizes early value):
+
+1. E64, E65 (training smoothing -- smallest, fastest value)
+2. E66, E67, E68 (training exploration -- builds on E65 validation)
+3. E61 (GGUF -- standalone, high visibility)
+4. E63 (CI -- standalone infrastructure)
+5. E59 (PagedAttention -- unblocks E62)
+6. E60 (Speculative -- standalone)
+7. E62 (GPU inference -- depends on E59, highest effort)
+
+---
+
+## 5. Timeline and Milestones
 
 | Milestone | ID | Dependencies | Exit Criteria |
 |-----------|----|-------------|---------------|
-| M1: Zero-alloc inference | E25, E26 | none | COMPLETE -- model loads via mmap, decode loop has 0 allocs/token |
-| M2: Quantized inference | E27, E28 | M1 | COMPLETE -- Q4_0 model loads, runs forward pass, output within tolerance |
-| M3: Fast CPU GEMM | E29 | none | COMPLETE -- NEON/AVX2 SGEMM >= 2x gonum, Q4 dot fused |
-| M4: Parallel and batched | E30, E31 | M1 | COMPLETE -- parallel graph, batch server |
-| M5: GPU quantized + benchmarks | E32, E33 | M2 | COMPLETE -- CUDA Q4 GEMM 2383 GFLOPS, benchmark suite |
-| M6: Validated pipeline | E36 | Phase 25 | COMPLETE -- Gemma 3 2B Q4 3.60 tok/s on DGX Spark |
-| M7: Efficient serving | E34 | E36 | COMPLETE -- PagedAttention 46% memory of pre-alloc |
-| M8: Fast decode | E35 | E36 | COMPLETE -- speculative decode pipeline validated |
-| M9: Model ecosystem | E37 | none | COMPLETE -- GGUF files parse, load tensors, map names |
-| M10: Regression tracking | E38 | E36 | COMPLETE -- CI tracks tok/s, alerts on regressions |
-| M11: Zero-transpose inference | E39 | none | Transpose < 5% of CPU, >= 8 tok/s |
-| M12: Zero-alloc decode | E40 | E39 | < 100 allocs/token, >= 10 tok/s |
-| M13: GPU inference | E41 | none | >= 60 tok/s on GB10 |
-| M14: GGUF ecosystem | E42 | E37 | GGUF load -> generate, no external tools |
-| M15: Fused ops | E43 | E39, E40 | >= 15 tok/s CPU with all optimizations |
+| M31: PagedAttention v2 | E59 | none | GQA block-table reads, 8-seq load test passes |
+| M32: Speculative validated | E60 | none | Real-model speedup measured, >= 1.5x or documented explanation |
+| M33: GGUF real models | E61 | none | Llama 3.2 1B and Gemma 3 2B GGUF load + generate |
+| M34: GPU inference | E62 | E59 | GPU Q4 tok/s measured on DGX Spark |
+| M35: CI regression | E63 | none | PR regression comments, DGX runner operational |
+| M36: Training smoothing | E64, E65 | none | EMA + smoothed early stopping in Audacity |
+| M37: Training exploration | E66, E67, E68 | E65 | Warm restarts + SWA + feature dropout in Audacity |
 
-Recommended execution order for Phase 27:
-
-1. **E39** -- transpose elimination (biggest single-item speedup, purely mechanical)
-2. **E40** -- tensor arena (allocation reduction, multiplicative with E39)
-3. **[E41, E42]** -- GPU pipeline + GGUF builders (independent, parallelizable)
-4. **E43** -- operator fusion (polish, benefits from profiling after E39+E40)
+Critical path: E59.T59.1 -> E62.T62.4 -> E62.T62.5 (GPU PagedAttention is
+the longest dependency chain).
 
 ---
 
-## 5. Risk Register
+## 6. Risk Register
 
 | ID | Risk | Impact | Likelihood | Mitigation |
 |----|------|--------|------------|------------|
-| R51 | Transpose folding changes graph semantics for edge cases | Incorrect output | Medium | Conservative pattern matching: only fold when Transpose input is a graph parameter with no other consumers. Full parity test suite validates. |
-| R52 | Tensor pool introduces use-after-release bugs | Data corruption, flaky tests | Medium | Reference counting with debug mode that poisons released buffers. Race detector in CI. |
-| R53 | GPU ops missing for some ONNX-derived nodes | Fallback to CPU kills throughput | High | Audit all node types in Gemma 3 graph before starting. Implement missing GPU ops first. |
-| R54 | GGUF tokenizer metadata varies across model families | Tokenizer fails for some models | Medium | Start with Llama (well-documented). Test against HuggingFace tokenizer.json as ground truth. |
-| R55 | Fused kernels diverge numerically from unfused path | Parity test failures | Low | Use Kahan summation for RMSNorm. Accept 1e-5 tolerance for fused vs unfused. |
-| R56 | 3D/4D transpose patterns vary by architecture | Fast path misses common cases | Medium | Profile both Llama and Gemma to catalog all transpose axis patterns before implementing. |
-| R40 | Plan9 assembly for NEON has poor documentation | SIMD kernel development slows | Medium | RESOLVED -- NEON and AVX2 SGEMM implemented in Phase 25 |
-| R41 | Mmap on protobuf may not save memory if proto.Unmarshal copies internally | Mmap benefit reduced | Medium | RESOLVED -- mmap loader works in Phase 25 |
-| R42 | Quantization accuracy loss breaks model parity tests | False test failures | Medium | Use wider tolerance for quantized models. Separate parity thresholds for float32 vs Q4. |
-| R43 | Parallel graph executor introduces non-determinism in floating point | Flaky tests | Low | Use sequential executor for tests. Only enable parallel for benchmarks and production. |
-| R44 | Continuous batching padding wastes compute for varied prompt lengths | Throughput gain < 2x | Medium | Implement length-sorted batching to minimize padding. |
-| R45 | Real model tok/s far below target | Phase 26 goals unmet | Medium | RESOLVED -- profiled and optimized in E36 (1.84x speedup) |
-| R46 | GGUF format has undocumented quirks per model architecture | Loader breaks on some models | Medium | Start with well-documented Llama format, add architectures incrementally |
-| R47 | PagedAttention gather overhead negates memory savings | No net benefit for small batch | Low | RESOLVED -- paged uses 46% of pre-alloc in Phase 26 |
-| R48 | Speculative decoding acceptance rate too low | < 1.5x speedup | Medium | Adaptive draft length (T35.3) + careful draft model selection |
-| R49 | Self-hosted GitHub runner on DGX Spark has network/security issues | GPU CI blocked | Medium | Fall back to manual GPU benchmarks, document results in PR |
-| R50 | Attention layer changes for paged KV break existing parity tests | Regression | Medium | RESOLVED -- parity suite passes in Phase 26 |
-| R17 | ROCm tests cannot run in CI | No AMD GPU in CI | High | Tests skip gracefully. Validate on AMD hardware manually. |
-| R24 | Three GPU backends increase maintenance burden | Bug surface area grows | High | GRAL abstraction minimizes duplication. Only vendor-specific code is in internal/ packages. |
-| R31 | Single-GPU DGX Spark cannot validate multi-GPU code | NCCL and multi-GPU tests remain unvalidated | High | Tests skip gracefully. Second DGX Spark unit needed. |
-| R39 | Some code paths unreachable without GPU hardware | Cannot achieve 100% on GPU-tagged files locally | Medium | Accept 95% floor for packages with GPU build-tag code. Validate on DGX Spark. |
+| R59 | No suitable draft model exists for Gemma 3 speculative decoding | Speculative speedup unmeasurable | Medium | Create truncated model (T60.1 Option B). If acceptance rate too low, document as model-pair limitation. |
+| R60 | GGUF real models have format quirks not covered by synthetic tests | Loader fails on real files | High | Start with well-tested Llama format. Allocate buffer time (T61.4). |
+| R61 | DGX Spark self-hosted runner has network/security issues | GPU CI blocked | Medium | Fall back to manual GPU benchmarks documented in PR. |
+| R62 | GPU Q4 inference limited by host-device transfer, not compute | GPU tok/s below target | Medium | Profile first (T62.1). Consider persistent GPU tensor allocation. |
+| R63 | Block-table non-contiguous reads are slower than gather-copy | Option B worse than Option A | Medium | Benchmark both (T59.2). Keep Option A as default if Option B regresses. |
+| R64 | HuggingFace model downloads fail in CI due to rate limits or auth | GGUF tests flaky | Medium | Cache model files on CI runner. Use smallest available model. Gate behind env var. |
+| R65 | EMA memory doubles parameter footprint | OOM on DGX Spark | Low | Shadow params use same dtype. Gemma 3 2B Q4 is 1.5GB; doubling to 3GB is well within 128GB. |
+| R66 | SWA + EMA combined overhead slows training significantly | Training wall time 2x | Low | EMA adds < 10% per step. SWA only averages at epoch boundaries. Profile if concerned. |
+| R67 | Smoothed early stopping delays convergence detection | Wasted training time | Low | Use alpha=0.3 which still responds to real trends. Add max-epochs hard limit. |
 
 ---
 
-## 6. Operating Procedure
+## 7. Operating Procedure
 
 ### Definition of Done
 
@@ -630,287 +768,183 @@ A task is done when:
 5. `go vet ./package/` reports no issues.
 6. Tests pass with `-race` flag.
 7. Non-CUDA build (`go build ./...` without any GPU tag) compiles.
-8. CUDA build (`go build -tags cuda ./...`) compiles.
-9. Changes are committed in a small commit touching one directory only.
+8. Changes are committed in a small commit touching one directory only.
 
 ### Commit Discipline
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(tensor): add Q4_0 block storage`.
+- Use Conventional Commits: `feat(training): add EMA optimizer wrapper`.
 - Always run linters and formatters before committing.
 
 ### Benchmark Protocol
 
-- All performance claims must be backed by `go test -bench` output.
-- Benchmarks run with `-benchtime=3s -count=3` minimum for statistical validity.
-- Report median and p99 latency, not just mean.
-- Track regressions by storing benchmark results in `tests/benchmark/baseline/`.
-- Profile before and after every optimization with pprof.
+- benchtime=3s, count=5, report median and p99.
+- All inference benchmarks on DGX Spark GB10 (ssh ndungu@192.168.86.250).
+- Training benchmarks on DGX Spark or local machine.
+
+### Quality Gate
+
+- `go test -race ./package/`
+- `golangci-lint run ./package/`
+- `go vet ./package/`
+- `go build ./...` (non-CUDA)
 
 ---
 
-## 7. Progress Log
+## 8. Progress Log
 
-### Change Summary -- 2026-03-05
+### Change Summary -- 2026-03-06 (parallel analysis)
 
-Merged Phase 27 epics (E39-E43) from docs/phase27.md into docs/plan.md. Added
-5 new epics with 30 tasks/subtasks targeting 4.2x CPU throughput improvement
-and GPU inference enablement. Added deliverables D81-D85, milestones M11-M15,
-risks R51-R56. Marked Phase 26 milestones M6-M10 as COMPLETE. Updated success
-metrics with Phase 27 targets. Added Phase 27 objectives O51-O55.
+Added section 4 "Parallel Work" identifying 6 independent execution tracks:
+- Track A (E59 -> E62): PagedAttention then GPU inference (only cross-epic dependency).
+- Track B (E60): Speculative decoding, fully independent.
+- Track C (E61): GGUF validation, fully independent.
+- Track D (E63): CI regression, fully independent.
+- Track E (E64, E65): Training smoothing, both epics independent of each other.
+- Track F (E66, E67, E68): Training exploration, M37 milestone gates on E65.
 
-### Previous Entries
+Identified within-epic parallelism in E60, E61, E63, E68. Renumbered
+sections 5-9 to 6-10 to accommodate new section 4.
 
-| Date | Phase | Summary |
-|------|-------|---------|
-| 2026-03-05 | 26 | Phase 26 ALL COMPLETE. E34-E38 done. Gemma 3 2B Q4: 3.60 tok/s. |
-| 2026-03-05 | 26 | Merged Phase 26 work breakdown. Added E34-E38, M6-M10, R45-R50, D76-D80. |
-| 2026-03-05 | 25 | Phase 25 ALL COMPLETE. All epics E25-E33 done. PR #35 merged E32 CUDA Q4 kernel. |
-| 2026-03-05 | 25 | Plan created. Performance optimization phase scoped. |
-| 2026-03-05 | 22-24 | Phases 22-24 COMPLETE. BF16 GEMM, unified memory, SigLIP fix, coverage push. |
-| 2026-03-04 | 21 | Phase 21 COMPLETE. 18 ONNX fixes, 18 PASS across 6 model families. |
-| 2026-03-03 | 20 | Phase 20 COMPLETE. ARM64 build (10 fixes), GPU tests (66 pkgs), benchmarks. |
-| 2026-03-03 | 14-19 | Phases 14-19 COMPLETE. GRAL, ROCm, OpenCL, cuDNN backward, INT4/INT8, TRT dynamic. |
-| 2026-03-03 | 10-13 | Phases 10-13 COMPLETE. Multi-GPU, cuDNN, TensorRT, CUTLASS. |
+### Change Summary -- 2026-03-06
+
+Created Phase 31 plan merging two sources:
+- `docs/zerfoo-suggestions.md` -- Training improvements for Numerai performance
+  (10 suggestions, 5 selected as P0/P1 for this phase).
+- `docs/suggestion-plan.md` -- Inference validation gaps from Phase 26
+  (5 epics: E59-E63).
+
+Added training epics E64-E68:
+- E64: Smoothed early stopping (from suggestion #4, P0).
+- E65: EMA of model weights (from suggestion #1, P0).
+- E66: Cosine annealing warm restarts (from suggestion #2, P1).
+- E67: Stochastic weight averaging (from suggestion #3, P1).
+- E68: Feature dropout (from suggestion #5, P1).
+
+Deferred to future phase (P2/P3):
+- Huber loss, mixup, multi-loss scheduling, gradient accumulation, per-param LR.
+
+Trimmed completed Phase 30 (E54-E58) from plan. Merged Phase 30 stable
+knowledge into docs/design.md section 15.12.
 
 ---
 
-## 8. Hand-off Notes
+## 9. Hand-off Notes
 
 ### For a New Contributor
 
 - **Architecture:** Read docs/design.md for interface contracts, package layout,
-  GPU architecture, operations, and troubleshooting. It is the single reference
-  document. Design decisions are in docs/adr/ (ADR-001 through ADR-019).
-- **Phases 1-26:** All complete. No active development tasks.
-- **Phase 27:** Inference throughput. This plan is the source of truth.
-  See also docs/phase27.md for the standalone Phase 27 design document.
-- **Quality:** See docs/QUALITY.md for test coverage report. 9 packages at 100%,
-  42 of 50 at >= 95%.
+  GPU architecture, operations, and troubleshooting. Design decisions are in
+  docs/adr/ (ADR-001 through ADR-021).
+- **Phases 1-30:** All complete. See docs/design.md sections 15.1-15.12.
+- **Phase 31:** This plan is the source of truth.
+- **Quality:** See docs/QUALITY.md for test coverage report.
 - **How to build:**
   - CPU: `go build ./...`
   - CUDA: `go build -tags cuda ./...`
-  - CUDA+CUTLASS: `go build -tags cuda,cutlass ./...`
-  - CUDA on DGX Spark: `make CUDA_ARCH=sm_121` in internal/cuda/kernels/,
+  - On DGX Spark: `make CUDA_ARCH=sm_121` in internal/cuda/kernels/,
     then `go build -tags cuda,cutlass ./...`
-  - ROCm: `go build -tags rocm ./...`
-  - OpenCL: `go build -tags opencl ./...`
 - **Pre-commit hook:** Runs golangci-lint and tests. Rejects multi-directory commits.
 
-### Key Phase 27 Starting Points
+### Key Starting Points
 
-1. **E39 (start here):** Fold weight transposes at load time in the graph builder.
-   Key files: `model/builder.go` (BuildFromZMF), `compute/cpu_engine.go` (Transpose),
-   `graph/graph.go` (Forward). This is the biggest single-item speedup.
-2. **E40:** TensorPool in `compute/pool.go`. Wire into `graph.Graph.Forward()` with
-   reference counting. Target < 100 allocs/token.
-3. **E41 (DGX Spark required):** GPU inference in `compute/gpu_engine.go`,
-   `internal/cuda/`, `inference/inference.go`. Audit all node types first (R53).
-4. **E42 (independent):** GGUF graph builders in `inference/gguf_builder.go`.
-   Builds on E37 parser. Download Llama 3.2 1B GGUF for testing.
-5. **E43:** Fused kernels in `compute/fused_*.go`. Profile after E39+E40 to
-   confirm remaining bottlenecks.
+**Inference epics:**
+1. **E59 (PagedAttention v2):** Modify `layers/attention/grouped_query_attention.go`
+   for block-table reads. Load test in `serve/loadtest_test.go`.
+2. **E60 (Speculative):** Benchmark `generate/speculative.go` with real models.
+3. **E61 (GGUF):** Validate `inference.Load()` with real HF models.
+4. **E62 (GPU):** Profile and fix GPU fallbacks on DGX Spark.
+5. **E63 (CI):** Enhance `.github/workflows/benchmark.yml`.
 
-### Baseline Performance Numbers
-
-| Model | Params | Quant | CPU tok/s (DGX) | GPU tok/s (DGX) | CPU Target | GPU Target |
-|-------|--------|-------|-----------------|-----------------|------------|------------|
-| Gemma 3 2B | 2.6B | Q4_0 | 3.60 | untested | >= 15 | >= 60 |
-| Gemma 3 2B | 2.6B | F32 | 3.51 | untested | -- | -- |
+**Training epics:**
+6. **E64 (Smoothed early stopping):** Modify `audacity/internal/training/early_stopping.go`.
+7. **E65 (EMA):** Complete `training/optimizer/ema.go`.
+8. **E66 (Warm restarts):** Add to `audacity/internal/training/lr_schedule.go`.
+9. **E67 (SWA):** Create `training/optimizer/swa.go`.
+10. **E68 (Feature dropout):** Create `layers/regularization/feature_dropout.go`.
 
 ### External Dependencies
 
-- **DGX Spark (ndungu@192.168.86.250, aitopatom-bfc8):**
-  - Go 1.26.0 for linux/arm64, cuDNN 9.19.1, TensorRT 10.15.1,
-    NCCL 2.29.7, CUTLASS 4.2, CUDA 13.0.2 / driver 580.126.09.
+- **DGX Spark (ndungu@192.168.86.250):**
+  - Go 1.25.0 linux/arm64, CUDA 13.0, sm_121 (Blackwell).
   - Models: ~/models/gemma3-q4/ (Q4 ZMF), ~/models/gemma3/ (F32 ZMF).
-  - Repos: ~/zerfoo/, ~/zonnx/ (main), ~/zmf/ (fix/attribute-tensor branch).
-- HIP SDK (>= 5.0) for AMD ROCm backend.
-- OpenCL 2.0+ headers + CLBlast for OpenCL backend.
-- Second DGX Spark unit (optional) for multi-GPU validation via ConnectX-7.
+  - Repos: ~/zerfoo/, ~/zonnx/, ~/zmf/.
+- **HuggingFace:** Model downloads for GGUF validation (T61.1-T61.3).
 
-### Remaining Hardware-Blocked Items
+### Performance Baselines
 
-1. **Multi-GPU parity test** -- requires >= 2 CUDA devices (second DGX Spark
-   via ConnectX-7). 6 tests skip on single-GPU. See ADR-017.
-2. **DeepSeek V3 parity** -- 671B MoE exceeds 128GB DGX Spark memory.
+| Model | Params | Quant | tok/s | Phase |
+|-------|--------|-------|-------|-------|
+| Gemma 3 2B | 2.6B | Q4_0 | 6.86 | 30 (CPU ARM64) |
+| Gemma 3 2B | 2.6B | Q4_0 | 6.5 | 29 (CPU ARM64) |
+| Gemma 3 2B | 2.6B | Q4_0 | 3.60 | 26 (CPU ARM64) |
 
-### Known Untestable Gaps
+### Numerai Training Baselines
 
-- health: EngineCheck takes concrete *CPUEngine type, preventing mock testing
-- layers/attention: dupl linter blocks MLA Forward engine error test
-- Most remaining gaps are tensor.New unreachable error paths
-- cmd tools: main() and os.Exit paths
+| Metric | Current | Target |
+|--------|---------|--------|
+| Training val_corr (best) | 0.010551 | maintain |
+| Full validation CORR | 0.002 | >= 0.006 |
+| Full validation Sharpe | 0.171 | >= 0.5 |
+| Val_corr oscillation | +/-0.008 | +/-0.003 |
 
 ---
 
-## 9. Appendix
+## 10. Appendix
 
-### Performance Target Reference
+### Existing File Reference
 
-| Model | Parameters | Quantization | Ollama CPU tok/s | Ollama GPU tok/s | Zerfoo Target CPU | Zerfoo Target GPU |
-|-------|-----------|-------------|-----------------|-----------------|-------------------|-------------------|
-| Llama 3.2 1B | 1.2B | Q4_0 | ~40 | ~120 | >= 30 | >= 100 |
-| Gemma 3 2B | 2.6B | Q4_0 | ~20 | ~80 | >= 15 | >= 60 |
-| Llama 3.1 8B | 8B | Q4_0 | ~10 | ~40 | >= 8 | >= 30 |
+| File | Purpose |
+|------|---------|
+| `generate/paged_kv.go` | PagedKVCache type with block management |
+| `generate/block_pool.go` | BlockPool with pre-allocated blocks |
+| `generate/speculative.go` | SpeculativeGenerator with draft-verify loop |
+| `generate/adaptive.go` | Adaptive draft length based on acceptance rate |
+| `generate/generator.go` | Core autoregressive generation loop |
+| `layers/attention/grouped_query_attention.go` | GQA attention layer |
+| `model/gguf/parser.go` | GGUF file format parser |
+| `model/gguf/loader.go` | GGUF tensor loader (Q4_0, Q8_0, F32, F16) |
+| `model/gguf/arch.go` | GGUF architecture mapping (llama, gemma) |
+| `model/gguf/tokenizer.go` | GGUF tokenizer extraction |
+| `inference/gguf.go` | LoadGGUF and model metadata conversion |
+| `inference/inference.go` | High-level Load/Pull API with GGUF detection |
+| `serve/server.go` | HTTP server with WithDraftModel option |
+| `scripts/bench.sh` | Benchmark runner script |
+| `.github/workflows/benchmark.yml` | GitHub Actions benchmark workflow |
+| `compute/gpu_engine.go` | GPUEngine with CUDA acceleration |
+| `internal/cuda/kernels/` | CUDA kernel source and Go wrappers |
+| `internal/workerpool/pool.go` | Persistent worker pool (Phase 30) |
+| `graph/compile.go` | Graph compiler and ExecutionPlan (Phase 30) |
+| `training/optimizer/adamw.go` | AdamW optimizer |
+| `training/optimizer/ema.go` | EMA optimizer (existing, may need completion) |
+| `audacity/internal/training/early_stopping.go` | Early stopping logic |
+| `audacity/internal/training/lr_schedule.go` | Learning rate schedulers |
+| `layers/regularization/dropout.go` | Standard dropout layer |
 
-### GGUF Format Quick Reference
-
-```
-Header:
-  magic: "GGUF" (4 bytes)
-  version: uint32 (expect 3)
-  tensor_count: uint64
-  metadata_kv_count: uint64
-
-Metadata KV:
-  key: string (uint64 len + bytes)
-  value_type: uint32 (enum)
-  value: varies by type
-
-Tensor Info:
-  name: string
-  n_dimensions: uint32
-  dimensions: uint64[n_dimensions]
-  type: uint32 (Q4_0=2, Q8_0=8, F32=0, F16=1)
-  offset: uint64 (from start of tensor data)
-
-Tensor Data:
-  Aligned to tensor_data_alignment (default 32 bytes)
-  Raw quantized/float data in GGML format
-```
-
-### PagedAttention Block Layout
+### HuggingFace Model Aliases (from inference/inference.go)
 
 ```
-Block (16 tokens):
-  K: [num_layers, 16, head_dim]  -- key vectors for 16 positions
-  V: [num_layers, 16, head_dim]  -- value vectors for 16 positions
-
-Block Table (per sequence):
-  [block_0_ptr, block_1_ptr, ..., block_N_ptr]
-  Sequence of length L uses ceil(L/16) blocks.
-
-Free Pool:
-  Stack of available block pointers.
-  Pre-allocated at startup based on max_memory config.
+gemma-3-1b-q4  -> google/gemma-3-1b-it-qat-q4_0-gguf
+gemma-3-2b-q4  -> google/gemma-3-2b-it-qat-q4_0-gguf
+llama-3-1b-q4  -> meta-llama/Llama-3.2-1B-Instruct-GGUF
+llama-3-8b-q4  -> meta-llama/Llama-3.1-8B-Instruct-GGUF
+mistral-7b-q4  -> mistralai/Mistral-7B-Instruct-v0.3-GGUF
+qwen-2.5-7b-q4 -> Qwen/Qwen2.5-7B-Instruct-GGUF
 ```
 
-### Speculative Decoding Algorithm
+### Estimated Effort Summary
 
-```
-Input: target model M, draft model D, prompt tokens
-Output: generated tokens
-
-loop:
-  1. D generates N draft tokens autoregressively: d1, d2, ..., dN
-  2. M runs single forward pass on [prompt + d1 + d2 + ... + dN]
-     producing logits for all N+1 positions
-  3. For i = 1 to N:
-       if M accepts d_i (M's top-1 at position i-1 == d_i, or
-           sampled from adjusted distribution):
-         accept d_i
-       else:
-         reject d_i, sample replacement from M's distribution
-         rollback D and M KV caches to position i-1
-         break
-  4. If all N accepted, sample one bonus token from M's logits at position N
-  5. Emit accepted tokens
-```
-
-Expected speedup: `N * acceptance_rate / (1 + draft_cost/target_cost)`.
-With N=4, acceptance=70%, draft 10x faster: `4 * 0.7 / (1 + 0.1) = 2.5x`.
-
-### Transpose Folding Strategy
-
-```
-Before (current graph):
-  weight_param -> Transpose(axes=[1,0]) -> MatMul(input, transposed_weight)
-
-After folding:
-  transposed_weight_param -> MatMul(input, transposed_weight_param)
-
-Detection criteria:
-  1. Node is Transpose
-  2. Input is a constant parameter (model weight, not dynamic activation)
-  3. Transpose node has exactly one consumer
-  4. Consumer is MatMul
-
-Folding action:
-  1. Read weight data from parameter
-  2. Apply transpose to weight data in-place
-  3. Update parameter shape to transposed shape
-  4. Replace MatMul input edge to point directly to parameter
-  5. Remove Transpose node from graph
-```
-
-### Tensor Pool Strategy
-
-```
-Pool data structure:
-  map[shapeHash]freeList  -- one free list per unique shape
-
-Acquire(shape):
-  hash = hashShape(shape)
-  if freeList[hash] is non-empty:
-    return pop(freeList[hash])  -- reuse existing buffer
-  return allocate(shape)        -- new allocation
-
-Release(tensor):
-  hash = hashShape(tensor.Shape)
-  push(freeList[hash], tensor)  -- return to pool
-
-Reference counting in graph executor:
-  Before forward: refcount[node] = len(node.Consumers)
-  After each consume: refcount[node]--
-  When refcount reaches 0: pool.Release(node.Output)
-  Exception: graph output nodes are never released
-```
-
-### Production Readiness Scorecard (After Phase 26)
-
-| Category | Score | How Achieved |
-|----------|-------|-------------|
-| Architecture | 10/10 | Multi-architecture config; MLA; multi-GPU device affinity |
-| Core Functionality | 10/10 | 6 model families; multi-GPU inference; BF16 GEMM; unified memory |
-| Testing | 10/10 | 18 model parity PASS; 42/50 packages >= 95% coverage |
-| Error Handling | 9/10 | Structured logging, RPC validation, context deadlines |
-| Security | 8/10 | TLS/mTLS for gRPC; HF_TOKEN for gated models |
-| Observability | 8/10 | Logging, metrics, pprof endpoints |
-| Configuration | 10/10 | Architecture-aware config parsing with HuggingFace field mapping |
-| Operations | 10/10 | CLI pull/run/serve, OpenAI-compatible HTTP API |
-| Documentation | 10/10 | Consolidated design.md + 19 ADRs |
-| Performance | 7/10 | Mmap, pre-alloc KV, Q4/Q8, SIMD GEMM, CUDA Q4 2383 GFLOPS, PagedAttention, speculative decode, 3.60 tok/s CPU |
-
-### Ollama/llama.cpp Feature Comparison (After Phase 26)
-
-| Feature | Ollama | Zerfoo (After Phase 26) | Zerfoo (Phase 27 Target) |
-|---------|--------|-------------------------|--------------------------|
-| Model loading | mmap | mmap (E25) | mmap |
-| KV cache | pre-allocated + paged | pre-allocated + paged (E26, E34) | + tensor arena |
-| Quantization | Q4_0/Q4_K/Q8_0/Q5_K | Q4_0/Q8_0 (E27) | Q4_0/Q8_0 |
-| CPU GEMM | hand-tuned SIMD | NEON/AVX2 (E29) | NEON/AVX2 |
-| GPU GEMM | cuBLAS | cuBLAS + Q4 kernel (E32) | end-to-end GPU |
-| Flash attention | yes | yes (CUTLASS) | yes |
-| Continuous batching | yes | yes (E31) | yes |
-| Speculative decoding | yes | yes (E35) | yes |
-| PagedAttention | yes | yes (E34) | yes |
-| GGUF import | native | parser/loader (E37) | full e2e (E42) |
-| Streaming | yes | yes | yes |
-| OpenAI API | yes | yes | yes |
-| Perf CI tracking | internal | automated (E38) | automated |
-| Transpose folding | yes | no | yes (E39) |
-| Tensor arena | yes | no | yes (E40) |
-| Fused ops | yes | no | yes (E43) |
-
-### References
-
-- llama.cpp quantization: Q4_0 block format = 18 bytes per 32 values.
-- Go plan9 assembly: https://go.dev/doc/asm
-- gonum BLAS: https://pkg.go.dev/gonum.org/v1/gonum/blas
-- CUDA mixed-precision GEMM: cuBLAS cublasGemmEx with CUDA_R_8I.
-- Go mmap: `syscall.Mmap` on unix, `golang.org/x/sys/windows` for Windows.
-- GGUF spec: https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
-- vLLM PagedAttention: https://arxiv.org/abs/2309.06180
-- Speculative decoding: https://arxiv.org/abs/2211.17192
+| Epic | Area | Tasks | Estimated Hours |
+|------|------|-------|----------------|
+| E59: PagedAttention v2 | Inference | 4 tasks + 4 subtests | 12.75h |
+| E60: Speculative validation | Inference | 5 tasks + 5 subtests | 13.0h |
+| E61: GGUF real models | Inference | 5 tasks + 5 subtests | 13.75h |
+| E62: GPU inference | Inference | 5 tasks + 4 subtests | 15.0h |
+| E63: CI regression | Inference | 5 tasks + 5 subtests | 11.75h |
+| E64: Smoothed early stopping | Training | 3 tasks + 1 subtest | 3.75h |
+| E65: EMA of weights | Training | 3 tasks + 2 subtests | 9.25h |
+| E66: Cosine warm restarts | Training | 3 tasks + 1 subtest | 4.25h |
+| E67: SWA | Training | 3 tasks + 2 subtests | 7.75h |
+| E68: Feature dropout | Training | 4 tasks + 2 subtests | 7.25h |
+| **Total** | **Both** | **40 tasks + 31 subtests** | **~98h** |

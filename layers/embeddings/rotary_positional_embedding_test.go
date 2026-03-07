@@ -551,6 +551,110 @@ func TestRotaryPositionalEmbedding_PartialRotation_Half(t *testing.T) {
 	}
 }
 
+func TestRotaryPositionalEmbedding_PositionOffset(t *testing.T) {
+	ctx := context.Background()
+	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+
+	const (
+		headDim = 8
+		maxSeq  = 32
+		batch   = 2
+	)
+
+	rpe, err := NewRotaryPositionalEmbedding[float32](ctx, engine, headDim, maxSeq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a full 4-position input and run RoPE without offset.
+	fullData := make([]float32, batch*4*headDim)
+	for i := range fullData {
+		fullData[i] = float32(i%7) * 0.1
+	}
+	fullInput, err := tensor.New([]int{batch, 4, headDim}, fullData)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rpe.SetPositionOffset(0)
+	fullOut, err := rpe.Forward(ctx, fullInput)
+	if err != nil {
+		t.Fatalf("full forward: %v", err)
+	}
+	fullOutData := fullOut.Data()
+
+	// Run single-position inputs with offsets and verify against full output.
+	tests := []struct {
+		name   string
+		offset int
+	}{
+		{"position 0", 0},
+		{"position 1", 1},
+		{"position 2", 2},
+		{"position 3", 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			posData := make([]float32, batch*1*headDim)
+			for b := range batch {
+				srcOff := b*4*headDim + tt.offset*headDim
+				dstOff := b * headDim
+				copy(posData[dstOff:dstOff+headDim], fullData[srcOff:srcOff+headDim])
+			}
+			posInput, err := tensor.New([]int{batch, 1, headDim}, posData)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rpe.SetPositionOffset(tt.offset)
+			posOut, err := rpe.Forward(ctx, posInput)
+			if err != nil {
+				t.Fatalf("offset forward: %v", err)
+			}
+			posOutData := posOut.Data()
+
+			for b := range batch {
+				srcOff := b*4*headDim + tt.offset*headDim
+				dstOff := b * headDim
+				for d := range headDim {
+					got := posOutData[dstOff+d]
+					want := fullOutData[srcOff+d]
+					if diff := got - want; diff < -1e-5 || diff > 1e-5 {
+						t.Errorf("batch %d dim %d: got %f, want %f", b, d, got, want)
+					}
+				}
+			}
+		})
+	}
+
+	// Verify offset resets to 0.
+	t.Run("reset to 0", func(t *testing.T) {
+		rpe.SetPositionOffset(0)
+		singleData := make([]float32, batch*1*headDim)
+		for b := range batch {
+			copy(singleData[b*headDim:(b+1)*headDim], fullData[b*4*headDim:b*4*headDim+headDim])
+		}
+		singleInput, err := tensor.New([]int{batch, 1, headDim}, singleData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := rpe.Forward(ctx, singleInput)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for b := range batch {
+			for d := range headDim {
+				got := out.Data()[b*headDim+d]
+				want := fullOutData[b*4*headDim+d]
+				if diff := got - want; diff < -1e-5 || diff > 1e-5 {
+					t.Errorf("reset batch %d dim %d: got %f, want %f", b, d, got, want)
+				}
+			}
+		}
+	})
+}
+
 func TestRotaryPositionalEmbedding_PartialRotation_ForwardBackward(t *testing.T) {
 	ctx := context.Background()
 	engine := compute.NewCPUEngine[float32](numeric.Float32Ops{})

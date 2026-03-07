@@ -167,8 +167,9 @@ func downloadFile(ctx context.Context, opts HFPullOptions, modelID, filename, ta
 // shouldDownload returns true if the file is relevant for model caching.
 func shouldDownload(filename string) bool {
 	lower := strings.ToLower(filename)
-	// Download ONNX models, tokenizer files, and config files.
 	switch {
+	case strings.HasSuffix(lower, ".gguf"):
+		return true
 	case strings.HasSuffix(lower, ".onnx"):
 		return true
 	case strings.Contains(lower, "tokenizer") && (strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".model")):

@@ -552,6 +552,72 @@ func TestMatMul(t *testing.T) {
 	}
 }
 
+// ---------- MatMul Q4 B-operand ----------
+
+func TestMatMul_Q4BTransposed(t *testing.T) {
+	engine := makeEngine()
+	ctx := context.Background()
+
+	// A is [1, 64], B (weight) is [32, 64] in Q4 format.
+	// The layer should skip transpose and use GemmF32Q4NT directly.
+	mDim, n, k := 1, 32, 64
+
+	aData := make([]float32, mDim*k)
+	for i := range aData {
+		aData[i] = float32(i%7-3) * 0.1
+	}
+	a := makeTensor(t, []int{mDim, k}, aData)
+
+	// Create B as Q4-backed [N, K] tensor.
+	bF32 := make([]float32, n*k)
+	for i := range bF32 {
+		bF32[i] = float32(i%5-2) * 0.1
+	}
+	bQ4 := tensor.QuantizeQ4(bF32)
+	b, err := tensor.NewWithStorage[float32]([]int{n, k}, bQ4)
+	if err != nil {
+		t.Fatalf("NewWithStorage: %v", err)
+	}
+
+	// Forward: A [1,64] @ B^T [64,32] → C [1,32]
+	ml := NewMatMul[float32](engine)
+	out, err := ml.Forward(ctx, a, b)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if s := out.Shape(); len(s) != 2 || s[0] != mDim || s[1] != n {
+		t.Fatalf("output shape = %v, want [%d %d]", s, mDim, n)
+	}
+
+	// Reference: dequantize B, transpose, multiply.
+	bDeq := make([]float32, n*k)
+	bQ4.Dequantize(bDeq)
+	bT := make([]float32, k*n)
+	for r := range n {
+		for c := range k {
+			bT[c*n+r] = bDeq[r*k+c]
+		}
+	}
+	refB := makeTensor(t, []int{k, n}, bT)
+	mm := NewMatMul[float32](engine)
+	ref, err := mm.Forward(ctx, a, refB)
+	if err != nil {
+		t.Fatalf("reference Forward: %v", err)
+	}
+
+	gotData := out.Data()
+	wantData := ref.Data()
+	for i := range gotData {
+		diff := gotData[i] - wantData[i]
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > 0.15 {
+			t.Errorf("index %d: got %v, want %v (diff=%v)", i, gotData[i], wantData[i], diff)
+		}
+	}
+}
+
 // ---------- Add (extended) ----------
 
 func TestAdd_Extended(t *testing.T) {

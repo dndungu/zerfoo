@@ -458,63 +458,131 @@ func TestModel_Chat(t *testing.T) {
 
 // --- formatMessages tests ---
 
-func TestFormatMessages_Gemma(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: "gemma"},
-	}
-	messages := []Message{
-		{Role: "user", Content: "Hello"},
-		{Role: "model", Content: "Hi there"},
-	}
-	got := m.formatMessages(messages)
-	want := "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\nHi there<end_of_turn>\n<start_of_turn>model\n"
-	if got != want {
-		t.Errorf("formatMessages =\n%q\nwant\n%q", got, want)
-	}
-}
-
-func TestFormatMessages_DefaultTemplate(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: ""},
-	}
-	// Empty template defaults to "gemma".
-	messages := []Message{
-		{Role: "user", Content: "Hello"},
-	}
-	got := m.formatMessages(messages)
-	if !strings.Contains(got, "<start_of_turn>") {
-		t.Errorf("expected gemma template, got %q", got)
-	}
-}
-
-func TestFormatMessages_GenericTemplate(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: "chatml"},
-	}
-	messages := []Message{
-		{Role: "user", Content: "Hello"},
-	}
-	got := m.formatMessages(messages)
-	want := "user: Hello\nassistant: "
-	if got != want {
-		t.Errorf("formatMessages =\n%q\nwant\n%q", got, want)
-	}
-}
-
-func TestFormatMessages_MultipleMessages(t *testing.T) {
-	m := &Model{
-		config: ModelMetadata{ChatTemplate: "chatml"},
-	}
-	messages := []Message{
+func TestFormatMessages(t *testing.T) {
+	singleUser := []Message{{Role: "user", Content: "Hello"}}
+	multiTurn := []Message{
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "Hello"},
 		{Role: "assistant", Content: "Hi!"},
 		{Role: "user", Content: "How are you?"},
 	}
-	got := m.formatMessages(messages)
-	want := "system: You are helpful.\nuser: Hello\nassistant: Hi!\nuser: How are you?\nassistant: "
-	if got != want {
-		t.Errorf("formatMessages =\n%q\nwant\n%q", got, want)
+
+	tests := []struct {
+		name     string
+		template string
+		messages []Message
+		want     string
+	}{
+		{
+			name:     "gemma single",
+			template: "gemma",
+			messages: singleUser,
+			want:     "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n",
+		},
+		{
+			name:     "gemma multi",
+			template: "gemma",
+			messages: []Message{
+				{Role: "user", Content: "Hello"},
+				{Role: "model", Content: "Hi there"},
+			},
+			want: "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\nHi there<end_of_turn>\n<start_of_turn>model\n",
+		},
+		{
+			name:     "llama single",
+			template: "llama",
+			messages: singleUser,
+			want:     "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+		},
+		{
+			name:     "llama multi with system",
+			template: "llama",
+			messages: multiTurn,
+			want: "<|begin_of_text|>" +
+				"<|start_header_id|>system<|end_header_id|>\n\nYou are helpful.<|eot_id|>" +
+				"<|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>" +
+				"<|start_header_id|>assistant<|end_header_id|>\n\nHi!<|eot_id|>" +
+				"<|start_header_id|>user<|end_header_id|>\n\nHow are you?<|eot_id|>" +
+				"<|start_header_id|>assistant<|end_header_id|>\n\n",
+		},
+		{
+			name:     "mistral single",
+			template: "mistral",
+			messages: singleUser,
+			want:     "[INST] Hello [/INST]",
+		},
+		{
+			name:     "mistral multi with system",
+			template: "mistral",
+			messages: multiTurn,
+			want:     "[INST] You are helpful.\n\nHello [/INST]Hi![INST] How are you? [/INST]",
+		},
+		{
+			name:     "qwen single",
+			template: "qwen2",
+			messages: singleUser,
+			want:     "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",
+		},
+		{
+			name:     "qwen multi with system",
+			template: "qwen2",
+			messages: multiTurn,
+			want: "<|im_start|>system\nYou are helpful.<|im_end|>\n" +
+				"<|im_start|>user\nHello<|im_end|>\n" +
+				"<|im_start|>assistant\nHi!<|im_end|>\n" +
+				"<|im_start|>user\nHow are you?<|im_end|>\n" +
+				"<|im_start|>assistant\n",
+		},
+		{
+			name:     "deepseek single",
+			template: "deepseek",
+			messages: singleUser,
+			want:     "<|begin_of_sentence|>User: Hello\n\nAssistant:",
+		},
+		{
+			name:     "deepseek multi with system",
+			template: "deepseek",
+			messages: multiTurn,
+			want:     "<|begin_of_sentence|>You are helpful.\n\nUser: Hello\n\nAssistant: Hi!\n\nUser: How are you?\n\nAssistant:",
+		},
+		{
+			name:     "phi single",
+			template: "phi",
+			messages: singleUser,
+			want:     "<|user|>\nHello<|end|>\n<|assistant|>\n",
+		},
+		{
+			name:     "phi multi with system",
+			template: "phi",
+			messages: multiTurn,
+			want: "<|system|>\nYou are helpful.<|end|>\n" +
+				"<|user|>\nHello<|end|>\n" +
+				"<|assistant|>\nHi!<|end|>\n" +
+				"<|user|>\nHow are you?<|end|>\n" +
+				"<|assistant|>\n",
+		},
+		{
+			name:     "empty template defaults to gemma",
+			template: "",
+			messages: singleUser,
+			want:     "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n",
+		},
+		{
+			name:     "unknown template uses generic fallback",
+			template: "unknown_model",
+			messages: singleUser,
+			want:     "user: Hello\nassistant: ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Model{config: ModelMetadata{ChatTemplate: tt.template}}
+			got := m.formatMessages(tt.messages)
+			if got != tt.want {
+				t.Errorf("formatMessages =\n%q\nwant\n%q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1246,5 +1314,115 @@ func TestLoad_MmapInvalidZMF(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mmap") {
 		t.Errorf("error = %q, want mmap-related error", err.Error())
+	}
+}
+
+// --- Alias tests ---
+
+func TestResolveAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"gemma-3-1b-q4", "google/gemma-3-1b-it-qat-q4_0-gguf"},
+		{"llama-3-1b-q4", "meta-llama/Llama-3.2-1B-Instruct-GGUF"},
+		{"unknown-model", "unknown-model"},
+		{"google/some-repo", "google/some-repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := ResolveAlias(tt.input)
+			if got != tt.want {
+				t.Errorf("ResolveAlias(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRegisterAlias(t *testing.T) {
+	RegisterAlias("my-model", "my-org/my-model-gguf")
+	got := ResolveAlias("my-model")
+	if got != "my-org/my-model-gguf" {
+		t.Errorf("ResolveAlias after RegisterAlias = %q, want %q", got, "my-org/my-model-gguf")
+	}
+	// Clean up.
+	delete(modelAliases, "my-model")
+}
+
+// --- findGGUF tests ---
+
+func TestFindGGUF(t *testing.T) {
+	t.Run("finds gguf file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "model.gguf"), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := findGGUF(dir)
+		if got != filepath.Join(dir, "model.gguf") {
+			t.Errorf("findGGUF = %q, want %q", got, filepath.Join(dir, "model.gguf"))
+		}
+	})
+
+	t.Run("returns empty for no gguf", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "model.zmf"), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := findGGUF(dir)
+		if got != "" {
+			t.Errorf("findGGUF = %q, want empty", got)
+		}
+	})
+
+	t.Run("returns empty for nonexistent dir", func(t *testing.T) {
+		got := findGGUF("/nonexistent/path")
+		if got != "" {
+			t.Errorf("findGGUF = %q, want empty", got)
+		}
+	})
+}
+
+// --- Load with alias resolution ---
+
+func TestLoad_ResolvesAlias(t *testing.T) {
+	// Verify that Load resolves aliases before checking the registry.
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"google/gemma-3-1b-it-qat-q4_0-gguf": {ID: "google/gemma-3-1b-it-qat-q4_0-gguf", Path: t.TempDir()},
+		},
+	}
+	// This will fail on model loading (no files), but we verify alias resolution
+	// by checking that the registry was queried with the resolved ID.
+	_, err := Load("gemma-3-1b-q4", WithRegistry(reg))
+	// Should fail trying to load config.json, not "model not found"
+	if err == nil {
+		t.Error("expected error")
+	}
+	if strings.Contains(err.Error(), "pull model") {
+		t.Errorf("error = %q; alias was not resolved (tried to pull)", err.Error())
+	}
+}
+
+// --- Load with GGUF auto-detect ---
+
+func TestLoad_DetectsGGUFFile(t *testing.T) {
+	dir := t.TempDir()
+	// Create a fake .gguf file (will fail GGUF parsing, but tests the detection path).
+	if err := os.WriteFile(filepath.Join(dir, "model.gguf"), []byte("not-gguf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := &mockRegistry{
+		models: map[string]*registry.ModelInfo{
+			"test-gguf": {ID: "test-gguf", Path: dir},
+		},
+	}
+	_, err := Load("test-gguf", WithRegistry(reg))
+	if err == nil {
+		t.Error("expected error from GGUF parsing")
+	}
+	// The error should come from GGUF loading, not ZMF loading.
+	if strings.Contains(err.Error(), "load model") || strings.Contains(err.Error(), "config.json") {
+		t.Errorf("error = %q; should have tried GGUF path, not ZMF path", err.Error())
 	}
 }

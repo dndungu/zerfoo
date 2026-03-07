@@ -87,6 +87,7 @@ func RegisterAll() {
 
 	// Regularization
 	model.RegisterLayer("Dropout", regularization.BuildDropout[float32])
+	model.RegisterLayer("FeatureDropout", regularization.BuildFeatureDropout[float32])
 
 	// ReduceSum
 	model.RegisterLayer("ReduceSum", reducesum.BuildReduceSum[float32])

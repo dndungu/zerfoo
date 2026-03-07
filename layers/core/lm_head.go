@@ -14,9 +14,10 @@ import (
 // When tiedWeight is set, it uses the (transposed) tied weight instead of
 // its own linear layer.
 type LMHead[T tensor.Numeric] struct {
-	linear     *Linear[T]
-	engine     compute.Engine[T]
-	tiedWeight *tensor.TensorNumeric[T] // [vocabSize, hiddenDim] from embedding
+	linear              *Linear[T]
+	engine              compute.Engine[T]
+	tiedWeight          *tensor.TensorNumeric[T] // [vocabSize, hiddenDim] from embedding
+	cachedTiedTranspose *tensor.TensorNumeric[T] // pre-transposed tied weight
 }
 
 // NewLMHead creates a new LMHead.
@@ -60,11 +61,15 @@ func (h *LMHead[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 
 	if h.tiedWeight != nil {
 		// Tied weight is [vocabSize, hiddenDim]; transpose to [hiddenDim, vocabSize].
-		transposed, err2 := h.engine.Transpose(ctx, h.tiedWeight, []int{1, 0})
-		if err2 != nil {
-			return nil, err2
+		// Cache the transpose since the tied weight is constant during inference.
+		if h.cachedTiedTranspose == nil {
+			transposed, err2 := h.engine.Transpose(ctx, h.tiedWeight, []int{1, 0})
+			if err2 != nil {
+				return nil, err2
+			}
+			h.cachedTiedTranspose = transposed
 		}
-		output, err = h.engine.MatMul(ctx, reshapedInput, transposed)
+		output, err = h.engine.MatMul(ctx, reshapedInput, h.cachedTiedTranspose)
 		if err != nil {
 			return nil, err
 		}

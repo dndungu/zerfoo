@@ -201,6 +201,131 @@ func BenchmarkGemmQ8F32(b *testing.B) {
 	}
 }
 
+// --- GemmF32Q4NT tests: C = A * B^T where B is [N,K] in Q4 format ---
+
+func TestGemmF32Q4NT_Correctness(t *testing.T) {
+	cases := []struct {
+		name    string
+		m, n, k int
+	}{
+		{"1x1x32", 1, 1, 32},
+		{"1x4x32", 1, 4, 32},
+		{"1x4x64", 1, 4, 64},
+		{"2x4x32", 2, 4, 32},
+		{"4x8x64", 4, 8, 64},
+		{"1x64x256", 1, 64, 256},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			// A is [M, K], B_orig is [N, K] (to be quantized as Q4).
+			a := make([]float32, tt.m*tt.k)
+			for i := range a {
+				a[i] = float32(i%7-3) * 0.1
+			}
+			bOrig := make([]float32, tt.n*tt.k)
+			for i := range bOrig {
+				bOrig[i] = float32(i%5-2) * 0.1
+			}
+
+			bQ4 := tensor.QuantizeQ4(bOrig)
+
+			got := make([]float32, tt.m*tt.n)
+			GemmF32Q4NT(tt.m, tt.n, tt.k, a, bQ4, got)
+
+			// Reference: dequantize B, transpose, then float32 GEMM.
+			bDeq := make([]float32, tt.n*tt.k)
+			bQ4.Dequantize(bDeq)
+			// Transpose bDeq from [N,K] to [K,N].
+			bT := make([]float32, tt.k*tt.n)
+			for r := range tt.n {
+				for c := range tt.k {
+					bT[c*tt.n+r] = bDeq[r*tt.k+c]
+				}
+			}
+			want := make([]float32, tt.m*tt.n)
+			GemmF32(tt.m, tt.n, tt.k, a, bT, want)
+
+			assertClose(t, got, want, 0.15)
+		})
+	}
+}
+
+func TestGemmF32Q4NT_GEMV(t *testing.T) {
+	// M=1 is the critical decode path.
+	m, n, k := 1, 128, 256
+	a := make([]float32, m*k)
+	for i := range a {
+		a[i] = float32(i%7-3) * 0.1
+	}
+	bOrig := make([]float32, n*k)
+	for i := range bOrig {
+		bOrig[i] = float32(i%5-2) * 0.1
+	}
+	bQ4 := tensor.QuantizeQ4(bOrig)
+
+	got := make([]float32, m*n)
+	GemmF32Q4NT(m, n, k, a, bQ4, got)
+
+	bDeq := make([]float32, n*k)
+	bQ4.Dequantize(bDeq)
+	bT := make([]float32, k*n)
+	for r := range n {
+		for c := range k {
+			bT[c*n+r] = bDeq[r*k+c]
+		}
+	}
+	want := make([]float32, m*n)
+	GemmF32(m, n, k, a, bT, want)
+
+	assertClose(t, got, want, 0.15)
+}
+
+func BenchmarkGemmF32Q4NT_GEMV(b *testing.B) {
+	// Simulates decode-path dimensions: M=1, large K and N.
+	sizes := []struct {
+		name string
+		n, k int
+	}{
+		{"N1152_K1152", 1152, 1152},
+		{"N6912_K1152", 6912, 1152},
+		{"N1152_K6912", 1152, 6912},
+	}
+	for _, sz := range sizes {
+		aF32 := make([]float32, sz.k)
+		for i := range aF32 {
+			aF32[i] = float32(i%7-3) * 0.1
+		}
+		bOrig := make([]float32, sz.n*sz.k)
+		for i := range bOrig {
+			bOrig[i] = float32(i%5-2) * 0.1
+		}
+		bQ4 := tensor.QuantizeQ4(bOrig)
+		c := make([]float32, sz.n)
+
+		b.Run(sz.name+"/q4nt", func(b *testing.B) {
+			for range b.N {
+				GemmF32Q4NT(1, sz.n, sz.k, aF32, bQ4, c)
+			}
+		})
+
+		// Compare: dequant + transpose + SGEMM (current path).
+		bDeq := make([]float32, sz.n*sz.k)
+		bQ4.Dequantize(bDeq)
+		bT := make([]float32, sz.k*sz.n)
+		for r := range sz.n {
+			for c := range sz.k {
+				bT[c*sz.n+r] = bDeq[r*sz.k+c]
+			}
+		}
+		b.Run(sz.name+"/dequant_sgemm", func(b *testing.B) {
+			for range b.N {
+				GemmF32(1, sz.n, sz.k, aF32, bT, c)
+			}
+		})
+	}
+}
+
 func benchLabel(n int) string {
 	switch {
 	case n >= 1024:

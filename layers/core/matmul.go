@@ -4,9 +4,11 @@ package core
 import (
 	"context"
 	"fmt"
+	"unsafe"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
+	"github.com/zerfoo/zerfoo/internal/xblas"
 	"github.com/zerfoo/zerfoo/tensor"
 	"github.com/zerfoo/zerfoo/types"
 )
@@ -15,6 +17,13 @@ import (
 type MatMul[T tensor.Numeric] struct {
 	engine      compute.Engine[T]
 	outputShape []int
+
+	// cachedBTranspose caches the transposed B operand when B requires
+	// transposition (constant weight case). Set on first Forward call
+	// and reused on subsequent calls to avoid transposing every time.
+	cachedBTranspose *tensor.TensorNumeric[T]
+	cachedBPtr       uintptr                  // data pointer of the B tensor that was transposed
+	cachedB          *tensor.TensorNumeric[T] // the B tensor that was transposed
 }
 
 // NewMatMul creates a new MatMul layer.
@@ -53,7 +62,13 @@ func (m *MatMul[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 	if aShape[len(aShape)-1] != bShape[len(bShape)-2] {
 		// Check if this is a case where b needs to be transposed (2D only).
 		if len(bShape) == 2 && aShape[len(aShape)-1] == bShape[1] {
-			bTransposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
+			// Q4 B fast path: compute C = A * B^T directly from Q4 blocks,
+			// avoiding both the transpose and the dequantization of the weight matrix.
+			if result, err := m.tryQ4BTransposed(a, b, aShape, bShape); result != nil || err != nil {
+				return result, err
+			}
+
+			bTransposed, err := m.getCachedTranspose(ctx, b)
 			if err != nil {
 				return nil, fmt.Errorf("failed to transpose second operand: %w", err)
 			}
@@ -77,6 +92,83 @@ func (m *MatMul[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric
 
 	m.outputShape = result.Shape()
 
+	return result, nil
+}
+
+// getCachedTranspose returns the transposed B matrix, caching it for reuse
+// when the same B tensor (identified by data pointer) is passed on subsequent calls.
+// This avoids re-transposing constant weight matrices on every forward pass.
+func (m *MatMul[T]) getCachedTranspose(ctx context.Context, b *tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	if m.cachedBTranspose != nil {
+		if m.cachedB == b {
+			return m.cachedBTranspose, nil
+		}
+		bPtr := uintptr(unsafe.Pointer(&b.Data()[0]))
+		if m.cachedBPtr == bPtr {
+			return m.cachedBTranspose, nil
+		}
+	}
+	transposed, err := m.engine.Transpose(ctx, b, []int{1, 0})
+	if err != nil {
+		return nil, err
+	}
+	m.cachedBTranspose = transposed
+	m.cachedB = b
+	m.cachedBPtr = uintptr(unsafe.Pointer(&b.Data()[0]))
+	return transposed, nil
+}
+
+// tryQ4BTransposed checks if B has Q4 storage and computes C = A * B^T using
+// the fused Q4 kernel that reads packed nibbles directly, avoiding both the
+// expensive [N,K] → [K,N] transpose and the dequantization to float32.
+// Returns (nil, nil) if B is not Q4-backed or T is not float32.
+func (m *MatMul[T]) tryQ4BTransposed(a, b *tensor.TensorNumeric[T], aShape, bShape []int) (*tensor.TensorNumeric[T], error) {
+	q4, ok := any(b.GetStorage()).(*tensor.Q4Storage)
+	if !ok {
+		return nil, nil
+	}
+	// Only handle float32 (Q4 kernel operates on float32).
+	aData, ok := any(a.Data()).([]float32)
+	if !ok {
+		return nil, nil
+	}
+
+	// B is [N, K] in Q4. K must be a multiple of 32.
+	bN, bK := bShape[0], bShape[1]
+	if bK%32 != 0 {
+		return nil, nil
+	}
+
+	// Compute batch dimensions from A.
+	batchSize := 1
+	for i := 0; i < len(aShape)-2; i++ {
+		batchSize *= aShape[i]
+	}
+	mDim := aShape[len(aShape)-2]
+	kDim := aShape[len(aShape)-1]
+
+	// Build output shape: A's batch dims + [M, N].
+	outputShape := make([]int, len(aShape))
+	copy(outputShape, aShape[:len(aShape)-1])
+	outputShape[len(outputShape)-1] = bN
+
+	size := 1
+	for _, d := range outputShape {
+		size *= d
+	}
+	result, err := tensor.New[T](outputShape, make([]T, size))
+	if err != nil {
+		return nil, err
+	}
+	rData := any(result.Data()).([]float32)
+
+	for i := range batchSize {
+		aOff := i * mDim * kDim
+		cOff := i * mDim * bN
+		xblas.GemmF32Q4NT(mDim, bN, kDim, aData[aOff:aOff+mDim*kDim], q4, rData[cOff:cOff+mDim*bN])
+	}
+
+	m.outputShape = outputShape
 	return result, nil
 }
 

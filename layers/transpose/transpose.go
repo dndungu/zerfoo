@@ -3,6 +3,7 @@ package transpose
 
 import (
 	"context"
+	"unsafe"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -15,6 +16,14 @@ type Transpose[T tensor.Numeric] struct {
 	engine      compute.Engine[T]
 	perm        []int
 	outputShape []int
+
+	// Cache for constant inputs: return cached result when either the
+	// same data pointer or same tensor object is seen. Data pointer
+	// handles the common case (Go allocator reuse). Tensor pointer
+	// handles Q4-backed tensors whose Data() allocates a new slice.
+	cachedResult *tensor.TensorNumeric[T]
+	cachedInPtr  uintptr
+	cachedInput  *tensor.TensorNumeric[T]
 }
 
 // OpType returns the operation type.
@@ -69,10 +78,48 @@ func (t *Transpose[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNume
 
 	t.outputShape = outputShape
 
-	// Transpose the input tensor
-	transposed, err := t.engine.Transpose(ctx, inputs[0], perm)
+	// Cache hit: check both data pointer (for dense tensors where Go may
+	// reuse memory) and tensor identity (for Q4-backed tensors where Data()
+	// allocates a new slice on each call).
+	if t.cachedResult != nil {
+		if t.cachedInput == input {
+			return t.cachedResult, nil
+		}
+		data := input.Data()
+		inPtr := uintptr(unsafe.Pointer(&data[0]))
+		if t.cachedInPtr == inPtr {
+			return t.cachedResult, nil
+		}
+	}
 
-	return transposed, err
+	// Q4 pass-through: when the input is a Q4-backed weight tensor and
+	// the transpose is a simple 2D swap [1,0], preserve Q4 storage with
+	// the transposed shape. The downstream MatMul detects Q4 on the B
+	// operand and uses GemmF32Q4NT with NEON-accelerated q4DotBlockSIMD,
+	// reading packed nibbles directly without dequantization.
+	if len(shape) == 2 && len(perm) == 2 && perm[0] == 1 && perm[1] == 0 {
+		if _, ok := any(input.GetStorage()).(*tensor.Q4Storage); ok {
+			result, err := tensor.NewWithStorage[T](outputShape, input.GetStorage())
+			if err != nil {
+				return nil, err
+			}
+			t.cachedResult = result
+			t.cachedInput = input
+			return result, nil
+		}
+	}
+
+	// Transpose the input tensor.
+	transposed, err := t.engine.Transpose(ctx, input, perm)
+	if err != nil {
+		return nil, err
+	}
+
+	t.cachedResult = transposed
+	t.cachedInput = input
+	data := input.Data()
+	t.cachedInPtr = uintptr(unsafe.Pointer(&data[0]))
+	return transposed, nil
 }
 
 // Backward computes the gradients for the Transpose layer.

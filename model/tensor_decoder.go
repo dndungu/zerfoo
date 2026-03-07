@@ -233,11 +233,27 @@ func DecodeTensor[T tensor.Numeric](tensorProto *zmf.Tensor) (*tensor.TensorNume
 		}
 
 	case zmf.Tensor_Q4_0:
-		f32, err := decodeQ4Blocks(tensorProto.Data, size)
-		if err != nil {
-			return nil, err
+		// When T is float32, keep weights in Q4 storage so the compute engine
+		// can dispatch to the fused Q4×F32 GEMM kernel instead of dequantizing
+		// up front and running full-precision GEMM.
+		switch any(zero).(type) {
+		case float32:
+			q4, err := tensor.NewQ4StorageFromRaw(tensorProto.Data, size)
+			if err != nil {
+				return nil, fmt.Errorf("Q4_0 decode: %w", err)
+			}
+			t, err := tensor.NewWithStorage[float32](shape, q4)
+			if err != nil {
+				return nil, err
+			}
+			return any(t).(*tensor.TensorNumeric[T]), nil
+		default:
+			f32, err := decodeQ4Blocks(tensorProto.Data, size)
+			if err != nil {
+				return nil, err
+			}
+			return castFloat32ToT[T](shape, f32, zero, "Q4_0")
 		}
-		return castFloat32ToT[T](shape, f32, zero, "Q4_0")
 
 	case zmf.Tensor_Q8_0:
 		f32, err := decodeQ8Blocks(tensorProto.Data, size)

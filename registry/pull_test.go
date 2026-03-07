@@ -190,6 +190,8 @@ func TestShouldDownload(t *testing.T) {
 		filename string
 		want     bool
 	}{
+		{"model.gguf", true},
+		{"Model-Q4_K_M.gguf", true},
 		{"model.onnx", true},
 		{"tokenizer.json", true},
 		{"tokenizer_config.json", true},

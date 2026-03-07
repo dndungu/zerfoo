@@ -1,4 +1,4 @@
-//go:build cuda
+//go:build cuda && tensorrt
 
 // Package tensorrt provides CGo bindings for the NVIDIA TensorRT inference
 // optimization library. It wraps TensorRT's C++ API via a thin C shim

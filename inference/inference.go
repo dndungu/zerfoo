@@ -62,6 +62,30 @@ type ModelMetadata struct {
 	NumSharedExperts int `json:"n_shared_experts"`
 }
 
+// modelAliases maps short model names to HuggingFace repo IDs.
+var modelAliases = map[string]string{
+	"gemma-3-1b-q4":  "google/gemma-3-1b-it-qat-q4_0-gguf",
+	"gemma-3-2b-q4":  "google/gemma-3-2b-it-qat-q4_0-gguf",
+	"llama-3-1b-q4":  "meta-llama/Llama-3.2-1B-Instruct-GGUF",
+	"llama-3-8b-q4":  "meta-llama/Llama-3.1-8B-Instruct-GGUF",
+	"mistral-7b-q4":  "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
+	"qwen-2.5-7b-q4": "Qwen/Qwen2.5-7B-Instruct-GGUF",
+}
+
+// ResolveAlias returns the HuggingFace repo ID for a short alias.
+// If the name is not an alias, it is returned unchanged.
+func ResolveAlias(name string) string {
+	if id, ok := modelAliases[name]; ok {
+		return id
+	}
+	return name
+}
+
+// RegisterAlias adds a custom short name -> HuggingFace repo ID mapping.
+func RegisterAlias(shortName, repoID string) {
+	modelAliases[shortName] = repoID
+}
+
 // Option configures model loading.
 type Option func(*loadOptions)
 
@@ -139,18 +163,25 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		opt(o)
 	}
 
+	// Resolve short aliases to full repo IDs.
+	modelID = ResolveAlias(modelID)
+
 	// Get or create registry.
 	reg := o.registry
 	if reg == nil {
 		var err error
+		var lr *registry.LocalRegistry
 		if o.cacheDir != "" {
-			reg, err = registry.NewLocalRegistry(o.cacheDir)
+			lr, err = registry.NewLocalRegistry(o.cacheDir)
 		} else {
-			reg, err = registry.NewLocalRegistry("")
+			lr, err = registry.NewLocalRegistry("")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("create registry: %w", err)
 		}
+		// Wire the HuggingFace pull function by default.
+		lr.SetPullFunc(registry.NewHFPullFunc(registry.HFPullOptions{}))
+		reg = lr
 	}
 
 	// Check cache first, pull if needed.
@@ -161,6 +192,11 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pull model %q: %w", modelID, err)
 		}
+	}
+
+	// If a GGUF file exists in the model directory, use the GGUF loader.
+	if ggufPath := findGGUF(info.Path); ggufPath != "" {
+		return LoadFile(ggufPath, opts...)
 	}
 
 	// Load config.json.
@@ -216,6 +252,21 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 	m := assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen)
 	m.closer = mmapCloser
 	return m, nil
+}
+
+// findGGUF looks for a .gguf file in the given directory.
+// Returns the full path if found, empty string otherwise.
+func findGGUF(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // assembleModel wires together loaded components into a ready-to-use Model.
@@ -372,38 +423,134 @@ func (m *Model) Chat(ctx context.Context, messages []Message, opts ...GenerateOp
 
 // formatMessages converts messages to the model's chat template format.
 func (m *Model) formatMessages(messages []Message) string {
-	template := m.config.ChatTemplate
+	template := strings.ToLower(m.config.ChatTemplate)
 	if template == "" {
-		// Default Gemma 3 format.
 		template = "gemma"
 	}
 
+	switch template {
+	case "gemma":
+		return formatGemma(messages)
+	case "llama":
+		return formatLlama(messages)
+	case "mistral":
+		return formatMistral(messages)
+	case "qwen2":
+		return formatQwen(messages)
+	case "deepseek":
+		return formatDeepSeek(messages)
+	case "phi":
+		return formatPhi(messages)
+	default:
+		return formatGeneric(messages)
+	}
+}
+
+func formatGemma(messages []Message) string {
 	var sb strings.Builder
 	for _, msg := range messages {
-		switch strings.ToLower(template) {
-		case "gemma":
-			sb.WriteString("<start_of_turn>")
-			sb.WriteString(msg.Role)
-			sb.WriteString("\n")
+		sb.WriteString("<start_of_turn>")
+		sb.WriteString(msg.Role)
+		sb.WriteString("\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<end_of_turn>\n")
+	}
+	sb.WriteString("<start_of_turn>model\n")
+	return sb.String()
+}
+
+func formatLlama(messages []Message) string {
+	var sb strings.Builder
+	sb.WriteString("<|begin_of_text|>")
+	for _, msg := range messages {
+		sb.WriteString("<|start_header_id|>")
+		sb.WriteString(msg.Role)
+		sb.WriteString("<|end_header_id|>\n\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<|eot_id|>")
+	}
+	sb.WriteString("<|start_header_id|>assistant<|end_header_id|>\n\n")
+	return sb.String()
+}
+
+func formatMistral(messages []Message) string {
+	var sb strings.Builder
+	// Mistral merges system into first user message.
+	pending := ""
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			pending = msg.Content + "\n\n"
+		case "user":
+			sb.WriteString("[INST] ")
+			sb.WriteString(pending)
 			sb.WriteString(msg.Content)
-			sb.WriteString("<end_of_turn>\n")
-		default:
-			// Generic format: Role: Content\n
-			sb.WriteString(msg.Role)
-			sb.WriteString(": ")
+			sb.WriteString(" [/INST]")
+			pending = ""
+		case "assistant":
 			sb.WriteString(msg.Content)
-			sb.WriteString("\n")
 		}
 	}
+	return sb.String()
+}
 
-	// Add the assistant turn opening.
-	switch strings.ToLower(template) {
-	case "gemma":
-		sb.WriteString("<start_of_turn>model\n")
-	default:
-		sb.WriteString("assistant: ")
+func formatQwen(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("<|im_start|>")
+		sb.WriteString(msg.Role)
+		sb.WriteString("\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<|im_end|>\n")
 	}
+	sb.WriteString("<|im_start|>assistant\n")
+	return sb.String()
+}
 
+func formatDeepSeek(messages []Message) string {
+	var sb strings.Builder
+	sb.WriteString("<|begin_of_sentence|>")
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n\n")
+		case "user":
+			sb.WriteString("User: ")
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n\n")
+		case "assistant":
+			sb.WriteString("Assistant: ")
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n\n")
+		}
+	}
+	sb.WriteString("Assistant:")
+	return sb.String()
+}
+
+func formatPhi(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("<|")
+		sb.WriteString(msg.Role)
+		sb.WriteString("|>\n")
+		sb.WriteString(msg.Content)
+		sb.WriteString("<|end|>\n")
+	}
+	sb.WriteString("<|assistant|>\n")
+	return sb.String()
+}
+
+func formatGeneric(messages []Message) string {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString(msg.Role)
+		sb.WriteString(": ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("assistant: ")
 	return sb.String()
 }
 

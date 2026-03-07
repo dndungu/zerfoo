@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
@@ -68,8 +70,11 @@ type Generator[T tensor.Numeric] struct {
 	tokenizer tokenizer.Tokenizer
 	engine    compute.Engine[T]
 	config    ModelConfig
-	blockPool *BlockPool[T] // nil when using pre-allocated KV cache
-	headDim   int           // per-head dim for paged KV
+	pool      *compute.TensorPool[T]                    // reusable intermediate buffers
+	blockPool *BlockPool[T]                              // nil when using pre-allocated KV cache
+	headDim   int                                        // per-head dim for paged KV
+	plan      atomic.Pointer[graph.ExecutionPlan[T]]     // compiled decode plan (nil until first decode)
+	planOnce  sync.Once                                  // ensures compile happens once
 }
 
 // NewGenerator creates a Generator from a model graph, tokenizer, engine, and config.
@@ -90,6 +95,11 @@ func NewGenerator[T tensor.Numeric](
 		tokenizer: tok,
 		engine:    eng,
 		config:    cfg,
+	}
+
+	if g != nil {
+		gen.pool = compute.NewTensorPool[T]()
+		g.WithPool(gen.pool)
 	}
 
 	if gopts.pagedKVMaxMB > 0 && gopts.headDim > 0 {
@@ -183,7 +193,22 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 			return "", fmt.Errorf("create token tensor: %w", tErr)
 		}
 
-		logits, err = gen.graph.Forward(genCtx, tokenTensor)
+		if p := gen.plan.Load(); p != nil {
+			logits, err = p.Run(genCtx, tokenTensor)
+		} else {
+			logits, err = gen.graph.Forward(genCtx, tokenTensor)
+			// After the first decode Forward(), compile the graph.
+			// The graph's memo from this Forward() provides shapes
+			// without re-executing (avoids corrupting model state).
+			if err == nil {
+				gen.planOnce.Do(func() {
+					compiled, cErr := gen.graph.Compile(genCtx, tokenTensor)
+					if cErr == nil {
+						gen.plan.Store(compiled)
+					}
+				})
+			}
+		}
 		if err != nil {
 			return "", fmt.Errorf("decode forward: %w", err)
 		}

@@ -1,0 +1,87 @@
+package gguf
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/zerfoo/zerfoo/pkg/tokenizer"
+)
+
+// ExtractTokenizer builds a BPETokenizer from GGUF metadata. GGUF files store
+// tokenizer data under the "tokenizer.ggml.*" metadata keys.
+func ExtractTokenizer(f *File) (*tokenizer.BPETokenizer, error) {
+	// Extract token vocabulary.
+	tokensRaw, ok := f.Metadata["tokenizer.ggml.tokens"]
+	if !ok {
+		return nil, fmt.Errorf("missing tokenizer.ggml.tokens metadata")
+	}
+	tokensArr, ok := tokensRaw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("tokenizer.ggml.tokens: expected array, got %T", tokensRaw)
+	}
+
+	vocab := make(map[string]int, len(tokensArr))
+	for i, v := range tokensArr {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("tokenizer.ggml.tokens[%d]: expected string, got %T", i, v)
+		}
+		vocab[s] = i
+	}
+
+	// Extract merges (optional -- some models have no merges).
+	var merges []tokenizer.MergePair
+	if mergesRaw, ok := f.Metadata["tokenizer.ggml.merges"]; ok {
+		mergesArr, ok := mergesRaw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("tokenizer.ggml.merges: expected array, got %T", mergesRaw)
+		}
+		merges = make([]tokenizer.MergePair, 0, len(mergesArr))
+		for i, v := range mergesArr {
+			s, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("tokenizer.ggml.merges[%d]: expected string, got %T", i, v)
+			}
+			left, right, found := strings.Cut(s, " ")
+			if !found {
+				return nil, fmt.Errorf("tokenizer.ggml.merges[%d]: invalid merge %q", i, s)
+			}
+			merges = append(merges, tokenizer.MergePair{Left: left, Right: right})
+		}
+	}
+
+	// Extract special token IDs.
+	special := tokenizer.SpecialTokens{}
+	if v, ok := getUint32Meta(f, "tokenizer.ggml.bos_token_id"); ok {
+		special.BOS = int(v)
+	}
+	if v, ok := getUint32Meta(f, "tokenizer.ggml.eos_token_id"); ok {
+		special.EOS = int(v)
+	}
+	if v, ok := getUint32Meta(f, "tokenizer.ggml.unknown_token_id"); ok {
+		special.UNK = int(v)
+	}
+	if v, ok := getUint32Meta(f, "tokenizer.ggml.padding_token_id"); ok {
+		special.PAD = int(v)
+	}
+
+	// GGUF tokenizers are not byte-level BPE (they use raw token strings).
+	tok := tokenizer.NewBPETokenizer(vocab, merges, special, false)
+	return tok, nil
+}
+
+// getUint32Meta extracts a uint32 metadata value, handling both uint32 and int32.
+func getUint32Meta(f *File, key string) (uint32, bool) {
+	v, ok := f.Metadata[key]
+	if !ok {
+		return 0, false
+	}
+	switch val := v.(type) {
+	case uint32:
+		return val, true
+	case int32:
+		return uint32(val), true
+	default:
+		return 0, false
+	}
+}

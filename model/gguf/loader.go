@@ -73,6 +73,15 @@ func tensorByteSize(typ GGMLType, numElements int) (int, error) {
 	case GGMLTypeQ8_0:
 		nBlocks := (numElements + 31) / 32
 		return nBlocks * 34, nil // 2 bytes fp16 scale + 32 bytes int8 (GGUF format)
+	case GGMLTypeQ4_K:
+		nBlocks := (numElements + 255) / 256
+		return nBlocks * 144, nil // 4 bytes header + 12 bytes scales + 128 bytes data
+	case GGMLTypeQ5_K:
+		nBlocks := (numElements + 255) / 256
+		return nBlocks * 176, nil // 4 bytes header + 12 bytes scales + 128 bytes ql + 32 bytes qh
+	case GGMLTypeQ6_K:
+		nBlocks := (numElements + 255) / 256
+		return nBlocks * 210, nil // 128 bytes ql + 64 bytes qh + 16 bytes scales + 2 bytes d
 	default:
 		return 0, fmt.Errorf("unsupported GGML type %d", typ)
 	}
@@ -89,6 +98,12 @@ func decodeTensor(typ GGMLType, shape []int, numElements int, raw []byte) (*tens
 		return decodeQ4Tensor(shape, numElements, raw)
 	case GGMLTypeQ8_0:
 		return decodeQ8Tensor(shape, numElements, raw)
+	case GGMLTypeQ4_K:
+		return decodeQ4KTensor(shape, numElements, raw)
+	case GGMLTypeQ5_K:
+		return decodeQ5KTensor(shape, numElements, raw)
+	case GGMLTypeQ6_K:
+		return decodeQ6KTensor(shape, numElements, raw)
 	default:
 		return nil, fmt.Errorf("unsupported GGML type %d", typ)
 	}
@@ -117,6 +132,30 @@ func decodeQ4Tensor(shape []int, numElements int, raw []byte) (*tensor.TensorNum
 		return nil, fmt.Errorf("Q4_0 decode: %w", err)
 	}
 	return tensor.NewWithStorage[float32](shape, q4)
+}
+
+func decodeQ4KTensor(shape []int, numElements int, raw []byte) (*tensor.TensorNumeric[float32], error) {
+	q4k, err := tensor.NewQ4KStorageFromRaw(raw, numElements)
+	if err != nil {
+		return nil, fmt.Errorf("Q4_K decode: %w", err)
+	}
+	return tensor.NewWithStorage[float32](shape, q4k)
+}
+
+func decodeQ5KTensor(shape []int, numElements int, raw []byte) (*tensor.TensorNumeric[float32], error) {
+	q5k, err := tensor.NewQ5KStorageFromRaw(raw, numElements)
+	if err != nil {
+		return nil, fmt.Errorf("Q5_K decode: %w", err)
+	}
+	return tensor.NewWithStorage[float32](shape, q5k)
+}
+
+func decodeQ6KTensor(shape []int, numElements int, raw []byte) (*tensor.TensorNumeric[float32], error) {
+	q6k, err := tensor.NewQ6KStorageFromRaw(raw, numElements)
+	if err != nil {
+		return nil, fmt.Errorf("Q6_K decode: %w", err)
+	}
+	return tensor.NewWithStorage[float32](shape, q6k)
 }
 
 func decodeQ8Tensor(shape []int, numElements int, raw []byte) (*tensor.TensorNumeric[float32], error) {

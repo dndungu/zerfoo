@@ -94,7 +94,19 @@ func (gen *Generator[T]) GenerateStream(ctx context.Context, prompt string, sc S
 			return fmt.Errorf("create token tensor: %w", tErr)
 		}
 
-		logits, err = gen.graph.Forward(genCtx, tokenTensor)
+		if p := gen.plan.Load(); p != nil {
+			logits, err = p.Run(genCtx, tokenTensor)
+		} else {
+			logits, err = gen.graph.Forward(genCtx, tokenTensor)
+			if err == nil {
+				gen.planOnce.Do(func() {
+					compiled, cErr := gen.graph.Compile(genCtx, tokenTensor)
+					if cErr == nil {
+						gen.plan.Store(compiled)
+					}
+				})
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("decode forward: %w", err)
 		}

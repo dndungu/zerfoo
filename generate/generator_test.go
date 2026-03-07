@@ -3,6 +3,7 @@ package generate
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -99,6 +100,7 @@ type fixedLogitsNode struct {
 	// tokenSequence is the sequence of token IDs to produce on each call.
 	// Wraps around if more calls than entries.
 	tokenSequence []int
+	mu            sync.Mutex
 	callCount     int
 }
 
@@ -118,10 +120,12 @@ func (n *fixedLogitsNode) Forward(_ context.Context, inputs ...*tensor.TensorNum
 		}
 	}
 
+	n.mu.Lock()
+	callCount := n.callCount
 	data := make([]float32, seqLen*n.vocabSize)
 	// For each position, set the target token to have the highest logit.
 	for pos := range seqLen {
-		targetToken := n.tokenSequence[n.callCount%len(n.tokenSequence)]
+		targetToken := n.tokenSequence[callCount%len(n.tokenSequence)]
 		offset := pos * n.vocabSize
 		for j := range n.vocabSize {
 			data[offset+j] = -10.0
@@ -130,10 +134,10 @@ func (n *fixedLogitsNode) Forward(_ context.Context, inputs ...*tensor.TensorNum
 			data[offset+targetToken] = 10.0
 		}
 		if pos == seqLen-1 {
-			// Only advance call count after processing the last position.
 			n.callCount++
 		}
 	}
+	n.mu.Unlock()
 
 	return tensor.New([]int{1, seqLen, n.vocabSize}, data)
 }
@@ -967,6 +971,141 @@ func TestGenerate_WithPagedKV_MaxTokens(t *testing.T) {
 	if result != "foo foo foo" {
 		t.Errorf("Generate = %q, want %q", result, "foo foo foo")
 	}
+}
+
+func TestNewGenerator_PoolWiring(t *testing.T) {
+	t.Run("nil graph skips pool", func(t *testing.T) {
+		gen := NewGenerator[float32](nil, nil, nil, ModelConfig{
+			NumLayers: 2,
+			MaxSeqLen: 32,
+		})
+		if gen.pool != nil {
+			t.Error("expected nil pool when graph is nil")
+		}
+	})
+
+	t.Run("non-nil graph creates pool", func(t *testing.T) {
+		g := buildTestGraph(t, 8, []int{6, 2})
+		gen := NewGenerator[float32](g, nil, nil, ModelConfig{
+			NumLayers: 2,
+			MaxSeqLen: 32,
+		})
+		if gen.pool == nil {
+			t.Error("expected non-nil pool when graph is provided")
+		}
+	})
+}
+
+func TestGenerate_WithPoolCorrectness(t *testing.T) {
+	tok := buildTestTokenizer()
+	vocabSize := 8
+	// Generate 5 tokens then EOS -- enough decode steps to verify pool doesn't break output.
+	g := buildTestGraph(t, vocabSize, []int{6, 7, 6, 7, 6, 2})
+
+	gen := NewGenerator[float32](
+		g, tok,
+		compute.NewCPUEngine(numeric.Float32Ops{}),
+		ModelConfig{
+			VocabSize:  vocabSize,
+			MaxSeqLen:  32,
+			EOSTokenID: 2,
+			NumLayers:  0,
+		},
+	)
+
+	if gen.pool == nil {
+		t.Fatal("expected pool to be wired when graph is non-nil")
+	}
+
+	result, err := gen.Generate(context.Background(), "hello world", SamplingConfig{
+		Temperature:  0,
+		MaxNewTokens: 10,
+	})
+	if err != nil {
+		t.Fatalf("Generate error: %v", err)
+	}
+
+	// Correctness: output should be unchanged by pool.
+	if result != "foo bar foo bar foo" {
+		t.Errorf("Generate = %q, want %q", result, "foo bar foo bar foo")
+	}
+}
+
+func BenchmarkGenerate_Allocs(b *testing.B) {
+	tok := buildBenchTokenizer(b)
+	vocabSize := 8
+	eng := compute.NewCPUEngine(numeric.Float32Ops{})
+
+	// Build a graph that produces 3 tokens then EOS per Generate call.
+	makeGraph := func(b *testing.B) *graph.Graph[float32] {
+		b.Helper()
+		builder := graph.NewBuilder[float32](eng)
+		in := builder.Input([]int{1, 1, 1})
+		node := &fixedLogitsNode{
+			vocabSize:     vocabSize,
+			tokenSequence: []int{6, 7, 6, 2},
+		}
+		builder.AddNode(node, in)
+		g, err := builder.Build(node)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return g
+	}
+
+	b.Run("with_pool", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			g := makeGraph(b)
+			gen := NewGenerator[float32](g, tok, eng, ModelConfig{
+				VocabSize:  vocabSize,
+				MaxSeqLen:  32,
+				EOSTokenID: 2,
+				NumLayers:  0,
+			})
+			_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+				Temperature:  0,
+				MaxNewTokens: 10,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("without_pool", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			g := makeGraph(b)
+			gen := NewGenerator[float32](g, tok, eng, ModelConfig{
+				VocabSize:  vocabSize,
+				MaxSeqLen:  32,
+				EOSTokenID: 2,
+				NumLayers:  0,
+			})
+			// Disable pool to compare.
+			gen.pool = nil
+			g.WithPool(nil)
+			_, err := gen.Generate(context.Background(), "hello", SamplingConfig{
+				Temperature:  0,
+				MaxNewTokens: 10,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// buildBenchTokenizer creates a tokenizer for benchmarks (same as buildTestTokenizer).
+func buildBenchTokenizer(b *testing.B) *tokenizer.WhitespaceTokenizer {
+	b.Helper()
+	tok := tokenizer.NewWhitespaceTokenizer()
+	tok.AddToken("hello")
+	tok.AddToken("world")
+	tok.AddToken("foo")
+	tok.AddToken("bar")
+	return tok
 }
 
 func TestNewGenerator_WithPagedKV_InvalidParams(t *testing.T) {
