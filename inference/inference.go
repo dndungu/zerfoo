@@ -19,6 +19,7 @@ import (
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/pkg/tokenizer"
 	"github.com/zerfoo/zerfoo/registry"
+	"github.com/zerfoo/zerfoo/tensor"
 )
 
 // Model is a loaded model ready for generation.
@@ -246,6 +247,22 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		mdl, err = model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath, buildOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("load model: %w", err)
+		}
+	}
+
+	// Upload model weights to GPU if the engine supports it.
+	if uploader, ok := eng.(compute.WeightUploader); ok {
+		var tensors []*tensor.TensorNumeric[float32]
+		for _, p := range mdl.Graph.Parameters() {
+			tensors = append(tensors, p.Value)
+		}
+		if mdl.Embedding != nil {
+			for _, p := range mdl.Embedding.Parameters() {
+				tensors = append(tensors, p.Value)
+			}
+		}
+		if err := uploader.UploadWeights(tensors); err != nil {
+			return nil, fmt.Errorf("upload weights to GPU: %w", err)
 		}
 	}
 
