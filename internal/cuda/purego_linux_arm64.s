@@ -1,3 +1,5 @@
+//go:build !cuda && linux && arm64
+
 #include "textflag.h"
 
 // Assembly trampolines for dynamically imported C library functions
