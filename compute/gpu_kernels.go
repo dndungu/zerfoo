@@ -85,6 +85,60 @@ func gpuBroadcastOp[T tensor.Numeric](
 	aShape := a.Shape()
 	bShape := b.Shape()
 
+	// Scalar-broadcast fast path: if one operand has exactly 1 element,
+	// use the broadcast kernel with strides 0,0 for that operand.
+	aTotal := totalElements(aShape)
+	bTotal := totalElements(bShape)
+
+	if bTotal == 1 || aTotal == 1 {
+		// Both are scalar -> same-shape path handles it.
+		if aTotal == 1 && bTotal == 1 {
+			// fall through to normal path
+		} else {
+			// Use broadcast kernel with stride 0 for the scalar operand.
+			var M, D int
+			var saRow, saCol, sbRow, sbCol int
+			if bTotal == 1 {
+				M, D = flattenTo2D(aShape)
+				saRow, saCol = D, 1
+				sbRow, sbCol = 0, 0
+			} else {
+				M, D = flattenTo2D(bShape)
+				saRow, saCol = 0, 0
+				sbRow, sbCol = D, 1
+			}
+			outShape := broadcastShape(aShape, bShape)
+
+			e.setDevice()
+
+			devA, cleanupA, err := getDevicePtr(e, a)
+			if err != nil {
+				return nil, err
+			}
+			defer cleanupA()
+
+			devB, cleanupB, err := getDevicePtr(e, b)
+			if err != nil {
+				return nil, err
+			}
+			defer cleanupB()
+
+			outElems := M * D
+			byteSize := outElems * f32Size
+			devC, err := e.pool.Alloc(e.deviceID, byteSize)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := kernelFn(devA, devB, devC, saRow, saCol, sbRow, sbCol, M, D, e.stream); err != nil {
+				e.pool.Free(e.deviceID, devC, byteSize)
+				return nil, err
+			}
+
+			return makeGPUResult[T](e, outShape, devC, outElems, dst...)
+		}
+	}
+
 	// Flatten to 2D for broadcast analysis.
 	// For N-D tensors, treat as [product(all-but-last), last].
 	aM, aD := flattenTo2D(aShape)
@@ -361,13 +415,34 @@ func (e *GPUEngine[T]) gpuDiv(ctx context.Context, a, b *tensor.TensorNumeric[T]
 }
 
 func (e *GPUEngine[T]) gpuPow(ctx context.Context, base, exponent *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if !isFloat32[T]() || !sameShape(base, exponent) {
+	if !isFloat32[T]() {
 		return e.cpu.Pow(ctx, base, exponent, dst...)
 	}
 
-	e.setDevice()
+	if sameShape(base, exponent) {
+		e.setDevice()
+		return gpuBinaryOp(e, ctx, base, exponent, e.kernels.Pow, dst...)
+	}
 
-	return gpuBinaryOp(e, ctx, base, exponent, e.kernels.Pow, dst...)
+	// Scalar exponent: exponent has 1 element (e.g. x^2 in RMSNorm).
+	if totalElements(exponent.Shape()) == 1 {
+		scalar := exponent.Data()[0]
+		e.setDevice()
+		return gpuScalarOp(e, base, toFloat32(scalar), e.kernels.PowScalar, dst...)
+	}
+
+	// Scalar base: base has 1 element.
+	if totalElements(base.Shape()) == 1 {
+		// Fall back to CPU for scalar-base Pow (rare pattern).
+		return e.cpu.Pow(ctx, base, exponent, dst...)
+	}
+
+	return e.cpu.Pow(ctx, base, exponent, dst...)
+}
+
+func (e *GPUEngine[T]) gpuSubScalar(_ context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	e.setDevice()
+	return gpuScalarOp(e, a, toFloat32(scalar), e.kernels.SubScalar, dst...)
 }
 
 func (e *GPUEngine[T]) gpuExp(ctx context.Context, a *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
