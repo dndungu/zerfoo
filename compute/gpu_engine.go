@@ -151,11 +151,33 @@ func (e *GPUEngine[T]) UploadWeights(tensors []*tensor.TensorNumeric[float32]) e
 			q4Uploaded++
 			continue
 		}
-		// Skip non-Q4 tensors. Many float32 weights are consumed by ops
-		// without GPU kernels (Pow, some broadcast patterns). Uploading
-		// them to GPU triggers costly D2H copies when those ops read
-		// data back. Only Q4 weights benefit because all Q4 MatMul runs
-		// on GPU and avoids per-op H2D of the heavy raw bytes.
+		// Upload float32 weights to GPU. With Pow, binary ops, and
+		// Split/Concat now running on GPU, float32 weights benefit from
+		// staying on device (eliminates per-op H2D copies for norm weights).
+		if _, ok := t.GetStorage().(*tensor.GPUStorage[float32]); ok {
+			continue // already on GPU
+		}
+		data := t.Data()
+		n := len(data)
+		if n == 0 {
+			continue
+		}
+		byteSize := n * f32Size
+		devPtr, err := e.pool.Alloc(e.deviceID, byteSize)
+		if err != nil {
+			return fmt.Errorf("alloc f32 GPU (shape %v): %w", t.Shape(), err)
+		}
+		if err := e.runtime.Memcpy(devPtr, unsafe.Pointer(&data[0]), byteSize, gpuapi.MemcpyHostToDevice); err != nil {
+			e.pool.Free(e.deviceID, devPtr, byteSize)
+			return fmt.Errorf("upload f32 (shape %v): %w", t.Shape(), err)
+		}
+		gs, err := tensor.NewGPUStorageFromPtr[float32](devPtr, n, e.deviceID)
+		if err != nil {
+			e.pool.Free(e.deviceID, devPtr, byteSize)
+			return fmt.Errorf("create GPU storage (shape %v): %w", t.Shape(), err)
+		}
+		t.SetStorage(gs)
+		uploaded++
 	}
 	if uploaded > 0 || q4Uploaded > 0 {
 		e.logger.Info("weights uploaded to GPU",
