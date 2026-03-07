@@ -55,6 +55,7 @@ func run() error {
 	prompt := flag.String("prompt", "The meaning of life is", "prompt text")
 	maxTokens := flag.Int("tokens", 64, "max tokens to generate")
 	useMmap := flag.Bool("mmap", false, "use memory-mapped loading")
+	device := flag.String("device", "cpu", "compute device (cpu, cuda, cuda:0)")
 	cpuprofile := flag.String("cpuprofile", "", "write CPU profile to file")
 	flag.Parse()
 
@@ -76,9 +77,9 @@ func run() error {
 
 	reg := &dirRegistry{path: *modelDir}
 
-	fmt.Printf("Loading model from %s...\n", *modelDir)
+	fmt.Printf("Loading model from %s (device=%s)...\n", *modelDir, *device)
 	t0 := time.Now()
-	mdl, err := inference.Load("bench", inference.WithRegistry(reg), inference.WithMmap(*useMmap))
+	mdl, err := inference.Load("bench", inference.WithRegistry(reg), inference.WithMmap(*useMmap), inference.WithDevice(*device))
 	if err != nil {
 		return fmt.Errorf("load error: %w", err)
 	}
