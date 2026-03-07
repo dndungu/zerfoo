@@ -11,6 +11,13 @@ Track A: Replace CGo CUDA bindings with purego dlopen loader.
 | Task | File | Commit | Summary |
 |------|------|--------|---------|
 | T87.1+T87.2+S87.2.1 | internal/cuda/purego*.go | c39ca30 | Zero-CGo CUDA dlopen loader with assembly trampolines. Darwin (syscall6/9), Linux arm64 (asmcgocall + AAPCS64 trampoline), other (stubs). CUDALib loads libcudart.so, resolves 13 function pointers. 7 tests pass. |
+| T87.3+S87.3.1 | internal/cuda/runtime_purego.go | 40b4db0 | Purego CUDA runtime: all 14 functions (Malloc, Free, Memcpy, Stream, etc.) via ccall. Compile-time parity tests + graceful error tests. |
+| T87.4 | internal/cuda/ | (verified) | golangci-lint 0 issues on entire internal/cuda/ package. |
+| T88.1 | internal/cuda/purego.go, kernels/purego.go | 71d8174 | KernelLib dlopen loader: loads libkernels.so, resolves 28 kernel function pointers. Exports Ccall/Dlsym/DlopenKernels. |
+| T88.2 | internal/cuda/kernels/elementwise_purego.go | b641607 | 22 elementwise kernel wrappers (binary, scalar, unary, broadcast, fill, sum_axis, softmax) via cuda.Ccall. |
+| T88.3 | internal/cuda/kernels/*_purego.go | 01a6801 | RMSNorm, Gather, Transpose2D/ND, GemmQ4F32 purego wrappers. CUTLASS kernels remain CGo-only. |
+| T88.4 | internal/cuda/mempool.go | fb4ccfd | Removed cuda build tag from MemPool (uses only purego-available APIs). |
+| T89.1 (partial) | internal/gpuapi/cuda_*.go | 8829531 | Removed cuda tag from cuda_runtime, cuda_mempool, cuda_kernels. cuda_blas/cuda_dnn retain tag (cublas/cudnn dependency). |
 
 ### Deviation
 

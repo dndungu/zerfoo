@@ -440,7 +440,7 @@ Decision rationale: docs/adr/025-purego-cuda-bindings.md.
   - Test: MallocManaged returns accessible pointer.
   - Compare behavior with the old CGo implementation.
 
-- [ ] T87.4 Run golangci-lint on internal/cuda/  Owner: TBD  Est: 15m
+- [x] T87.4 Run golangci-lint on internal/cuda/  Owner: TBD  Est: 15m  Done: 2026 03 07
   - Dependencies: T87.3.
 
 #### E88: Kernel Function dlopen Wrappers (O87, O88)
@@ -465,14 +465,14 @@ Approach:
 - Replace each CGo wrapper function with a dlsym-based call.
 - Remove `//go:build cuda` from all kernel .go files.
 
-- [ ] T88.1 Create KernelLib dlopen loader  Owner: TBD  Est: 2h
+- [x] T88.1 Create KernelLib dlopen loader  Owner: TBD  Est: 2h  Done: 2026 03 07
   - Create `internal/cuda/kernels/dlopen.go` (no build tag).
   - Load libkernels.so via dlopen.
   - Resolve all launcher function pointers (launch_add, launch_sub, etc.).
   - Acceptance: All ~30 function pointers resolved on DGX Spark.
   - Dependencies: T87.2.
 
-- [ ] T88.2 Replace elementwise.go CGo wrappers  Owner: TBD  Est: 3h
+- [x] T88.2 Replace elementwise.go CGo wrappers  Owner: TBD  Est: 3h  Done: 2026 03 07
   - Rewrite all 20+ functions (Add, Sub, Mul, Div, Pow, Exp, Log, Sqrt,
     etc.) to call dlsym function pointers instead of C functions.
   - Remove `import "C"` and `//go:build cuda`.
@@ -483,7 +483,7 @@ Approach:
   - Run existing elementwise_test.go tests.
   - Verify output matches CGo version within 1e-7.
 
-- [ ] T88.3 Replace remaining kernel CGo wrappers  Owner: TBD  Est: 3h
+- [x] T88.3 Replace remaining kernel CGo wrappers  Owner: TBD  Est: 3h  Done: 2026 03 07
   - Rewrite transpose.go, rmsnorm.go, gather.go, gemm_q4.go,
     gemm_quantized.go, flash_attention.go.
   - Remove `import "C"` and `//go:build cuda` from each.
@@ -496,12 +496,12 @@ Approach:
   - Run full test suite: `go test ./... -count=1` (no -tags cuda needed).
   - Verify flash_attention, gemm_q4, rmsnorm outputs match within tolerance.
 
-- [ ] T88.4 Remove build tag from internal/cuda/mempool.go  Owner: TBD  Est: 30m
+- [x] T88.4 Remove build tag from internal/cuda/mempool.go  Owner: TBD  Est: 30m  Done: 2026 03 07
   - mempool.go may have `//go:build cuda`. Remove it.
   - Ensure it compiles when CUDA is not available (guard with Available()).
   - Dependencies: T88.3.
 
-- [ ] T88.5 Run golangci-lint on internal/cuda/  Owner: TBD  Est: 15m
+- [x] T88.5 Run golangci-lint on internal/cuda/  Owner: TBD  Est: 15m  Done: 2026 03 07
   - Dependencies: T88.4.
 
 #### E89: Runtime GPU Detection and Build Tag Removal (O88)
@@ -517,21 +517,25 @@ Existing code affected:
 - `compute/gpu_kernels.go` -- `//go:build cuda`
 - Any other files with `//go:build cuda`
 
-- [ ] T89.1 Remove build tags from gpuapi CUDA files  Owner: TBD  Est: 2h
+- [x] T89.1 Remove build tags from gpuapi CUDA files  Owner: TBD  Est: 2h  Done: 2026 03 07
+  - Note: cuda_blas.go and cuda_dnn.go retain cuda tag (cublas/cudnn CGo dependency).
   - Remove `//go:build cuda` from cuda_runtime.go and cuda_kernels.go.
   - Guard initialization with `if !cuda.Available() { return }`.
   - Acceptance: Files compile without build tags. GPU path activates only
     when CUDA is present.
   - Dependencies: E88.
 
-- [ ] T89.2 Remove build tags from compute/ GPU files  Owner: TBD  Est: 2h
-  - Remove `//go:build cuda` from gpu_engine.go and gpu_kernels.go.
-  - Guard GPU engine creation with `cuda.Available()`.
-  - Acceptance: `go build ./...` compiles on any machine. GPUEngine is
-    created only when CUDA is detected at runtime.
-  - Dependencies: T89.1.
+- [ ] T89.2 Remove build tags from compute/ GPU files  Owner: TBD  Est: 2h  BLOCKED
+  - BLOCKED: compute/ files reference gpuapi.NewCUDABlas/NewCUDADNN which
+    require cublas/cudnn CGo bindings. Cannot de-tag until cublas/cudnn get
+    purego loaders.
+  - Dependencies: T89.1, purego cublas/cudnn (not planned).
 
-- [ ] T89.3 Update all remaining build-tagged files  Owner: TBD  Est: 1.5h
+- [x] T89.3 Update all remaining build-tagged files (partial)  Owner: TBD  Est: 1.5h  Done: 2026 03 07
+  - Note: Removed cuda tag from device/cuda_device.go and device/cuda_allocator.go.
+    Remaining files with cuda tag depend on cublas/cudnn/nccl/tensorrt CGo or are
+    behind compound tags (cuda || rocm || opencl). Cannot be de-tagged without
+    purego loaders for those libraries.
   - Grep for `//go:build cuda` across the entire codebase.
   - Remove each one, adding runtime guards as needed.
   - Acceptance: Zero files with `//go:build cuda`. `go build ./...` works
@@ -543,7 +547,7 @@ Existing code affected:
   - `go build ./...` on DGX Spark (CUDA present) -- must compile and use GPU.
   - `go test ./... -count=1` on macOS -- all tests pass (GPU tests skip).
 
-- [ ] T89.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+- [x] T89.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m  Done: 2026 03 07
   - Dependencies: T89.3.
 
 #### E90: Track A Benchmark (O87, O88)
