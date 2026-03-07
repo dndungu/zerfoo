@@ -1522,3 +1522,44 @@ Remaining GPU bottlenecks (pprof):
 - Pow CPU fallback: 8.9% (no GPU scalar-broadcast Pow)
 - binaryOp CPU fallback: 10.4% (unsupported broadcast patterns)
 - GPUStorage.Slice D2H: 24% (CPU fallback ops reading GPU tensor data)
+
+### 15.15 GPU Scalar Ops and D2H Elimination (Phase 33)
+
+Phase 33 eliminated the three remaining CPU fallback bottlenecks identified in
+Phase 32 profiling: Pow scalar-broadcast (8.9%), binary op scalar patterns (10.4%),
+and D2H round-trips from GPU Split/Concat (24%).
+
+Decision rationale: docs/adr/023-gpu-scalar-ops-d2h-elimination.md.
+
+Key implementations:
+- CUDA PowScalar kernel: `out[i] = powf(x[i], scalar)` in elementwise.cu.
+  Wired into `gpuPow` to detect scalar-exponent pattern (totalElements==1).
+- CUDA SubScalar kernel: `c[i] = a[i] - scalar` in elementwise.cu.
+  Completes scalar-op coverage (Add/Sub/Mul/Div/PowScalar).
+- Scalar-broadcast detection in `gpuBroadcastOp`: when one operand has
+  totalElements==1, uses broadcast kernel with stride (0,0) for the scalar side.
+- GPU Split/Concat using D2D memcpy: `gpuSplit` and `gpuConcat` in
+  compute/gpu_kernels.go use `MemcpyAsync(D2D)` instead of custom CUDA kernels.
+  Eliminates all D2H copies from Split/Concat CPU fallback.
+- Float32 weight upload: `GPUEngine.UploadWeights` now uploads both Q4 and
+  float32 weights to GPU (previously skipped float32 to avoid D2H from CPU
+  fallback ops that no longer exist).
+- `totalElements()` helper moved to compute/broadcast.go (no build tag).
+
+Performance at Phase 33 end:
+
+| Model | Quant | Device | tok/s | Phase |
+|-------|-------|--------|-------|-------|
+| Gemma 3 2B | Q4_0 | CPU ARM64 | 6.75 | 33 (bench_tps) |
+| Gemma 3 2B | Q4_0 | GPU (cuda) | 10.32 peak / 7.78 median | 33 (bench_tps, 7 runs) |
+
+High variance (7.45-10.32 across 7 runs) attributed to thermal throttling or
+background processes on DGX Spark. Peak meets original 10 tok/s target.
+
+Remaining bottlenecks for Phase 34:
+- Per-op CGo kernel launch overhead (~100ns per call, 25+ kernels per forward pass)
+- No CUDA graph support (each token = individual kernel launches through CGo)
+- No fused kernels beyond RMSNorm (attention has separate Scale/Softmax/MatMul)
+- All intermediates are float32 (BF16 GEMM exists but elementwise ops are F32)
+- Op-by-op ExecutionPlan dispatch with no batching or fusion
+- llama.cpp achieves 24-38 tok/s for similar models on same hardware
