@@ -205,6 +205,7 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 					compiled, cErr := gen.graph.Compile(genCtx, tokenTensor)
 					if cErr == nil {
 						gen.plan.Store(compiled)
+						go tryCompileMegakernel(compiled, nil)
 					}
 				})
 			}
