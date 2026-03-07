@@ -70,14 +70,24 @@ func TestEmitMegakernelLargeModel(t *testing.T) {
 		t.Errorf("instruction comments: got %d, want %d", count, len(instructions))
 	}
 
-	// Verify frozen slot parameters are declared.
-	if !strings.Contains(code, "frozen_") {
-		t.Error("missing frozen parameter declarations")
+	// Verify frozen slot defines.
+	if !strings.Contains(code, "#define frozen_") {
+		t.Error("missing frozen #define mappings")
 	}
 
 	// Verify __global__ declaration.
 	if !strings.Contains(code, "__global__ void megakernel") {
 		t.Error("missing __global__ void megakernel")
+	}
+
+	// Verify workspace-based slot declarations.
+	if !strings.Contains(code, "workspace +") {
+		t.Error("missing workspace-based slot declarations")
+	}
+
+	// Verify launch wrapper.
+	if !strings.Contains(code, "launch_megakernel") {
+		t.Error("missing launch_megakernel wrapper")
 	}
 
 	// Verify key ops.

@@ -33,14 +33,17 @@ func TestEmitMegakernel(t *testing.T) {
 		t.Fatalf("EmitMegakernel: %v", err)
 	}
 
-	// Verify key parts of the generated code.
 	checks := []string{
 		"__global__",
 		"megakernel",
 		"slot_0",
-		"slot_1",
+		"frozen_1",
 		"slot_2",
 		"+",
+		"launch_megakernel",
+		"extern \"C\"",
+		"cudaDeviceSynchronize",
+		"workspace",
 	}
 	for _, want := range checks {
 		if !strings.Contains(code, want) {
@@ -107,5 +110,46 @@ func TestEmitMegakernelMultiOp(t *testing.T) {
 	}
 	if mulIdx >= 0 && expIdx >= 0 && mulIdx >= expIdx {
 		t.Error("Mul should appear before Exp")
+	}
+
+	// Verify launch wrapper present.
+	if !strings.Contains(code, "launch_megakernel") {
+		t.Error("missing launch_megakernel wrapper")
+	}
+}
+
+func TestComputeWorkspaceLayout(t *testing.T) {
+	cfg := MegakernelConfig{
+		Instructions: []graph.InstructionMeta{
+			{OpName: "Add", InputIdx: []int{0, 1}, OutputIdx: 2},
+		},
+		SlotShapes:  [][]int{{1, 4}, {1, 4}, {1, 4}},
+		FrozenSlots: []FrozenSlotMeta{{SlotIdx: 1}},
+		InputSlots:  []int{0},
+		OutputSlot:  2,
+	}
+
+	layout := ComputeWorkspaceLayout(cfg)
+
+	// Slot 1 is frozen, should NOT be in workspace.
+	if _, ok := layout.SlotOffsets[1]; ok {
+		t.Error("frozen slot 1 should not be in workspace")
+	}
+
+	// Slots 0 and 2 should be in workspace.
+	if _, ok := layout.SlotOffsets[0]; !ok {
+		t.Error("slot 0 should be in workspace")
+	}
+	if _, ok := layout.SlotOffsets[2]; !ok {
+		t.Error("slot 2 should be in workspace")
+	}
+
+	// Total size = 4 (slot0) + 4 (slot2) = 8.
+	if layout.TotalSize != 8 {
+		t.Errorf("total size: got %d, want 8", layout.TotalSize)
+	}
+
+	if layout.OutputSize != 4 {
+		t.Errorf("output size: got %d, want 4", layout.OutputSize)
 	}
 }
