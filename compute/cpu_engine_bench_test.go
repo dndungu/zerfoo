@@ -172,3 +172,39 @@ func BenchmarkCPUEngineSoftmax(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkPowSquare(b *testing.B) {
+	ctx := context.Background()
+	e := newEngineF32()
+	base := allocF32([]int{1, 2048})
+	fillUniform(e, base, -1, 1)
+	exp, err := tensor.New[float32]([]int{1}, []float32{2.0})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.Pow(ctx, base, exp); err != nil {
+			b.Fatalf("Pow error: %v", err)
+		}
+	}
+}
+
+func BenchmarkPowGeneric(b *testing.B) {
+	ctx := context.Background()
+	e := newEngineF32()
+	base := allocF32([]int{1, 2048})
+	fillUniform(e, base, -1, 1)
+	exp, err := tensor.New[float32]([]int{1}, []float32{3.0})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.Pow(ctx, base, exp); err != nil {
+			b.Fatalf("Pow error: %v", err)
+		}
+	}
+}

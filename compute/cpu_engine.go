@@ -1361,6 +1361,14 @@ func (e *CPUEngine[T]) Pow(
 	dst ...*tensor.TensorNumeric[T],
 ) (*tensor.TensorNumeric[T], error) {
 	defer e.recordOp("Pow", time.Now())
+	// Specialization: scalar exponent == 2.0 uses x*x instead of math.Pow
+	if exponent != nil && exponent.Size() == 1 {
+		expData := exponent.Data()
+		two := e.ops.FromFloat64(2.0)
+		if e.ops.IsZero(e.ops.Sub(expData[0], two)) {
+			return e.UnaryOp(ctx, base, func(x T) T { return e.ops.Mul(x, x) }, dst...)
+		}
+	}
 	return e.binaryOp(ctx, base, exponent, e.ops.Pow, dst...)
 }
 
