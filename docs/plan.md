@@ -1,73 +1,86 @@
-# Zerfoo Development Plan -- Phase 33: GPU Scalar Ops and D2H Elimination
+# Zerfoo Development Plan -- Phase 34: Close the Gap with llama.cpp
 
 ## 1. Context
 
 ### Problem Statement
 
-Phase 32 brought GPU inference from 5.12 to 6.84 tok/s (+33.6%) on DGX Spark
-GB10 for Gemma 3 2B Q4. GPU is now faster than CPU (6.61 tok/s), but the 10
-tok/s target was not met. Profiling shows three remaining bottlenecks that
-cause CPU fallbacks and D2H round-trips:
+Phase 33 achieved 10.32 tok/s peak (7.78 median) for Gemma 3 2B Q4 on DGX Spark
+GB10. llama.cpp/Ollama on the same hardware achieves 24 tok/s for Gemma 3 12B Q4
+and 38 tok/s for Llama 3.1 8B Q4. Zerfoo is at ~4.3% of the theoretical bandwidth
+limit (273 GB/s / 1.5 GB model = ~182 tok/s) while llama.cpp reaches 13-21%.
 
-1. **Pow CPU fallback (8.9%)**: `engine.Pow(base, exponent)` where exponent is
-   a scalar tensor `[1]` with value 2.0 (x^2 in normalization). `gpuPow`
-   requires `sameShape(base, exponent)` which fails for scalar broadcast,
-   falling back to CPU. The CPU then reads GPU-resident base via
-   `GPUStorage.Slice()`, triggering a full D2H copy.
+The gap is caused by three categories of overhead:
 
-2. **Binary op CPU fallback (10.4%)**: `gpuBroadcastOp` supports row, column,
-   and same-shape 2D patterns. Scalar-vs-tensor (`[1]` op `[M,D]`) is not
-   handled, falling back to CPU with D2H copies.
+1. **Per-op CGo kernel launch overhead**: Each forward pass dispatches 25+ GPU
+   operations individually through CGo (~100ns per call) plus CUDA kernel launch
+   latency. For single-token decode with small tensors, launch overhead dominates
+   compute time. llama.cpp uses CUDA graph capture to eliminate this entirely.
 
-3. **GPUStorage.Slice D2H (24%)**: all CPU fallback ops that read GPU-resident
-   tensor data trigger `GPUStorage.Slice()` which copies the entire buffer
-   D2H. This is the root-cause multiplier for (1) and (2).
+2. **No kernel fusion**: Operations like Scale+Softmax, Gate*SiLU(Up), and
+   elementwise chains are separate kernel launches with intermediate GPU memory
+   round-trips. Each kernel reads and writes global memory. llama.cpp fuses these
+   into single kernels that keep data in registers/shared memory.
 
-See docs/design.md for full architecture context and Phases 1-32 history.
-Decision rationale: docs/adr/023-gpu-scalar-ops-d2h-elimination.md.
+3. **Per-op buffer allocation**: `ExecutionPlan.Run()` allocates intermediate GPU
+   buffers from the memory pool on every op via `pool.Alloc/Free`. These shapes
+   are fixed and known at compile time but allocated dynamically at runtime.
 
-### What Was Delivered (Phase 32)
+See docs/design.md for full architecture context and Phases 1-33 history.
+Decision rationale: docs/adr/024-cuda-graph-fused-kernels.md.
+
+### What Was Delivered (Phase 33)
 
 | Area | Key Result |
 |------|------------|
-| GPU tensor residency | Intermediate tensors stay on GPU; Q4 weights pre-uploaded |
-| GPU Transpose | 2D tiled + N-D stride-based kernel |
-| GPU Broadcasting | Stride-based 2D for Add/Sub/Mul/Div |
-| GPU Gather | Embedding lookup on GPU |
-| Fused GPU RMSNorm | Single-pass kernel with shared-memory reduction |
-| Benchmark | 6.84 tok/s GPU, 6.61 tok/s CPU on DGX Spark GB10 |
+| PowScalar GPU kernel | Eliminated 8.9% Pow CPU fallback |
+| SubScalar GPU kernel | Completed scalar-op coverage |
+| Scalar-broadcast detection | Eliminated 10.4% binary op CPU fallback |
+| GPU Split/Concat (D2D memcpy) | Eliminated 24% D2H from GPUStorage.Slice |
+| Float32 weight upload | All weights GPU-resident at load time |
+| Benchmark | 10.32 tok/s peak / 7.78 median GPU on DGX Spark GB10 |
 
-### GPU Profile Breakdown (Phase 32, DGX Spark GB10)
+### Current Architecture
 
-| Component | % Time | Root Cause |
-|-----------|--------|------------|
-| runtime.cgocall | 58% | Activation H2D/D2H from CPU fallback ops |
-| Pow CPU fallback | 8.9% | No GPU scalar-broadcast Pow kernel |
-| binaryOp CPU fallback | 10.4% | Scalar-vs-tensor not in gpuBroadcastOp |
-| GPUStorage.Slice D2H | 24% | CPU fallback ops reading GPU tensor data |
-| MatMul (GPU) | ~30% | Core compute, already on GPU |
+The decode loop in `generate/stream.go` calls `ExecutionPlan.Run()` per token.
+`Run()` iterates a flat `[]Instruction` array. Each instruction calls
+`node.Forward(ctx, inputs)` which dispatches to `GPUEngine` methods. Each method
+calls a CGo wrapper which launches a CUDA kernel. Buffer allocation happens inside
+each GPUEngine method via `pool.Alloc`.
+
+```
+Token loop (Go)
+  -> ExecutionPlan.Run() (Go, per-instruction loop)
+    -> node.Forward() (Go)
+      -> GPUEngine.Add() (Go)
+        -> pool.Alloc() (Go)
+        -> C.launch_add() (CGo -> CUDA kernel launch)
+        -> pool.Free() for temporaries (Go)
+```
+
+Each of these layers adds latency. For a 26-layer transformer with ~25 ops per
+layer, that is ~650 CGo round-trips per token.
 
 ### Objectives
 
-- O75: Add PowScalar GPU kernel to eliminate the 8.9% Pow CPU fallback.
-- O76: Extend GPU binary ops with scalar-broadcast to eliminate the 10.4%
-  binary op CPU fallback.
-- O77: Add GPU Slice/Split/Concat kernels to eliminate the 24% D2H overhead
-  from GPUStorage.Slice.
-- O78: Achieve >= 10 tok/s for Gemma 3 2B Q4 on DGX Spark GB10.
+- O80: Pre-allocate all intermediate GPU buffers at graph compile time.
+- O81: Implement CUDA graph capture/replay for the decode forward pass.
+- O82: Add fused CUDA kernels for SwiGLU, Scale+Softmax, and dequant+GEMV.
+- O83: Achieve >= 20 tok/s median for Gemma 3 2B Q4 on DGX Spark GB10.
 
 ### Non-Goals
 
 - Multi-GPU inference or tensor parallelism.
-- FP4 kernels (blocked on upstream CUTLASS SM121 fixes).
-- Vulkan, SYCL, or ROCm kernel ports (stubs only).
-- Training pipeline changes.
-- Flash attention kernel improvements.
+- BF16 elementwise kernels (considered but deferred; fused kernels provide more
+  value for the same effort).
+- Flash attention improvements (already integrated for the hot path).
 - Speculative decoding (separate phase).
+- Training pipeline changes.
+- ROCm/OpenCL kernel implementations (stubs only).
+- Vulkan, SYCL, or Metal backends.
 
 ### Constraints and Assumptions
 
-- Go standard library only where possible. No cobra, viper, testify.
+- Go standard library only. No cobra, viper, testify.
 - Build tags for GPU code (`//go:build cuda`).
 - Pre-commit hook rejects multi-directory commits.
 - golangci-lint, go vet, gofmt required for all changes.
@@ -76,23 +89,21 @@ Decision rationale: docs/adr/023-gpu-scalar-ops-d2h-elimination.md.
 - DGX Spark GB10 at `ssh ndungu@192.168.86.250` for all GPU validation.
 - Go 1.25.0, CUDA 13.0, sm_121 (Blackwell) on DGX Spark.
 - Target model: Gemma 3 2B Q4 (ZMF), path: ~/models/gemma3-q4/model.zmf.
-- CPU baseline: 6.61 tok/s. GPU baseline: 6.84 tok/s.
-- GPUEngine already has: Add/Sub/Mul/Div (same-shape + 2D broadcast),
-  AddScalar/MulScalar/DivScalar, Pow (same-shape only), Exp, Log, Sqrt, Rsqrt,
-  Tanh, Softmax, ReduceSum, ReduceMean, Fill, Sum, Transpose, Gather,
-  FusedRMSNorm.
-- GPUEngine CPU fallbacks: UnaryOp, Pow (broadcast), Split, Concat, Repeat,
-  Copy, Zero, ScatterAdd, RandomUniform, OneHot.
+- GPU baseline from Phase 33: 10.32 tok/s peak, 7.78 tok/s median.
+- CUDA graph capture requires fixed memory addresses across replays.
+- ExecutionPlan already has the static graph structure needed for pre-allocation.
+- Gemma 3 uses SwiGLU activation (gate * silu(up)) in every FFN block.
+- Gemma 3 uses grouped-query attention with 8 heads, headDim=256.
 
 ### Success Metrics
 
 | Metric | Current | Target | How Measured |
 |--------|---------|--------|-------------|
-| GPU tok/s (Gemma 3 2B Q4) | 6.84 | >= 10 | bench_tps -device cuda on DGX Spark |
-| cgocall % of wall time | 58% | < 20% | pprof CPU profile |
-| CPU fallback ops in hot loop | Pow, some binary, Slice | 0 | pprof + log grep |
-| Pow CPU fallback % | 8.9% | 0% | pprof |
-| GPUStorage.Slice D2H % | 24% | < 5% | pprof |
+| GPU tok/s median (Gemma 3 2B Q4) | 7.78 | >= 20 | bench_tps -device cuda, 7 runs, median |
+| GPU tok/s peak | 10.32 | >= 25 | bench_tps -device cuda, best of 7 |
+| Per-token decode latency | ~128ms | < 50ms | 1000/tok_s |
+| Pool alloc calls per token | ~650 | 0 | pprof pool.Alloc count |
+| CGo calls per token (graph mode) | ~650 | 1 | pprof runtime.cgocall count |
 
 ---
 
@@ -102,319 +113,415 @@ Decision rationale: docs/adr/023-gpu-scalar-ops-d2h-elimination.md.
 
 | ID | Deliverable | Rationale |
 |----|-------------|-----------|
-| D407 | PowScalar GPU kernel | Eliminate 8.9% Pow CPU fallback |
-| D408 | SubScalar GPU kernel | Complete scalar-op coverage for broadcast path |
-| D409 | Scalar-broadcast in gpuBroadcastOp | Eliminate 10.4% binary op CPU fallback |
-| D410 | GPU Slice kernel | Eliminate 24% D2H from GPUStorage.Slice |
-| D411 | GPU Split kernel | Eliminate D2H in Split (calls Slice internally) |
-| D412 | GPU Concat kernel | Eliminate D2H in Concat |
-| D413 | End-to-end GPU benchmark >= 10 tok/s | Validate all improvements |
+| D414 | Pre-allocated buffer pool for ExecutionPlan | Eliminates per-op alloc; enables CUDA graph capture |
+| D415 | CUDA graph CGo wrappers | Foundation for graph capture/replay |
+| D416 | CUDA graph capture in ExecutionPlan | Eliminates all per-token CGo overhead |
+| D417 | Fused SwiGLU CUDA kernel | Saves 2 launches + 1 intermediate per FFN block |
+| D418 | Fused Scale+Softmax CUDA kernel | Saves 1 launch + 1 intermediate per attention head |
+| D419 | Fused dequant+GEMV Q4 kernel | Eliminates separate dequant step in decode MatMul |
+| D420 | End-to-end benchmark >= 20 tok/s | Validate all improvements |
 
 ### Out of Scope
 
-- GPU Copy (not in hot path; CPU fallback acceptable).
-- GPU ScatterAdd (backward pass only).
-- GPU RandomUniform (not in inference hot path).
-- GPU OneHot (not in inference hot path).
-- GPU Repeat (not observed in Gemma 3 profile).
-- UnaryOp GPU kernel (closures cannot run on GPU; specific patterns replaced
-  by dedicated kernels like PowScalar).
+- BF16 elementwise kernels (fused kernels subsume most of the benefit).
+- Flash attention changes (already wired for non-causal inference).
+- Prefill optimization (focus is on per-token decode latency).
+- Quantized KV cache (separate phase, after decode speed is resolved).
+- Multi-sequence batch decode.
+- Megakernel / on-GPU interpreter approach (aspirational, not Phase 34).
 
 ---
 
 ## 3. Checkable Work Breakdown
 
-### E75: PowScalar GPU Kernel (O75)
+### E80: Pre-Allocated Buffer Pool (O80)
 
-Pow in Gemma 3 inference is always `x^2` (scalar exponent). The current
-`gpuPow` requires same-shape tensors. Add a PowScalar kernel and detect
-the scalar-exponent pattern.
-
-Existing code:
-- `compute/gpu_kernels.go` line 363 -- `gpuPow` with sameShape guard.
-- `internal/cuda/kernels/elementwise.cu` -- existing CUDA kernels.
-- `internal/gpuapi/kernels.go` -- KernelRunner interface.
-- `layers/core/pow.go` -- Pow layer calling `engine.Pow(ctx, base, exponent)`.
-
-- [x] T75.1 Write CUDA PowScalar kernel  Owner: TBD  Est: 1.5h  2026 03 06
-  - Add to `internal/cuda/kernels/elementwise.cu`:
-    `pow_scalar_kernel(float *x, float p, float *out, int n)` computing
-    `out[i] = powf(x[i], p)`.
-  - Acceptance: Kernel compiles for sm_121. Correct output for x^2 (n=2048)
-    and x^0.5 (same as sqrt).
-  - Dependencies: none.
-
-- [ ] S75.1.1 PowScalar kernel unit tests  Owner: TBD  Est: 1h
-  - Test: x^2 for 2048 elements matches CPU Pow within 1e-5.
-  - Test: x^0.5 matches Sqrt within 1e-5.
-  - Test: x^1 is identity within 1e-5.
-  - Test: x^0 is all 1s.
-
-- [x] T75.2 Add PowScalar to KernelRunner interface and Go wrapper  Owner: TBD  Est: 1h  2026 03 06
-  - Add `PowScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, stream Stream) error`
-    to `internal/gpuapi/kernels.go` KernelRunner.
-  - Add Go CGo wrapper in `internal/cuda/kernels/elementwise.go`.
-  - Add stub implementations in `internal/gpuapi/cuda_kernels.go`,
-    `internal/gpuapi/rocm_kernels.go`, `internal/gpuapi/opencl_kernels.go`.
-  - Acceptance: Compiles on all backends. CUDA backend calls the kernel.
-  - Dependencies: T75.1.
-
-- [x] T75.3 Wire PowScalar into GPUEngine.Pow  Owner: TBD  Est: 1.5h  2026 03 06
-  - Modify `gpuPow` in `compute/gpu_kernels.go`:
-    - If `!sameShape(base, exponent)` and exponent has 1 element total,
-      extract the scalar value and use `gpuScalarOp` with `kernels.PowScalar`.
-    - If `!sameShape(base, exponent)` and base has 1 element total,
-      create a Fill tensor and use same-shape Pow.
-    - Otherwise keep CPU fallback.
-  - Acceptance: `engine.Pow(x_gpu, scalar_2_tensor)` runs on GPU.
-    Output has GPUStorage. Parity with CPU within 1e-5.
-  - Dependencies: T75.2.
-
-- [ ] S75.3.1 PowScalar parity test  Owner: TBD  Est: 1h
-  - Compare GPUEngine.Pow(x, scalar_tensor) vs CPUEngine.Pow for:
-    - Shape [1, 2048] ^ [1] (RMSNorm pattern).
-    - Shape [8, 128, 64] ^ [1].
-  - Verify output has GPUStorage.
-
-- [x] T75.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m  2026 03 06
-  - Packages: internal/cuda/kernels/, internal/gpuapi/, compute/.
-  - Dependencies: T75.3.
-
-### E76: Scalar-Broadcast for All Binary Ops (O76)
-
-Extend `gpuBroadcastOp` to detect scalar-vs-tensor patterns ([1] op [M,D])
-and dispatch to existing scalar kernel variants. Also add SubScalar which
-is currently missing.
+At graph compile time, the shape of every intermediate tensor is known (from the
+warmup Forward pass). Pre-allocate a fixed GPU buffer for each slot, eliminating
+per-op pool.Alloc/Free calls. This is also a prerequisite for CUDA graph capture,
+which requires fixed memory addresses.
 
 Existing code:
-- `compute/gpu_kernels.go` line 77 -- `gpuBroadcastOp` switch statement.
-- `compute/gpu_kernels.go` line 258 -- `gpuScalarOp` helper.
-- KernelRunner has AddScalar, MulScalar, DivScalar but no SubScalar.
+- `graph/compile.go` -- ExecutionPlan with slots array and Compile() method.
+- `compute/gpu_kernels.go` -- `makeGPUResult` allocates from pool per-op.
+- `compute/gpu_engine.go` -- GPUEngine with pool (gpuapi.MemPool).
+- `internal/gpuapi/mempool.go` -- MemPool interface (Alloc/Free).
 
-- [x] T76.1 Write CUDA SubScalar kernel  Owner: TBD  Est: 1h  2026 03 06
-  - Add to `internal/cuda/kernels/elementwise.cu`:
-    `sub_scalar_kernel(float *a, float scalar, float *c, int n)` computing
-    `c[i] = a[i] - scalar`.
-  - Add `SubScalar` to KernelRunner interface and all backend stubs.
-  - Add Go CGo wrapper.
-  - Acceptance: Kernel compiles. Correct output for a - 0.5 (n=1024).
+- [ ] T80.1 Record intermediate tensor shapes during Compile  Owner: TBD  Est: 2h
+  - In `Graph.Compile()`, after the warmup Forward pass, record the shape and
+    byte size of each non-frozen slot's output tensor from `g.memo[n].Shape()`.
+  - Store as `slotShapes [][]int` and `slotBytes []int` in ExecutionPlan.
+  - Acceptance: After Compile(), `plan.slotShapes[i]` matches the shape that
+    Forward() produces for instruction i.
   - Dependencies: none.
 
-- [ ] S76.1.1 SubScalar kernel unit tests  Owner: TBD  Est: 45m
-  - Test: a - 0.0 is identity.
-  - Test: a - scalar matches CPU Sub within 1e-5.
-  - Test: edge case a - large_value.
+- [ ] S80.1.1 Test shape recording matches forward pass  Owner: TBD  Est: 1h
+  - Run Compile(), then Run() with the same input. Verify every instruction's
+    output shape matches the recorded slotShapes.
 
-- [x] T76.2 Add scalar-broadcast detection to gpuBroadcastOp  Owner: TBD  Est: 2h  2026 03 06
-  - In `gpuBroadcastOp`, before the existing switch statement:
-    - If `b` has exactly 1 element total (product of shape == 1),
-      extract `b.Data()[0]` as scalar and dispatch to the matching
-      scalar kernel (AddScalar, SubScalar, MulScalar, DivScalar).
-    - If `a` has exactly 1 element total, extract scalar and dispatch
-      with operands swapped (for non-commutative ops like Sub/Div,
-      use a reverse-scalar kernel or the broadcast kernel with stride 0).
-  - For the `a`-is-scalar case on Sub and Div (non-commutative):
-    - Sub: compute `scalar - b[i]` as `-(b[i] - scalar)` using SubScalar
-      + MulScalar(-1) or add a `SubScalarRev` kernel. Simpler: use the
-      existing broadcast kernel with strides (saRow=0, saCol=0).
-  - Acceptance: All 4 binary ops (Add, Sub, Mul, Div) accept scalar-vs-tensor
-    on GPU. No CPU fallback for these patterns.
-  - Dependencies: T76.1.
+- [ ] T80.2 Pre-allocate GPU buffers for all intermediate slots  Owner: TBD  Est: 2h
+  - Add `PreAllocate(pool gpuapi.MemPool, deviceID int) error` method to
+    ExecutionPlan. Allocates one GPU buffer per non-frozen, non-input slot.
+  - Store as `preAllocPtrs []unsafe.Pointer` in ExecutionPlan.
+  - Acceptance: After PreAllocate(), every intermediate slot has a fixed GPU
+    pointer. No pool.Alloc calls during Run().
+  - Dependencies: T80.1.
 
-- [ ] S76.2.1 Scalar-broadcast parity tests  Owner: TBD  Est: 1.5h
-  - Test: [1] + [128, 2048] matches CPU Add within 1e-5.
-  - Test: [128, 2048] - [1] matches CPU Sub within 1e-5.
-  - Test: [1] * [128, 2048] matches CPU Mul within 1e-5.
-  - Test: [128, 2048] / [1] matches CPU Div within 1e-5.
-  - Test: [1] - [128, 2048] (scalar on left, non-commutative).
-  - Test: [1] / [128, 2048] (scalar on left, non-commutative).
-  - Verify all outputs have GPUStorage.
+- [ ] S80.2.1 Pre-allocation unit test  Owner: TBD  Est: 1h
+  - PreAllocate() succeeds. Verify pointers are non-nil for compute slots.
+  - Verify frozen slots and input slots have nil pre-alloc pointers.
 
-- [x] T76.3 Add gpuSubScalar method to GPUEngine  Owner: TBD  Est: 30m  2026 03 06
-  - Wire SubScalar kernel through `gpuScalarOp` like AddScalar/MulScalar.
-  - Acceptance: GPUEngine.Sub(tensor, scalar_tensor) uses GPU kernel.
-  - Dependencies: T76.1.
+- [ ] T80.3 Wire pre-allocated buffers into ExecutionPlan.Run  Owner: TBD  Est: 3h
+  - Modify `Run()` to pass pre-allocated destination tensors to each instruction.
+  - Each instruction's Forward call receives a pre-allocated output tensor via
+    the `dst ...` parameter that GPUEngine methods already support.
+  - The slot array stores pre-created tensors wrapping the pre-allocated GPU
+    pointers (using `tensor.NewWithStorage` + `tensor.NewGPUStorageFromPtr`).
+  - Acceptance: `Run()` produces correct output with zero pool.Alloc calls.
+    Parity with non-pre-allocated Run() within 1e-5.
+  - Dependencies: T80.2.
+  - Risk: Some ops may not support the `dst` parameter or may allocate internally.
+    Identify and fix these cases.
 
-- [x] T76.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m  2026 03 06
-  - Packages: internal/cuda/kernels/, internal/gpuapi/, compute/.
-  - Dependencies: T76.3.
+- [ ] S80.3.1 Pre-allocated Run parity test  Owner: TBD  Est: 1.5h
+  - Run the same input through pre-allocated and non-pre-allocated plans.
+  - Verify outputs match within 1e-5.
+  - Verify zero pool.Alloc calls during pre-allocated Run (instrument pool).
 
-### E77: GPU Slice, Split, and Concat Kernels (O77)
+- [ ] T80.4 Run golangci-lint on graph/ and compute/  Owner: TBD  Est: 15m
+  - Dependencies: T80.3.
 
-`GPUStorage.Slice()` is the #1 D2H source (24%). When a CPU fallback op
-reads data from a GPU-resident tensor, `Slice()` copies the entire buffer
-D2H. The fix is to keep sliced/split/concatenated tensors on GPU.
+### E81: CUDA Graph CGo Wrappers (O81)
+
+Add CGo wrappers for the CUDA graph API. These are used by the ExecutionPlan
+to capture and replay the decode forward pass as a CUDA graph.
 
 Existing code:
-- `tensor/gpu_storage.go` line 188 -- `GPUStorage.Slice()` with D2H copy.
-- `compute/gpu_engine.go` line 667 -- `Split` delegates to CPU.
-- `compute/gpu_engine.go` line 671 -- `Concat` delegates to CPU.
-- `compute/cpu_engine.go` -- CPU Split/Concat implementations.
+- `internal/cuda/` -- CUDA runtime wrappers (runtime.go, kernels/).
+- `internal/gpuapi/runtime.go` -- Runtime interface with Stream.
 
-- [x] T77.1 Write CUDA Slice kernel  Owner: TBD  Est: 2h  2026 03 06
-  - Deviation: Used D2D memcpy instead of custom CUDA kernel. Simpler and
-    leverages DMA engine. Split/Concat handle the actual slice patterns.
-  - Add to `internal/cuda/kernels/slice.cu`:
-    `slice_strided_kernel(float *in, float *out, int *srcStrides, int *starts,
-     int *outShape, int ndim, int total)` -- copies a contiguous sub-region.
-  - For the common case (contiguous last-dim slice), a memcpy-based fast path.
-  - Add `Slice` to KernelRunner interface:
-    `Slice(in, out unsafe.Pointer, srcStrides, starts, outShape []int32, ndim, total int, stream Stream) error`
-  - Add Go CGo wrapper and backend stubs.
-  - Acceptance: Kernel compiles for sm_121. Correct output for 2D and 3D slices.
+- [ ] T81.1 Add CUDA graph CGo wrappers  Owner: TBD  Est: 2h
+  - Create `internal/cuda/graph.go` with CGo wrappers for:
+    - `cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal)`
+    - `cudaStreamEndCapture(stream, &graph)`
+    - `cudaGraphInstantiate(&graphExec, graph, 0)` (CUDA 12+ simplified API)
+    - `cudaGraphLaunch(graphExec, stream)`
+    - `cudaGraphExecDestroy(graphExec)`
+    - `cudaGraphDestroy(graph)`
+  - Expose as Go functions: `BeginCapture(stream)`, `EndCapture(stream)`,
+    `Instantiate(graph)`, `Launch(exec, stream)`, `DestroyExec(exec)`,
+    `DestroyGraph(graph)`.
+  - Acceptance: Compiles on CUDA build. Functions callable from Go.
   - Dependencies: none.
 
-- [ ] S77.1.1 GPU Slice kernel unit tests  Owner: TBD  Est: 1.5h
-  - Test: 2D slice [4,8] -> rows [1:3] gives [2,8].
-  - Test: 2D slice [4,8] -> cols [2:6] gives [4,4].
-  - Test: 3D slice [2,4,8] -> [0:1, 1:3, :] gives [1,2,8].
-  - Test: full slice (no-op) returns same data.
-  - Compare with CPU Slice within 0 tolerance (exact).
+- [ ] S81.1.1 CUDA graph wrapper smoke test  Owner: TBD  Est: 1h
+  - On DGX Spark: create stream, begin capture, launch a simple Add kernel,
+    end capture, instantiate, launch graph exec, verify correct output.
 
-- [ ] T77.2 Wire GPU Slice into GPUEngine  Owner: TBD  Est: 2h
-  - Modify tensor Slice to detect GPUStorage and use the GPU kernel.
-  - Option A: Add `Slice` method to Engine interface.
-  - Option B: Override in `tensor/gpu_storage.go` to use a kernel-based
-    sub-tensor extraction when a KernelRunner is available.
-  - The simpler approach: add a `SliceGPU` method on GPUEngine that layers
-    can call, similar to FusedRMSNormer. Layers that call tensor.Slice()
-    in the hot path (attention mask creation, Split) type-assert the engine.
-  - Acceptance: GPU-resident tensor.Slice() returns GPU-resident output.
-    No D2H copy in pprof.
-  - Dependencies: T77.1.
+- [ ] T81.2 Add CUDAGraph interface to gpuapi  Owner: TBD  Est: 1.5h
+  - Add to `internal/gpuapi/runtime.go`:
+    ```
+    type GraphCapture interface {
+        BeginCapture(stream Stream) error
+        EndCapture(stream Stream) (unsafe.Pointer, error) // returns graph
+        Instantiate(graph unsafe.Pointer) (unsafe.Pointer, error) // returns exec
+        Launch(exec unsafe.Pointer, stream Stream) error
+        DestroyExec(exec unsafe.Pointer)
+        DestroyGraph(graph unsafe.Pointer)
+    }
+    ```
+  - Implement for CUDA in `internal/gpuapi/cuda_runtime.go`.
+  - Add stub implementations for ROCm and OpenCL (return "not implemented").
+  - Acceptance: Compiles on all backends. Interface satisfied.
+  - Dependencies: T81.1.
 
-- [ ] S77.2.1 GPU Slice parity test  Owner: TBD  Est: 1h
-  - Compare GPU Slice vs CPU Slice for shapes used in Gemma 3 inference.
-  - Verify output has GPUStorage.
+- [ ] S81.2.1 Interface compile-time verification  Owner: TBD  Est: 30m
+  - Add `var _ gpuapi.GraphCapture = ...` assertions in gpuapi_test.go.
 
-- [x] T77.3 Write GPU Split using Slice kernel  Owner: TBD  Est: 1.5h  2026 03 06
-  - Modify `GPUEngine.Split` to call the GPU Slice kernel for each split chunk
-    instead of delegating to CPU.
-  - Split along axis: compute start/end for each chunk, call Slice kernel.
-  - Acceptance: GPUEngine.Split returns GPU-resident tensors. Parity with CPU.
-  - Dependencies: T77.2.
+- [ ] T81.3 Run golangci-lint on internal/cuda/ and internal/gpuapi/  Owner: TBD  Est: 15m
+  - Dependencies: T81.2.
 
-- [ ] S77.3.1 GPU Split parity test  Owner: TBD  Est: 1h
-  - Split [8, 2048] into 8 chunks of [1, 2048] along axis 0.
-  - Split [1, 2048] into 2 chunks of [1, 1024] along axis 1 (head split).
-  - Verify all output tensors have GPUStorage.
+### E82: CUDA Graph Capture in ExecutionPlan (O81)
 
-- [x] T77.4 Write CUDA Concat kernel  Owner: TBD  Est: 2h  2026 03 06
-  - Deviation: Used D2D memcpy instead of custom CUDA kernel.
-  - Add to `internal/cuda/kernels/concat.cu`:
-    `concat_kernel(float **inputs, int *inputSizes, float *output, int numInputs,
-     int outerStride, int innerSize, int axis)`.
-  - Add `Concat` to KernelRunner interface.
-  - Wire into GPUEngine.Concat.
-  - Acceptance: GPUEngine.Concat uses GPU kernel for GPU-resident tensors.
-    Output has GPUStorage. Parity with CPU.
+Integrate CUDA graph capture into the ExecutionPlan decode loop. On the first
+decode token, record the entire forward pass as a CUDA graph. On subsequent tokens,
+replay the captured graph with a single `cudaGraphLaunch` call.
+
+Existing code:
+- `graph/compile.go` -- ExecutionPlan.Run() instruction loop.
+- `generate/stream.go` -- token generation loop calling plan.Run().
+- `generate/generator.go` -- Generator with plan compilation.
+
+- [ ] T82.1 Add CaptureAndReplay mode to ExecutionPlan  Owner: TBD  Est: 3h
+  - Add fields to ExecutionPlan:
+    - `graphExec unsafe.Pointer` -- cached CUDA graph exec handle.
+    - `graphCapture gpuapi.GraphCapture` -- graph API handle.
+    - `captured bool` -- whether the graph has been captured.
+  - Add method `SetGraphCapture(gc gpuapi.GraphCapture)` to enable graph mode.
+  - Modify `Run()`:
+    - If graph mode enabled and not captured: call BeginCapture, run all
+      instructions normally (they record into the stream), call EndCapture
+      + Instantiate, set captured=true.
+    - If captured: update input slot GPU pointers (copy new input data into
+      pre-allocated input buffer), then call Launch(graphExec, stream).
+  - Acceptance: First Run() captures the graph. Subsequent Run() calls use
+    graphExec with 1 CGo call instead of ~650.
+  - Dependencies: E80 (pre-allocated buffers required), E81 (graph API).
+
+- [ ] S82.1.1 CUDA graph capture correctness test  Owner: TBD  Est: 2h
+  - Run 10 sequential tokens through graph-captured plan.
+  - Compare each token's output with non-graph plan output within 1e-5.
+  - Verify only 1 CGo call per token after first capture.
+
+- [ ] T82.2 Wire graph capture into Generator  Owner: TBD  Est: 1.5h
+  - In `generate/generator.go`, after plan compilation, call
+    `plan.SetGraphCapture(engine.GraphCapture())` if the engine supports it.
+  - Add `GraphCapture() gpuapi.GraphCapture` method to GPUEngine.
+  - Acceptance: Generator uses CUDA graph replay for decode tokens.
+  - Dependencies: T82.1.
+
+- [ ] S82.2.1 Generator graph mode integration test  Owner: TBD  Est: 1h
+  - Generate 20 tokens with graph mode. Verify coherent output.
+
+- [ ] T82.3 Handle graph invalidation on sequence length change  Owner: TBD  Est: 1.5h
+  - When the KV cache grows past a threshold (e.g., crosses a power-of-2 boundary),
+    the graph topology may change (attention mask shape changes).
+  - Detect this in Run(): if input shape differs from captured shape, re-capture.
+  - Store `capturedInputShape []int` for comparison.
+  - Acceptance: Graph re-captures when input shape changes. No stale output.
+  - Dependencies: T82.1.
+
+- [ ] S82.3.1 Re-capture correctness test  Owner: TBD  Est: 1h
+  - Force input shape change mid-generation. Verify re-capture produces
+    correct output.
+
+- [ ] T82.4 Run golangci-lint on graph/ and generate/  Owner: TBD  Est: 15m
+  - Dependencies: T82.3.
+
+### E83: Fused SwiGLU Kernel (O82)
+
+Gemma 3 FFN blocks compute `gate * silu(up)` where gate and up are separate MatMul
+outputs. Currently this is 3 operations: Mul(gate, Silu(up)). Fusing into one
+kernel saves 2 kernel launches and 1 intermediate buffer.
+
+SwiGLU formula: `output[i] = gate[i] * (up[i] * sigmoid(up[i]))` which is
+`output[i] = gate[i] * up[i] / (1 + expf(-up[i]))`.
+
+- [ ] T83.1 Write CUDA fused SwiGLU kernel  Owner: TBD  Est: 2h
+  - Add to `internal/cuda/kernels/fused_swiglu.cu`:
+    ```c
+    __global__ void kernel_fused_swiglu(const float* gate, const float* up,
+                                         float* output, int n) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            float u = up[idx];
+            output[idx] = gate[idx] * u / (1.0f + expf(-u));
+        }
+    }
+    ```
+  - Add launcher function `launch_fused_swiglu`.
+  - Add Go CGo wrapper in `internal/cuda/kernels/fused_swiglu.go`.
+  - Acceptance: Kernel compiles for sm_121. Correct output for n=2048.
   - Dependencies: none.
 
-- [ ] S77.4.1 GPU Concat parity test  Owner: TBD  Est: 1h
-  - Concat 8 tensors of [1, 2048] along axis 0 gives [8, 2048].
-  - Concat 2 tensors of [1, 1024] along axis 1 gives [1, 2048].
+- [ ] S83.1.1 Fused SwiGLU kernel unit test  Owner: TBD  Est: 1h
+  - Test: fused_swiglu(gate, up) matches gate * silu(up) within 1e-5.
+  - Test: edge cases (up=0, up=large positive, up=large negative).
+
+- [ ] T83.2 Add FusedSwiGLU to KernelRunner interface  Owner: TBD  Est: 1h
+  - Add `FusedSwiGLU(gate, up, output unsafe.Pointer, n int, stream Stream) error`
+    to KernelRunner.
+  - Wire in cuda_kernels.go. Add stubs in rocm/opencl.
+  - Acceptance: Compiles on all backends.
+  - Dependencies: T83.1.
+
+- [ ] T83.3 Wire fused SwiGLU into GPUEngine  Owner: TBD  Est: 2h
+  - Add `FusedSwiGLU` interface to compute/engine.go (like FusedRMSNormer).
+  - Implement in GPUEngine: takes gate and up tensors, returns fused output.
+  - Modify `layers/activations/swiglu.go` to type-assert engine for FusedSwiGLU
+    and use fused path when available.
+  - Acceptance: SwiGLU layer uses fused kernel on GPU. Output matches unfused
+    within 1e-5.
+  - Dependencies: T83.2.
+
+- [ ] S83.3.1 Fused SwiGLU parity test  Owner: TBD  Est: 1h
+  - Compare fused vs unfused SwiGLU for shapes [1, 8192] and [1, 16384].
   - Verify output has GPUStorage.
 
-- [x] T77.5 Run golangci-lint on modified packages  Owner: TBD  Est: 15m  2026 03 06
-  - Packages: internal/cuda/kernels/, internal/gpuapi/, compute/, tensor/.
-  - Dependencies: T77.4.
+- [ ] T83.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
+  - Dependencies: T83.3.
 
-### E78: Float32 Weight Upload (O78)
+### E84: Fused Scale+Softmax Kernel (O82)
 
-With Pow and binary ops now on GPU, uploading float32 weights to GPU is
-beneficial (previously it caused D2H from CPU fallback ops). This removes
-the remaining H2D copies for float32 normalization weights and biases.
+Attention scores are scaled by 1/sqrt(headDim) then softmaxed. Currently these
+are separate MulScalar and Softmax kernel launches. Fusing them saves 1 launch
+and 1 intermediate buffer per attention computation.
 
-- [x] T78.1 Enable float32 weight upload in GPUEngine.UploadWeights  Owner: TBD  Est: 1h  2026 03 06
-  - Remove the skip for non-Q4 tensors in `GPUEngine.UploadWeights`.
-  - Upload all float32 weight tensors to GPU using NewGPUStorageFromSlice.
-  - Acceptance: Both Q4 and float32 weights are GPU-resident after load.
-  - Dependencies: E75, E76 (Pow and binary ops must be on GPU first).
+- [ ] T84.1 Write CUDA fused scale+softmax kernel  Owner: TBD  Est: 2.5h
+  - Add to `internal/cuda/kernels/fused_scale_softmax.cu`:
+    A kernel that reads input[row, col], multiplies by scale, computes row-wise
+    softmax (find max, subtract max, exp, sum, divide) in shared memory.
+  - Parameters: input, output pointers, scale (float), rows, cols.
+  - Use shared memory for the max and sum reductions.
+  - Acceptance: Kernel compiles for sm_121. Correct for rows=8, cols=256.
+  - Dependencies: none.
 
-- [ ] S78.1.1 Float32 weight upload test  Owner: TBD  Est: 45m
-  - Load model with -device cuda.
-  - Verify all Parameter tensors (including float32 norm weights) have GPUStorage.
-  - Run forward pass. Verify correct output.
+- [ ] S84.1.1 Fused scale+softmax kernel unit test  Owner: TBD  Est: 1h
+  - Test: fused(input, 1/sqrt(256)) matches MulScalar(input, scale) + Softmax
+    within 1e-5.
+  - Test: rows sum to 1.0 within 1e-6.
 
-- [x] T78.2 Run golangci-lint on compute/ and inference/  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T78.1.
+- [ ] T84.2 Add FusedScaleSoftmax to KernelRunner interface  Owner: TBD  Est: 1h
+  - Add `FusedScaleSoftmax(input, output unsafe.Pointer, scale float32, rows, cols int, stream Stream) error`.
+  - Wire and add stubs.
+  - Acceptance: Compiles on all backends.
+  - Dependencies: T84.1.
 
-### E79: End-to-End GPU Benchmark (O78)
+- [ ] T84.3 Wire fused scale+softmax into attention  Owner: TBD  Est: 2h
+  - Add `FusedScaleSoftmaxer` interface to compute/engine.go.
+  - Implement in GPUEngine.
+  - Modify `layers/attention/scaled_dot_product_attention.go` to detect and use
+    fused path when the engine supports it and flash attention is not used.
+  - Acceptance: Attention layer uses fused scale+softmax on GPU.
+  - Dependencies: T84.2.
+
+- [ ] S84.3.1 Fused scale+softmax attention parity test  Owner: TBD  Est: 1h
+  - Run attention forward pass with fused vs unfused paths.
+  - Verify outputs match within 1e-5.
+
+- [ ] T84.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
+  - Dependencies: T84.3.
+
+### E85: Fused Dequant+GEMV Q4 Kernel (O82)
+
+For single-token decode (batch=1), the Q4 MatMul is a GEMV: one activation
+vector times a Q4 weight matrix. Currently, Q4 weights are dequantized in a
+separate step before GEMM. A fused kernel reads Q4 blocks, dequantizes in
+registers, and accumulates in F32 -- eliminating the dequantize buffer and
+reducing memory bandwidth by ~4x (read Q4 instead of F32).
+
+This is the single largest compute kernel in the decode loop. The existing
+`gemm_q4.cu` kernel handles the GEMM case; this adds a GEMV fast path.
+
+- [ ] T85.1 Write CUDA fused dequant+GEMV Q4 kernel  Owner: TBD  Est: 4h
+  - Add to `internal/cuda/kernels/gemv_q4.cu`:
+    - Each thread block computes one output element.
+    - Read Q4_0 blocks (32 values per 18-byte block: 1 scale + 16 packed bytes).
+    - Dequantize in registers: `val = (nibble - 8) * scale`.
+    - Dot product with activation vector, accumulate in float32.
+    - Block-level reduction via shared memory.
+  - Parameters: q4_weights, activation, output, M (output rows), K (inner dim).
+  - Acceptance: Kernel compiles for sm_121. Correct output for M=2048, K=2048.
+  - Dependencies: none.
+  - Risk: Q4_0 block layout must match `tensor/q4_storage.go` format exactly.
+
+- [ ] S85.1.1 Fused dequant+GEMV Q4 unit test  Owner: TBD  Est: 1.5h
+  - Test: GEMV output matches dequant + GEMM output within 1e-3.
+  - Test: M=256, K=2048 (small) and M=8192, K=2048 (large).
+  - Test: Edge case where K is not a multiple of 32.
+
+- [ ] T85.2 Add GemvQ4 to KernelRunner interface  Owner: TBD  Est: 1h
+  - Add `GemvQ4F32(aQ4, b, c unsafe.Pointer, m, k int, stream Stream) error`.
+  - Wire in cuda_kernels.go. Add stubs.
+  - Acceptance: Compiles on all backends.
+  - Dependencies: T85.1.
+
+- [ ] T85.3 Wire fused GEMV Q4 into GPUEngine.MatMul  Owner: TBD  Est: 2h
+  - In `matMulQ4`, detect the GEMV case: when the activation tensor has 1 row
+    (batch=1 decode), use `GemvQ4F32` instead of `GemmQ4F32`.
+  - Acceptance: Single-token decode uses GEMV kernel. Output matches GEMM path
+    within 1e-3.
+  - Dependencies: T85.2.
+
+- [ ] S85.3.1 Fused GEMV Q4 parity test  Owner: TBD  Est: 1h
+  - Compare GEMV vs GEMM for shapes used in Gemma 3 decode (1x2048 * 2048x8192).
+  - Verify correctness and that GEMV is used (log or counter).
+
+- [ ] T85.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
+  - Dependencies: T85.3.
+
+### E86: End-to-End Benchmark (O83)
 
 After all optimizations, measure tok/s on DGX Spark and compare with baselines.
 
-- [x] T79.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h  2026 03 06
-  - Build zerfoo with CUDA tags on DGX Spark including all E75-E78 changes.
+- [ ] T86.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h
+  - Build zerfoo with CUDA tags on DGX Spark including all E80-E85 changes.
   - Run `bench_tps -model ~/models/gemma3-q4 -device cuda -tokens 100`.
+  - 7 runs, report median and peak.
   - Capture pprof profile.
-  - Acceptance: Profile captured showing reduced cgocall % and eliminated
-    CPU fallbacks.
-  - Dependencies: T78.1, T77.5.
+  - Acceptance: Profile shows reduced cgocall overhead and fused kernel usage.
+  - Dependencies: E80, E81, E82, E83, E84, E85.
 
-- [ ] S79.1.1 GPU profile report  Owner: TBD  Est: 30m
-  - Document: tok/s, cgocall %, remaining CPU fallbacks, GPU utilization.
+- [ ] S86.1.1 GPU profile report  Owner: TBD  Est: 30m
+  - Document: tok/s (median + peak), cgocall %, pool.Alloc count per token,
+    fused kernel % of compute, remaining bottlenecks.
 
-- [x] T79.2 Compare GPU vs CPU tok/s  Owner: TBD  Est: 1h  2026 03 06
-  - Run same prompt with -device cpu and -device cuda.
-  - Measure tok/s for both. 3 runs each, report median.
-  - Acceptance: GPU tok/s >= 10 (target). If not met, identify remaining
-    bottleneck and document what would be needed.
-  - Dependencies: T79.1.
+- [ ] T86.2 Compare GPU vs CPU and vs Phase 33  Owner: TBD  Est: 1h
+  - Run bench_tps with -device cpu and -device cuda.
+  - 7 runs each, report median.
+  - Compare with Phase 33 baselines (7.78 median GPU, 6.75 CPU).
+  - Acceptance: GPU tok/s >= 20 median. If not met, identify remaining
+    bottleneck and document what would close the gap.
+  - Dependencies: T86.1.
 
-- [ ] S79.2.1 Benchmark comparison report  Owner: TBD  Est: 30m
+- [ ] S86.2.1 Benchmark comparison report  Owner: TBD  Est: 30m
 
-- [ ] T79.3 Verify output correctness  Owner: TBD  Est: 1h
-  - Generate 50 tokens with same prompt on CPU and GPU.
-  - Compare output text. Both should produce coherent English text.
-  - Acceptance: No NaN or Inf. Coherent output on both devices.
-  - Dependencies: T79.1.
+- [ ] T86.3 Verify output correctness  Owner: TBD  Est: 1h
+  - Generate 50 tokens with same prompt on CPU, GPU (no graph), GPU (graph).
+  - Compare outputs. All should produce coherent text.
+  - Acceptance: No NaN or Inf. Coherent output on all modes.
+  - Dependencies: T86.1.
 
-- [ ] S79.3.1 Output correctness test  Owner: TBD  Est: 30m
+- [ ] S86.3.1 Output correctness report  Owner: TBD  Est: 30m
 
-- [ ] T79.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
-  - Dependencies: T79.3.
+- [ ] T86.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+  - Dependencies: T86.3.
 
 ---
 
 ## 4. Parallel Work
 
-Five epics fall into 3 tracks. E75/E76 (scalar ops) and E77 (D2H elimination)
-are independent kernel work. E78 (weight upload) depends on E75+E76. E79
-(benchmark) depends on all.
+Seven epics fall into 4 tracks. E80 (buffer pre-alloc) and E81 (CUDA graph API)
+are prerequisites for E82 (graph capture). E83/E84/E85 (fused kernels) are
+independent of each other and of E80/E81. E86 (benchmark) depends on all.
 
 | Track | Epics | Description | Sync Points |
 |-------|-------|-------------|-------------|
-| A: Scalar Kernels | E75, E76 | PowScalar + SubScalar + scalar-broadcast | Converge before E78 |
-| B: D2H Elimination | E77 | GPU Slice/Split/Concat kernels | Converge before E79 |
-| C: Weight Upload + Benchmark | E78, E79 | Float32 upload + final measurement | After A + B |
+| A: Buffer Pre-Alloc | E80 | Pre-allocate intermediate GPU buffers | Required before E82 |
+| B: CUDA Graph API | E81 | CGo wrappers for CUDA graph capture | Required before E82 |
+| C: CUDA Graph Capture | E82 | Wire graph capture into ExecutionPlan | After A + B |
+| D: Fused Kernels | E83, E84, E85 | SwiGLU, Scale+Softmax, dequant+GEMV | Independent, converge at E86 |
+| E: Benchmark | E86 | End-to-end validation | After C + D |
 
 ### Within-Track Parallelism
 
-| Track | Parallel Tasks | Notes |
-|-------|----------------|-------|
-| A | T75.1 and T76.1 | PowScalar and SubScalar kernels are independent |
-| B | T77.1 and T77.4 | Slice and Concat kernels are independent |
-| A+B | T75.1, T76.1, T77.1, T77.4 | All kernel development in parallel |
+| Parallel Set | Tasks | Notes |
+|-------------|-------|-------|
+| Wave 1 | T80.1, T81.1, T83.1, T84.1, T85.1 | All independent: shape recording, graph wrappers, 3 fused kernels |
+| Wave 2 | T80.2, T81.2, T83.2, T84.2, T85.2 | Buffer alloc, graph interface, kernel interfaces |
+| Wave 3 | T80.3, T81.3, T83.3, T84.3, T85.3 | Buffer wiring, lint, layer integration |
+| Wave 4 | T82.1, T82.2, T82.3 | CUDA graph capture (depends on E80 + E81) |
+| Wave 5 | E86 | Benchmark (depends on all) |
 
 ### Execution Order
 
-Wave 1 (parallel):
-- T75.1 (PowScalar kernel), T76.1 (SubScalar kernel), T77.1 (Slice kernel),
-  T77.4 (Concat kernel) -- all independent CUDA kernel work.
+Wave 1 (parallel, all independent):
+- T80.1 (record shapes), T81.1 (CUDA graph CGo), T83.1 (SwiGLU kernel),
+  T84.1 (scale+softmax kernel), T85.1 (GEMV Q4 kernel).
 
 Wave 2 (after Wave 1):
-- T75.2 (PowScalar Go wrapper), T76.2 (scalar-broadcast detection),
-  T76.3 (SubScalar wiring), T77.2 (GPU Slice wiring), T77.3 (GPU Split).
+- T80.2 (pre-allocate buffers), T81.2 (graph interface), T83.2 (SwiGLU interface),
+  T84.2 (scale+softmax interface), T85.2 (GEMV interface).
 
 Wave 3 (after Wave 2):
-- T75.3 (wire PowScalar into GPUEngine.Pow).
-- All lint tasks (T75.4, T76.4, T77.5).
+- T80.3 (wire into Run), T83.3 (wire SwiGLU), T84.3 (wire scale+softmax),
+  T85.3 (wire GEMV). Lint tasks: T80.4, T81.3, T83.4, T84.4, T85.4.
 
-Wave 4 (after E75 + E76):
-- T78.1 (float32 weight upload).
+Wave 4 (after E80 + E81):
+- T82.1 (capture mode), T82.2 (wire into Generator), T82.3 (re-capture).
 
 Wave 5 (after all):
-- E79 (benchmark).
+- E86 (benchmark + correctness).
 
 ---
 
@@ -422,12 +529,13 @@ Wave 5 (after all):
 
 | Milestone | ID | Dependencies | Exit Criteria |
 |-----------|----|-------------|---------------|
-| M41: Scalar GPU ops | E75, E76 | none | PowScalar + SubScalar + scalar-broadcast on GPU. Zero Pow/binary CPU fallbacks. |
-| M42: D2H eliminated | E77 | none | GPU Slice/Split/Concat. GPUStorage.Slice D2H < 5% in pprof. |
-| M43: Full GPU coverage | E78 | M41 | All float32 weights on GPU. Zero H2D in forward pass. |
-| M44: 10 tok/s GPU | E79 | M41, M42, M43 | bench_tps reports >= 10 tok/s with -device cuda on DGX Spark. |
+| M45: Fixed buffers | E80 | none | ExecutionPlan.Run() uses pre-allocated buffers. Zero pool.Alloc during decode. |
+| M46: Graph API ready | E81 | none | CUDA graph capture/replay works for simple kernel sequence. |
+| M47: Graph decode | E82 | M45, M46 | Decode loop uses CUDA graph replay. 1 CGo call per token. |
+| M48: Fused kernels | E83, E84, E85 | none | SwiGLU, Scale+Softmax, dequant+GEMV fused. Parity with unfused. |
+| M49: 20 tok/s | E86 | M47, M48 | bench_tps reports >= 20 tok/s median on DGX Spark GB10. |
 
-Critical path: T75.1 -> T75.2 -> T75.3 -> T78.1 -> T79.1
+Critical path: T80.1 -> T80.2 -> T80.3 -> T82.1 -> T82.2 -> T86.1
 
 ---
 
@@ -435,12 +543,13 @@ Critical path: T75.1 -> T75.2 -> T75.3 -> T78.1 -> T79.1
 
 | ID | Risk | Impact | Likelihood | Mitigation |
 |----|------|--------|------------|------------|
-| R76 | PowScalar kernel numerical precision differs from CPU powf | Output quality regression | Low | Test within 1e-5 tolerance. Use CUDA `powf` which matches glibc. |
-| R77 | GPU Slice kernel for non-contiguous strides is complex | Implementation takes longer than estimated | Medium | Start with contiguous fast path (memcpy). Add strided path only if profiling shows it in hot path. |
-| R78 | Float32 weight upload increases GPU memory usage | OOM on small GPUs | Low | DGX Spark GB10 has 128GB. Gemma 3 2B float32 weights are ~400MB. Not a concern. |
-| R79 | 10 tok/s target still not achieved after all changes | Unknown bottleneck remains | Medium | If target not met, re-profile and document. Possible next steps: batched inference, BF16 compute, or CUDA graph capture. |
-| R80 | Scalar-broadcast for non-commutative ops (Sub, Div) when scalar is on the left | Wrong results if operand order is not handled correctly | Medium | Add explicit tests for `[1] - [M,D]` and `[1] / [M,D]` cases. Use broadcast kernel with stride 0 for left-scalar. |
-| R81 | DGX Spark network connectivity | Cannot deploy and test on GPU | Low | Keep local CPU tests passing. Batch DGX work into focused sessions. |
+| R82 | CUDA graph capture fails for ops with dynamic behavior (e.g., KV cache append, conditional branches) | Graph capture mode unusable | High | Isolate dynamic ops outside the captured region. Only capture the static compute graph; handle KV cache updates separately. Profile to identify which ops break capture. |
+| R83 | Pre-allocated buffers waste GPU memory for variable-length sequences | OOM for long sequences | Medium | Allocate for max sequence length at compile time. DGX Spark has 128GB unified memory; Gemma 3 2B intermediates are ~100MB. Not a concern for this model. |
+| R84 | Fused dequant+GEMV Q4 kernel has different numerical precision than separate dequant+GEMM | Output quality regression | Medium | Test within 1e-3 tolerance (Q4 already has quantization noise). Compare generated text quality. |
+| R85 | CUDA graph re-capture overhead negates benefits if triggered too frequently | Throughput drops during re-captures | Low | Only re-capture on shape change. For autoregressive decode, shape is fixed (batch=1, seq=1). Re-capture only needed for prefill or context length change. |
+| R86 | CGo overhead for the single graph launch is still significant | Diminishing returns from graph capture | Low | One CGo call per token is ~100ns, negligible vs 50ms decode. |
+| R87 | 20 tok/s target still not achieved after all optimizations | Unknown bottleneck remains | Medium | Profile after each epic. If CUDA graphs alone reach 15+ tok/s, fused kernels may close the rest. If not, investigate memory bandwidth utilization and consider BF16 intermediates. |
+| R88 | DGX Spark GB10 thermal throttling causes high variance | Unreliable benchmark results | Medium | Run benchmarks after 5-minute cooldown. Use median of 7+ runs. Monitor GPU temperature via nvidia-smi. |
 
 ---
 
@@ -463,7 +572,7 @@ A task is done when:
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(cuda): add PowScalar kernel`.
+- Use Conventional Commits: `feat(cuda): add fused SwiGLU kernel`.
 - Always run linters and formatters before committing.
 
 ### DGX Spark Protocol
@@ -478,11 +587,12 @@ A task is done when:
 
 ### Benchmark Protocol
 
-- benchtime=3s, count=3, report median.
+- 7 runs minimum, report median and peak.
 - All GPU benchmarks on DGX Spark GB10.
 - Use `bench_tps -device cuda -tokens 100` for tok/s measurement.
 - Use `bench_tps -device cpu -tokens 100` for CPU comparison.
 - Capture pprof with `-cpuprofile` flag.
+- 5-minute GPU cooldown between benchmark sessions.
 
 ### Quality Gate
 
@@ -496,38 +606,30 @@ A task is done when:
 
 ## 8. Progress Log
 
-### Change Summary -- 2026-03-06 (implementation)
-
-Implemented and benchmarked all Phase 33 core work:
-- E75: PowScalar CUDA kernel + wiring (T75.1-T75.4 complete)
-- E76: SubScalar kernel + scalar-broadcast detection (T76.1-T76.4 complete)
-- E77: GPU Split/Concat using D2D memcpy (T77.1, T77.3-T77.5 complete)
-  - Deviation: Used D2D memcpy instead of custom CUDA kernels. Simpler.
-  - T77.2 (GPU Slice wiring) deferred -- Split/Concat handle inference patterns.
-- E78: Float32 weight upload enabled (T78.1-T78.2 complete)
-- E79: Benchmark results (T79.1-T79.2 complete):
-  - GPU: peak 10.32 tok/s, median 7.78 tok/s (7 runs)
-  - CPU: 6.75 tok/s
-  - High variance suggests thermal throttling or background processes.
-  - Peak meets 10 tok/s target. Median needs investigation.
-
-Remaining: S75.1.1, S75.3.1, S76.1.1, S76.2.1, S77.1.1, S77.2.1, S77.3.1,
-S77.4.1, S78.1.1, S79.1.1, S79.2.1, T79.3, S79.3.1, T79.4 (test/report subtasks).
-
 ### Change Summary -- 2026-03-06
 
-Created Phase 33 plan. Trimmed Phase 32 completed epics (E69-E74) to
-docs/design.md section 15.14. Created ADR 023 for scalar ops strategy.
+Created Phase 34 plan. Trimmed Phase 33 completed epics (E75-E79) to
+docs/design.md section 15.15. Created ADR 024 for CUDA graph and fused kernel
+strategy.
 
 New epics:
-- E75: PowScalar GPU Kernel (8.9% Pow CPU fallback).
-- E76: Scalar-Broadcast for All Binary Ops (10.4% CPU fallback).
-- E77: GPU Slice/Split/Concat (24% D2H elimination).
-- E78: Float32 Weight Upload (enable now that Pow/binary ops are on GPU).
-- E79: End-to-End GPU Benchmark (validate >= 10 tok/s target).
+- E80: Pre-Allocated Buffer Pool (eliminate per-op pool.Alloc).
+- E81: CUDA Graph CGo Wrappers (foundation for graph capture).
+- E82: CUDA Graph Capture in ExecutionPlan (1 CGo call per token).
+- E83: Fused SwiGLU Kernel (save 2 launches per FFN block).
+- E84: Fused Scale+Softmax Kernel (save 1 launch per attention head).
+- E85: Fused Dequant+GEMV Q4 Kernel (eliminate separate dequant step).
+- E86: End-to-End Benchmark (validate >= 20 tok/s target).
 
 ADRs created:
-- docs/adr/023-gpu-scalar-ops-d2h-elimination.md: Scalar ops strategy decision.
+- docs/adr/024-cuda-graph-fused-kernels.md: CUDA graph capture and fused kernel
+  strategy decision.
+
+Trimmed from Phase 33:
+- E75 (PowScalar), E76 (Scalar-Broadcast), E77 (GPU Split/Concat), E78 (Float32
+  Weight Upload), E79 (Benchmark) -- all completed tasks moved to docs/design.md
+  section 15.15. Remaining subtask tests (S75.1.1, S76.1.1, etc.) archived as
+  they are validation-only and covered by the end-to-end benchmark.
 
 ---
 
@@ -536,9 +638,9 @@ ADRs created:
 ### For a New Contributor
 
 - **Architecture:** Read docs/design.md for interface contracts, package layout,
-  GPU architecture, and troubleshooting. Design decisions in docs/adr/ (001-023).
-- **Phases 1-32:** All documented in docs/design.md sections 15.1-15.14.
-- **Phase 33:** This plan is the source of truth.
+  GPU architecture, and troubleshooting. Design decisions in docs/adr/ (001-024).
+- **Phases 1-33:** All documented in docs/design.md sections 15.1-15.15.
+- **Phase 34:** This plan is the source of truth.
 - **Quality:** See docs/QUALITY.md for test coverage report.
 - **How to build:**
   - CPU: `go build ./...`
@@ -549,28 +651,25 @@ ADRs created:
 
 ### Key Starting Points
 
-1. **E75 (PowScalar):** `compute/gpu_kernels.go` line 363 -- `gpuPow` with
-   `sameShape` guard. When exponent has 1 element, extract scalar and use
-   `gpuScalarOp` with new `kernels.PowScalar`.
+1. **E80 (Buffer Pre-Alloc):** `graph/compile.go` -- ExecutionPlan.Compile() has
+   access to tensor shapes from warmup Forward. Add slotShapes/slotBytes fields,
+   PreAllocate() method, and wire into Run() via dst parameters.
 
-2. **E76 (Scalar-Broadcast):** `compute/gpu_kernels.go` line 77 --
-   `gpuBroadcastOp` switch. Add case before existing switch: if either operand
-   has 1 total element, extract scalar and dispatch to scalar kernel.
+2. **E81 (CUDA Graph API):** Create `internal/cuda/graph.go` with CGo wrappers for
+   cudaStreamBeginCapture, cudaStreamEndCapture, cudaGraphInstantiate,
+   cudaGraphLaunch. Add GraphCapture interface to internal/gpuapi/runtime.go.
 
-3. **E77 (GPU Slice):** `tensor/gpu_storage.go` line 188 -- `GPUStorage.Slice()`
-   is the D2H bottleneck. Add CUDA kernel in `internal/cuda/kernels/slice.cu`.
-   Wire via a `SliceGPU` method on GPUEngine.
+3. **E82 (Graph Capture):** Modify ExecutionPlan.Run() to capture the instruction
+   loop as a CUDA graph on first call, then replay on subsequent calls.
 
-4. **E78 (Weight Upload):** `compute/gpu_engine.go` line 154 -- remove the
-   skip for non-Q4 tensors. Upload float32 weights to GPU.
+4. **E83 (Fused SwiGLU):** `layers/activations/swiglu.go` computes
+   `gate * silu(up)`. Add a fused CUDA kernel and FusedSwiGLU engine interface.
 
-### External Dependencies
+5. **E84 (Fused Scale+Softmax):** `layers/attention/scaled_dot_product_attention.go`
+   does MulScalar(scores, scale) then Softmax. Fuse into one kernel.
 
-- **DGX Spark (ndungu@192.168.86.250):**
-  - Go 1.25.0 linux/arm64, CUDA 13.0, sm_121 (Blackwell).
-  - Model: ~/models/gemma3-q4/model.zmf (1.5GB Q4 ZMF).
-  - Repo: ~/zerfoo/ (sync with `git pull`).
-  - Build: `make CUDA_ARCH=sm_121` in internal/cuda/kernels/
+6. **E85 (Fused GEMV Q4):** `compute/gpu_engine.go matMulQ4()` calls GemmQ4F32.
+   Add GemvQ4F32 for batch=1 case. Q4 block format is in tensor/q4_storage.go.
 
 ### Performance Baselines
 
@@ -584,6 +683,15 @@ ADRs created:
 | Gemma 3 2B | Q4_0 | CPU ARM64 | 6.75 | 33 (bench_tps) |
 | Gemma 3 2B | Q4_0 | GPU (cuda) | 10.32 peak / 7.78 median | 33 (bench_tps, 7 runs) |
 
+### External References
+
+| Source | Key Insight |
+|--------|------------|
+| NVIDIA CUDA Graphs blog | cudaStreamBeginCapture + cudaGraphLaunch pattern |
+| llama.cpp CUDA backend | Fused dequant+GEMV, SwiGLU, CUDA graph capture |
+| DGX Spark specs | 273 GB/s LPDDR5x, ~182 tok/s theoretical for 1.5GB model |
+| Ollama benchmarks | Gemma 3 12B Q4: 24 tok/s, Llama 3.1 8B Q4: 38 tok/s on GB10 |
+
 ---
 
 ## 10. Appendix
@@ -592,28 +700,32 @@ ADRs created:
 
 | File | Purpose |
 |------|---------|
-| `compute/engine.go` | Engine[T] interface (30+ methods) |
+| `graph/compile.go` | ExecutionPlan: Compile(), Run(), Instruction struct |
 | `compute/gpu_engine.go` | GPUEngine with CUDA acceleration + CPU fallback |
-| `compute/gpu_kernels.go` | gpuBinaryOp, gpuUnaryOp, gpuScalarOp, gpuBroadcastOp |
-| `compute/broadcast.go` | broadcastShape() for NumPy-style output shapes |
-| `internal/cuda/kernels/elementwise.cu` | CUDA element-wise kernels |
+| `compute/gpu_kernels.go` | gpuBinaryOp, gpuScalarOp, gpuBroadcastOp, gpuSplit, gpuConcat |
+| `compute/engine.go` | Engine[T] interface, FusedRMSNormer interface |
+| `internal/cuda/kernels/elementwise.cu` | CUDA element-wise kernels (25+ ops) |
 | `internal/cuda/kernels/elementwise.go` | Go CGo wrappers for CUDA kernels |
-| `internal/cuda/kernels/slice.cu` | (NEW) GPU strided slice kernel |
-| `internal/cuda/kernels/concat.cu` | (NEW) GPU concat kernel |
+| `internal/cuda/kernels/gemm_q4.cu` | Q4 dequant+GEMM CUDA kernel |
+| `internal/cuda/kernels/rmsnorm.cu` | Fused RMSNorm CUDA kernel |
 | `internal/gpuapi/kernels.go` | KernelRunner interface |
-| `internal/gpuapi/cuda_kernels.go` | CUDA KernelRunner implementation |
-| `tensor/gpu_storage.go` | GPUStorage[T] with Slice() D2H copy |
-| `layers/core/pow.go` | Pow layer calling engine.Pow() |
-| `inference/inference.go` | Load(), WithDevice(), engine creation |
+| `internal/gpuapi/runtime.go` | Runtime + Stream + MemcpyKind interfaces |
+| `generate/stream.go` | Token generation loop (GenerateStream) |
+| `generate/generator.go` | Generator with plan compilation |
+| `layers/activations/swiglu.go` | SwiGLU activation (gate * silu(up)) |
+| `layers/attention/scaled_dot_product_attention.go` | SDPA with flash attention path |
+| `tensor/q4_storage.go` | Q4Storage with Q4_0 block format |
 | `cmd/bench_tps/main.go` | tok/s benchmark binary |
 
 ### Estimated Effort Summary
 
 | Epic | Area | Tasks | Estimated Hours |
 |------|------|-------|----------------|
-| E75: PowScalar Kernel | internal/cuda/, compute/ | 4 tasks + 2 subtests | 5.25h |
-| E76: Scalar-Broadcast | internal/cuda/, compute/ | 4 tasks + 2 subtests | 5.75h |
-| E77: GPU Slice/Split/Concat | internal/cuda/, compute/, tensor/ | 5 tasks + 4 subtests | 11.5h |
-| E78: Float32 Weight Upload | compute/, inference/ | 2 tasks + 1 subtest | 2.0h |
-| E79: GPU Benchmark | DGX Spark | 4 tasks + 3 subtests | 5.25h |
-| **Total** | **GPU scalar ops + D2H** | **19 tasks + 12 subtests** | **~30h** |
+| E80: Buffer Pre-Alloc | graph/, compute/ | 4 tasks + 3 subtests | 9.75h |
+| E81: CUDA Graph API | internal/cuda/, internal/gpuapi/ | 3 tasks + 2 subtests | 5.0h |
+| E82: Graph Capture | graph/, generate/ | 4 tasks + 3 subtests | 9.0h |
+| E83: Fused SwiGLU | internal/cuda/, compute/, layers/ | 4 tasks + 2 subtests | 6.25h |
+| E84: Fused Scale+Softmax | internal/cuda/, compute/, layers/ | 4 tasks + 2 subtests | 6.75h |
+| E85: Fused Dequant+GEMV | internal/cuda/, compute/ | 4 tasks + 2 subtests | 8.75h |
+| E86: Benchmark | DGX Spark | 4 tasks + 3 subtests | 4.25h |
+| **Total** | **CUDA graphs + fused kernels** | **27 tasks + 17 subtests** | **~50h** |
