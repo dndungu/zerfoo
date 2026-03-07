@@ -379,7 +379,81 @@ func (e *GPUEngine[T]) Div(ctx context.Context, a, b *tensor.TensorNumeric[T], d
 }
 
 func (e *GPUEngine[T]) Transpose(ctx context.Context, a *tensor.TensorNumeric[T], axes []int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	return e.cpu.Transpose(ctx, a, axes, dst...)
+	if !isFloat32[T]() {
+		return e.cpu.Transpose(ctx, a, axes, dst...)
+	}
+
+	// Only use GPU path for GPU-resident tensors.
+	if _, ok := a.GetStorage().(*tensor.GPUStorage[T]); !ok {
+		return e.cpu.Transpose(ctx, a, axes, dst...)
+	}
+
+	e.setDevice()
+
+	shape := a.Shape()
+	rank := len(shape)
+
+	if len(axes) != rank {
+		return e.cpu.Transpose(ctx, a, axes, dst...)
+	}
+
+	// Compute total elements.
+	total := 1
+	for _, d := range shape {
+		total *= d
+	}
+
+	// Compute input strides.
+	inStrides := make([]int, rank)
+	stride := 1
+	for i := rank - 1; i >= 0; i-- {
+		inStrides[i] = stride
+		stride *= shape[i]
+	}
+
+	// Compute output shape.
+	outShape := make([]int, rank)
+	for i, ax := range axes {
+		outShape[i] = shape[ax]
+	}
+
+	devIn, cleanupIn, err := getDevicePtr(e, a)
+	if err != nil {
+		return e.cpu.Transpose(ctx, a, axes, dst...)
+	}
+	defer cleanupIn()
+
+	byteSize := total * f32Size
+	devOut, err := e.pool.Alloc(e.deviceID, byteSize)
+	if err != nil {
+		return e.cpu.Transpose(ctx, a, axes, dst...)
+	}
+
+	// Fast path: 2D transpose.
+	if rank == 2 && axes[0] == 1 && axes[1] == 0 {
+		if err := e.kernels.Transpose2D(devIn, devOut, shape[0], shape[1], e.stream); err != nil {
+			e.pool.Free(e.deviceID, devOut, byteSize)
+			return nil, err
+		}
+		return makeGPUResult[T](e, outShape, devOut, total, dst...)
+	}
+
+	// General N-D transpose via stride-based kernel.
+	inStrides32 := make([]int32, rank)
+	outShape32 := make([]int32, rank)
+	perm32 := make([]int32, rank)
+	for i := range rank {
+		inStrides32[i] = int32(inStrides[i])
+		outShape32[i] = int32(outShape[i])
+		perm32[i] = int32(axes[i])
+	}
+
+	if err := e.kernels.TransposeND(devIn, devOut, inStrides32, outShape32, perm32, rank, total, e.stream); err != nil {
+		e.pool.Free(e.deviceID, devOut, byteSize)
+		return nil, err
+	}
+
+	return makeGPUResult[T](e, outShape, devOut, total, dst...)
 }
 
 func (e *GPUEngine[T]) Sum(ctx context.Context, a *tensor.TensorNumeric[T], axis int, keepDims bool, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
@@ -419,7 +493,75 @@ func (e *GPUEngine[T]) Copy(ctx context.Context, dst, src *tensor.TensorNumeric[
 }
 
 func (e *GPUEngine[T]) Gather(ctx context.Context, params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T]) error {
-	return e.cpu.Gather(ctx, params, indices, output)
+	if !isFloat32[T]() {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+
+	// Only use GPU path when params are GPU-resident.
+	if _, ok := params.GetStorage().(*tensor.GPUStorage[T]); !ok {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+
+	e.setDevice()
+
+	pShape := params.Shape()
+	if len(pShape) != 2 {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+	V := pShape[0]
+	D := pShape[1]
+
+	// Flatten indices to get N.
+	idxData := indices.Data()
+	N := len(idxData)
+	if N == 0 {
+		return nil
+	}
+
+	// Get device pointer for params (should be zero-copy since GPU-resident).
+	devParams, cleanupParams, err := getDevicePtr(e, params)
+	if err != nil {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+	defer cleanupParams()
+
+	// Upload indices to GPU as int32 (Go int is 64-bit on amd64/arm64).
+	indices32 := make([]int32, N)
+	for i, v := range idxData {
+		indices32[i] = int32(v)
+	}
+	idxByteSize := N * 4
+	devIdx, err := e.pool.Alloc(e.deviceID, idxByteSize)
+	if err != nil {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+	defer e.pool.Free(e.deviceID, devIdx, idxByteSize)
+
+	if err := e.runtime.Memcpy(devIdx, unsafe.Pointer(&indices32[0]), idxByteSize, gpuapi.MemcpyHostToDevice); err != nil {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+
+	// Allocate output on GPU.
+	outByteSize := N * D * f32Size
+	devOut, err := e.pool.Alloc(e.deviceID, outByteSize)
+	if err != nil {
+		return e.cpu.Gather(ctx, params, indices, output)
+	}
+
+	if err := e.kernels.Gather(devParams, devIdx, devOut, N, D, V, e.stream); err != nil {
+		e.pool.Free(e.deviceID, devOut, outByteSize)
+		return fmt.Errorf("GPU Gather: %w", err)
+	}
+
+	// Set output storage to GPU.
+	gs, err := tensor.NewGPUStorageFromPtr[T](devOut, N*D, e.deviceID)
+	if err != nil {
+		e.pool.Free(e.deviceID, devOut, outByteSize)
+		return err
+	}
+	output.SetStorage(gs)
+
+	return nil
 }
 
 func (e *GPUEngine[T]) ScatterAdd(ctx context.Context, dEmbeddingTable *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], dOut *tensor.TensorNumeric[T]) error {
