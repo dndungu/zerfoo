@@ -1,0 +1,166 @@
+// Package codegen generates CUDA megakernel source code from a compiled
+// ExecutionPlan instruction tape. Each primitive op maps to a CUDA device
+// function call that operates on register-resident or shared-memory data.
+package codegen
+
+import (
+	"fmt"
+
+	"github.com/zerfoo/zerfoo/graph"
+)
+
+// SlotInfo describes a slot's shape for the emitter.
+type SlotInfo struct {
+	Shape []int
+}
+
+// OpEmitter generates CUDA code for a single instruction. It returns a
+// code fragment that will be inserted into the megakernel body.
+type OpEmitter func(op graph.InstructionMeta, inputs []SlotInfo) (string, error)
+
+// emitters maps OpName strings to their CUDA code emitters.
+var emitters = map[string]OpEmitter{
+	// Binary elementwise
+	"Add": binaryOp("+"),
+	"Sub": binaryOp("-"),
+	"Mul": binaryOp("*"),
+	"Div": binaryOp("/"),
+	"Pow": funcBinaryOp("powf"),
+
+	// Unary elementwise
+	"Exp":   unaryOp("expf"),
+	"Log":   unaryOp("logf"),
+	"Sqrt":  unaryOp("sqrtf"),
+	"Rsqrt": unaryOp("rsqrtf"),
+	"Tanh":  unaryOp("tanhf"),
+	"Neg":   prefixUnaryOp("-"),
+	"Abs":   unaryOp("fabsf"),
+	"Silu":  siluOp,
+
+	// Scalar ops
+	"AddScalar": scalarOp("+"),
+	"MulScalar": scalarOp("*"),
+	"SubScalar": scalarOp("-"),
+	"DivScalar": scalarOp("/"),
+	"PowScalar": funcScalarOp("powf"),
+
+	// Reductions
+	"RMSNorm": rmsnormOp,
+	"Softmax": softmaxOp,
+
+	// Memory ops
+	"MatMul":      gemvOp,
+	"MatMulNBits": gemvQ4Op,
+	"Gather":      gatherOp,
+
+	// Shape ops (no-compute in megakernel, just reindex)
+	"Concat":    reshapeOp, // reindex in registers
+	"Reshape":   reshapeOp, // no-op in flat memory
+	"Transpose": transposeOp,
+}
+
+// Emit generates CUDA code for a single instruction. Returns an error
+// if the op is unsupported.
+func Emit(op graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	emitter, ok := emitters[op.OpName]
+	if !ok {
+		return "", fmt.Errorf("unsupported op: %s", op.OpName)
+	}
+	return emitter(op, inputs)
+}
+
+// Supported returns true if the op has a registered emitter.
+func Supported(opName string) bool {
+	_, ok := emitters[opName]
+	return ok
+}
+
+// --- Emitter constructors ---
+
+func binaryOp(op string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] %s slot_%d[tid];",
+			meta.OutputIdx, meta.InputIdx[0], op, meta.InputIdx[1]), nil
+	}
+}
+
+func funcBinaryOp(fn string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid], slot_%d[tid]);",
+			meta.OutputIdx, fn, meta.InputIdx[0], meta.InputIdx[1]), nil
+	}
+}
+
+func unaryOp(fn string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid]);",
+			meta.OutputIdx, fn, meta.InputIdx[0]), nil
+	}
+}
+
+func prefixUnaryOp(prefix string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid]);",
+			meta.OutputIdx, prefix, meta.InputIdx[0]), nil
+	}
+}
+
+func scalarOp(op string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] %s scalar_%d;",
+			meta.OutputIdx, meta.InputIdx[0], op, meta.OutputIdx), nil
+	}
+}
+
+func funcScalarOp(fn string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid], scalar_%d);",
+			meta.OutputIdx, fn, meta.InputIdx[0], meta.OutputIdx), nil
+	}
+}
+
+func siluOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] * (1.0f / (1.0f + expf(-slot_%d[tid])));",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0]), nil
+}
+
+func rmsnormOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  dev_rmsnorm(slot_%d, slot_%d, slot_%d, dim_%d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx), nil
+}
+
+func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	cols := 1
+	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
+		cols = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
+	return fmt.Sprintf("  dev_softmax(slot_%d, slot_%d, 1, %d);",
+		meta.OutputIdx, meta.InputIdx[0], cols), nil
+}
+
+func gemvOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  dev_gemv_f32(slot_%d, frozen_%d, slot_%d, dim_m_%d, dim_k_%d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1],
+		meta.OutputIdx, meta.OutputIdx), nil
+}
+
+func gemvQ4Op(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  dev_gemv_q4(slot_%d, frozen_%d, slot_%d, dim_m_%d, dim_k_%d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1],
+		meta.OutputIdx, meta.OutputIdx), nil
+}
+
+func gatherOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, dim_%d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx), nil
+}
+
+func reshapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  // %s: slot_%d = slot_%d (reindex, no compute)",
+		meta.OpName, meta.OutputIdx, meta.InputIdx[0]), nil
+}
+
+func transposeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  dev_transpose(slot_%d, slot_%d, shape_%d, perm_%d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0], meta.OutputIdx), nil
+}
