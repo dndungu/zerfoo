@@ -119,6 +119,33 @@ func (e *GPUEngine[T]) SetLogger(l log.Logger) {
 	e.cpu.SetLogger(l)
 }
 
+// UploadWeights copies CPU-resident tensors to GPU device memory in place.
+// Tensors that already have GPUStorage are skipped. This is called once at
+// model load time to eliminate per-operation H2D copies during inference.
+func (e *GPUEngine[T]) UploadWeights(tensors []*tensor.TensorNumeric[float32]) error {
+	e.setDevice()
+	uploaded := 0
+	for _, t := range tensors {
+		if t == nil {
+			continue
+		}
+		// Skip tensors already on GPU.
+		if _, ok := t.GetStorage().(*tensor.GPUStorage[float32]); ok {
+			continue
+		}
+		gpuT, err := tensor.ToGPUDevice[float32](t, e.deviceID)
+		if err != nil {
+			return fmt.Errorf("upload weight (shape %v): %w", t.Shape(), err)
+		}
+		t.SetStorage(gpuT.GetStorage())
+		uploaded++
+	}
+	if uploaded > 0 {
+		e.logger.Info("weights uploaded to GPU", "count", fmt.Sprintf("%d", uploaded), "device", fmt.Sprintf("%d", e.deviceID))
+	}
+	return nil
+}
+
 // Close releases the BLAS handle, DNN handle, GPU stream, and drains the memory pool.
 // The engine must not be used after Close.
 func (e *GPUEngine[T]) Close() error {
