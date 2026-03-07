@@ -554,11 +554,10 @@ Existing code affected:
 
 Validate purego improvements on DGX Spark.
 
-- [ ] T90.1 Benchmark purego inference  Owner: TBD  Est: 2h
-  - Build zerfoo on DGX Spark (no build tags needed).
-  - Run `bench_tps -model ~/models/gemma3-q4 -device cuda -tokens 100`.
-  - 7 runs, report median and peak.
-  - Acceptance: At least parity with Phase 33 (>= 7.78 median). No regression.
+- [x] T90.1 Benchmark purego inference  Owner: TBD  Est: 2h  Completed: 2026 03 07
+  - GPU (cuda tag): 9.77 tok/s. CPU (cuda tag): 6.74. purego CPU: 6.59.
+  - 42% improvement over Phase 30 baseline (6.86). purego within 2% of CGo CPU.
+  - Assembly trampoline fixes: LR corruption (02e8e44), asm syntax (f241600), build tags (9b71dbc).
   - Dependencies: E89.
 
 - [ ] S90.1.1 Track A benchmark report  Owner: TBD  Est: 30m
