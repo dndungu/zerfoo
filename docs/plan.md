@@ -1,59 +1,69 @@
-# Zerfoo Development Plan -- Phase 32: GPU-First Inference Pipeline
+# Zerfoo Development Plan -- Phase 33: GPU Scalar Ops and D2H Elimination
 
 ## 1. Context
 
 ### Problem Statement
 
-GPU inference on DGX Spark GB10 (5.12 tok/s) is slower than CPU inference
-(5.94 tok/s) for Gemma 3 2B Q4. Phase 31 profiling identified the root cause:
-only MatMul runs on GPU while all other operations fall back to CPU, and tensors
-transfer between host and device for every operation (43% of wall time in
-cgocall). The GPUEngine already has CUDA kernels for element-wise ops but they
-are not reached because of shape mismatches (broadcasting), missing ops
-(Transpose, Gather), and tensors defaulting to CPU storage.
+Phase 32 brought GPU inference from 5.12 to 6.84 tok/s (+33.6%) on DGX Spark
+GB10 for Gemma 3 2B Q4. GPU is now faster than CPU (6.61 tok/s), but the 10
+tok/s target was not met. Profiling shows three remaining bottlenecks that
+cause CPU fallbacks and D2H round-trips:
 
-See docs/design.md for full architecture context and Phases 1-31 history.
-Decision rationale: docs/adr/022-gpu-first-inference-pipeline.md.
+1. **Pow CPU fallback (8.9%)**: `engine.Pow(base, exponent)` where exponent is
+   a scalar tensor `[1]` with value 2.0 (x^2 in normalization). `gpuPow`
+   requires `sameShape(base, exponent)` which fails for scalar broadcast,
+   falling back to CPU. The CPU then reads GPU-resident base via
+   `GPUStorage.Slice()`, triggering a full D2H copy.
 
-### What Was Delivered (Recent Phases)
+2. **Binary op CPU fallback (10.4%)**: `gpuBroadcastOp` supports row, column,
+   and same-shape 2D patterns. Scalar-vs-tensor (`[1]` op `[M,D]`) is not
+   handled, falling back to CPU with D2H copies.
 
-| Phase | Key Result |
-|-------|------------|
-| Phase 29 | NEON Q4 dot product, 6.5 tok/s Gemma 3 2B Q4 CPU ARM64 |
-| Phase 30 | Worker pool, graph compiler, 6.86 tok/s (+5% over Phase 29) |
-| Phase 31 | PagedAttention v2, GPU profile (5.12 tok/s GPU, 5.94 CPU), training improvements (EMA, SWA, warm restarts, feature dropout, smoothed early stopping) |
+3. **GPUStorage.Slice D2H (24%)**: all CPU fallback ops that read GPU-resident
+   tensor data trigger `GPUStorage.Slice()` which copies the entire buffer
+   D2H. This is the root-cause multiplier for (1) and (2).
 
-### GPU Profile Breakdown (Phase 31, DGX Spark GB10)
+See docs/design.md for full architecture context and Phases 1-32 history.
+Decision rationale: docs/adr/023-gpu-scalar-ops-d2h-elimination.md.
+
+### What Was Delivered (Phase 32)
+
+| Area | Key Result |
+|------|------------|
+| GPU tensor residency | Intermediate tensors stay on GPU; Q4 weights pre-uploaded |
+| GPU Transpose | 2D tiled + N-D stride-based kernel |
+| GPU Broadcasting | Stride-based 2D for Add/Sub/Mul/Div |
+| GPU Gather | Embedding lookup on GPU |
+| Fused GPU RMSNorm | Single-pass kernel with shared-memory reduction |
+| Benchmark | 6.84 tok/s GPU, 6.61 tok/s CPU on DGX Spark GB10 |
+
+### GPU Profile Breakdown (Phase 32, DGX Spark GB10)
 
 | Component | % Time | Root Cause |
 |-----------|--------|------------|
-| runtime.cgocall | 43% | H2D/D2H transfers for every op |
-| Q4 dequantize | 9.4% | CPU fallback (no standalone GPU Q4 dequant) |
-| Transpose | 8.1% | CPU fallback (no GPU implementation) |
-| Binary ops | 4.4% | CPU fallback (broadcasting guard in sameShape()) |
-| MatMul (GPU) | ~30% | Only op actually on GPU |
+| runtime.cgocall | 58% | Activation H2D/D2H from CPU fallback ops |
+| Pow CPU fallback | 8.9% | No GPU scalar-broadcast Pow kernel |
+| binaryOp CPU fallback | 10.4% | Scalar-vs-tensor not in gpuBroadcastOp |
+| GPUStorage.Slice D2H | 24% | CPU fallback ops reading GPU tensor data |
+| MatMul (GPU) | ~30% | Core compute, already on GPU |
 
 ### Objectives
 
-- O69: Keep intermediate tensors GPU-resident between operations, eliminating
-  host-device transfers in the inference hot loop.
-- O70: Implement GPU Transpose kernel to remove the 8.1% CPU fallback.
-- O71: Add broadcasting support to GPU element-wise kernels to remove the
-  4.4% CPU fallback.
-- O72: Implement GPU Gather kernel for embedding lookups.
-- O73: Write a fused GPU RMSNorm kernel to reduce kernel launch count.
-- O74: Achieve >10 tok/s for Gemma 3 2B Q4 on DGX Spark GB10.
+- O75: Add PowScalar GPU kernel to eliminate the 8.9% Pow CPU fallback.
+- O76: Extend GPU binary ops with scalar-broadcast to eliminate the 10.4%
+  binary op CPU fallback.
+- O77: Add GPU Slice/Split/Concat kernels to eliminate the 24% D2H overhead
+  from GPUStorage.Slice.
+- O78: Achieve >= 10 tok/s for Gemma 3 2B Q4 on DGX Spark GB10.
 
 ### Non-Goals
 
 - Multi-GPU inference or tensor parallelism.
 - FP4 kernels (blocked on upstream CUTLASS SM121 fixes).
-- Vulkan, SYCL, or ROCm kernel ports.
-- Speculative decoding validation (Phase 31 deferred, separate phase).
-- GGUF real-model validation (Phase 31 deferred, separate phase).
-- DGX self-hosted CI runner setup (Phase 31 deferred).
+- Vulkan, SYCL, or ROCm kernel ports (stubs only).
 - Training pipeline changes.
 - Flash attention kernel improvements.
+- Speculative decoding (separate phase).
 
 ### Constraints and Assumptions
 
@@ -66,21 +76,23 @@ Decision rationale: docs/adr/022-gpu-first-inference-pipeline.md.
 - DGX Spark GB10 at `ssh ndungu@192.168.86.250` for all GPU validation.
 - Go 1.25.0, CUDA 13.0, sm_121 (Blackwell) on DGX Spark.
 - Target model: Gemma 3 2B Q4 (ZMF), path: ~/models/gemma3-q4/model.zmf.
-- CPU baseline: 5.94 tok/s. GPU baseline: 5.12 tok/s.
-- GPUEngine already has element-wise CUDA kernels (Add, Sub, Mul, Div, Exp,
-  Log, Sqrt, Rsqrt, Tanh, Softmax, ReduceSum, ReduceMean, Fill).
-- GPUEngine falls back to CPU for: Transpose, Gather, ScatterAdd, Copy, Zero,
-  Split, Concat, Repeat, OneHot, Reshape, RandomUniform, UnaryOp.
-- GPUEngine binary ops require sameShape() -- no broadcasting on GPU path.
+- CPU baseline: 6.61 tok/s. GPU baseline: 6.84 tok/s.
+- GPUEngine already has: Add/Sub/Mul/Div (same-shape + 2D broadcast),
+  AddScalar/MulScalar/DivScalar, Pow (same-shape only), Exp, Log, Sqrt, Rsqrt,
+  Tanh, Softmax, ReduceSum, ReduceMean, Fill, Sum, Transpose, Gather,
+  FusedRMSNorm.
+- GPUEngine CPU fallbacks: UnaryOp, Pow (broadcast), Split, Concat, Repeat,
+  Copy, Zero, ScatterAdd, RandomUniform, OneHot.
 
 ### Success Metrics
 
 | Metric | Current | Target | How Measured |
 |--------|---------|--------|-------------|
-| GPU tok/s (Gemma 3 2B Q4) | 5.12 | >= 10 | bench_tps -device cuda on DGX Spark |
-| cgocall % of wall time | 43% | < 15% | pprof CPU profile |
-| CPU fallback ops in hot loop | ~5 op types | 0 | pprof + log grep for "fallback" |
-| GPU utilization % | unmeasured | > 50% | nvidia-smi during inference |
+| GPU tok/s (Gemma 3 2B Q4) | 6.84 | >= 10 | bench_tps -device cuda on DGX Spark |
+| cgocall % of wall time | 58% | < 20% | pprof CPU profile |
+| CPU fallback ops in hot loop | Pow, some binary, Slice | 0 | pprof + log grep |
+| Pow CPU fallback % | 8.9% | 0% | pprof |
+| GPUStorage.Slice D2H % | 24% | < 5% | pprof |
 
 ---
 
@@ -90,371 +102,316 @@ Decision rationale: docs/adr/022-gpu-first-inference-pipeline.md.
 
 | ID | Deliverable | Rationale |
 |----|-------------|-----------|
-| D401 | GPU tensor residency pipeline | Eliminate 43% cgocall overhead |
-| D402 | GPU Transpose kernel | Remove 8.1% CPU fallback |
-| D403 | GPU broadcasting for element-wise ops | Remove 4.4% CPU fallback |
-| D404 | GPU Gather kernel | Remove CPU fallback for embedding lookups |
-| D405 | Fused GPU RMSNorm kernel | Reduce kernel launch count in transformer |
-| D406 | End-to-end GPU benchmark >10 tok/s | Validate all improvements |
+| D407 | PowScalar GPU kernel | Eliminate 8.9% Pow CPU fallback |
+| D408 | SubScalar GPU kernel | Complete scalar-op coverage for broadcast path |
+| D409 | Scalar-broadcast in gpuBroadcastOp | Eliminate 10.4% binary op CPU fallback |
+| D410 | GPU Slice kernel | Eliminate 24% D2H from GPUStorage.Slice |
+| D411 | GPU Split kernel | Eliminate D2H in Split (calls Slice internally) |
+| D412 | GPU Concat kernel | Eliminate D2H in Concat |
+| D413 | End-to-end GPU benchmark >= 10 tok/s | Validate all improvements |
 
 ### Out of Scope
 
-- Speculative decoding (E60 from Phase 31, deferred).
-- GGUF real-model validation (E61 from Phase 31, deferred).
-- DGX self-hosted CI runner (E63 T63.2-T63.5, deferred).
-- GPU PagedAttention (E62 T62.4 from Phase 31, depends on tensor residency
-  but is a separate optimization phase).
-- TensorRT integration for inference.
-- GPU training backward pass kernels.
-- Q4 standalone dequant kernel (Q4 is handled via fused dequant-GEMM already).
+- GPU Copy (not in hot path; CPU fallback acceptable).
+- GPU ScatterAdd (backward pass only).
+- GPU RandomUniform (not in inference hot path).
+- GPU OneHot (not in inference hot path).
+- GPU Repeat (not observed in Gemma 3 profile).
+- UnaryOp GPU kernel (closures cannot run on GPU; specific patterns replaced
+  by dedicated kernels like PowScalar).
 
 ---
 
 ## 3. Checkable Work Breakdown
 
-### E69: GPU Tensor Residency (O69)
+### E75: PowScalar GPU Kernel (O75)
 
-The core change: ensure intermediate tensors created by GPUEngine methods use
-GPUStorage (device memory) instead of CPUStorage. Model weights uploaded to GPU
-once at load time. Only final logits copied D2H.
-
-Existing code:
-- `compute/gpu_engine.go` -- GPUEngine with CPU fallback pattern.
-- `compute/gpu_kernels.go` -- Element-wise kernel launchers.
-- `tensor/gpu_storage.go` -- GPUStorage[T] with device pointer.
-- `tensor/storage.go` -- Storage[T] interface, CPUStorage[T].
-- `inference/inference.go` -- Load() creates engine.
-
-- [x] T69.1 Audit GPUEngine methods for H2D/D2H patterns  Owner: TBD  Est: 2h  2026 03 06
-  - Read every method in `compute/gpu_engine.go` and `compute/gpu_kernels.go`.
-  - For each method, document: (1) does it copy input to GPU? (2) does it copy
-    output back to CPU? (3) does it create result with CPUStorage or GPUStorage?
-  - Produce a table of all methods and their current transfer behavior.
-  - Acceptance: Complete audit table covering all GPUEngine methods.
-  - Dependencies: none.
-
-- [x] S69.1.1 Audit report  Owner: TBD  Est: 30m  2026 03 06
-  - Verify audit covers all methods listed in compute/engine.go interface.
-
-- [x] T69.2 Add GPU-resident tensor creation to GPUEngine  Owner: TBD  Est: 4h  2026 03 06 [Pre-existing]
-  - Modify GPUEngine methods that create result tensors to use GPUStorage
-    instead of CPUStorage. The result tensor should stay on GPU.
-  - Add a helper: `func (e *GPUEngine[T]) newGPUTensor(shape []int) (*tensor.TensorNumeric[T], error)`
-    that allocates via the memory pool and returns a tensor with GPUStorage.
-  - Modify at minimum: MatMul, Add, Sub, Mul, Div, MulScalar, AddScalar,
-    DivScalar, Exp, Log, Sqrt, Rsqrt, Tanh, Softmax, ReduceSum, ReduceMean.
-  - Input tensors: if already on GPU (GPUStorage), use device pointer directly.
-    If on CPU (CPUStorage), copy H2D. This preserves backward compatibility.
-  - Acceptance: GPU element-wise ops return tensors with GPUStorage. No D2H
-    copy in the output path. Tests pass with -race.
-  - Dependencies: T69.1.
-  - Risk: Breaking existing CPU-to-GPU interop. Mitigate with parity tests.
-
-- [x] S69.2.1 GPU tensor residency parity tests  Owner: TBD  Est: 2h  2026 03 06 [Pre-existing: makeGPUResult + getDevicePtr]
-  - For each modified method: run same computation on CPUEngine and GPUEngine.
-  - Compare results within 1e-5 tolerance.
-  - Verify output tensor has GPUStorage (not CPUStorage).
-  - Test chain of 3 ops (MatMul -> Add -> Softmax) to verify tensors flow
-    GPU->GPU without intermediate D2H.
-
-- [x] T69.3 Upload model weights to GPU at load time  Owner: TBD  Est: 3h  2026 03 06
-  - Modify `inference.Load()` (or the model loading path) to copy all model
-    weight tensors to GPU when device is "cuda".
-  - After upload, model parameters have GPUStorage. Forward pass reads weights
-    directly from GPU without per-op H2D copies.
-  - Acceptance: Model loads with -device cuda. Weight tensors have GPUStorage.
-    No H2D copy of weights during forward pass (verify via pprof or logging).
-  - Dependencies: T69.2.
-
-- [x] S69.3.1 Weight upload test  Owner: TBD  Est: 1h  2026 03 06
-  - Load a small test model with WithDevice("cuda").
-  - Verify all parameter tensors have GPUStorage.
-  - Run forward pass. Verify no cudaMemcpy H2D for weight tensors in profile.
-
-- [x] T69.4 Add D2H copy only for final logits output  Owner: TBD  Est: 1h  2026 03 06 [Pre-existing: .Data() triggers implicit D2H]
-  - In `generate/generator.go` decode loop, the final logits tensor from the
-    model forward pass must be copied to CPU for sampling (top-k, top-p).
-  - Add explicit `engine.ToCPU(logits)` call at the sampling boundary.
-  - All tensors before this point stay on GPU.
-  - Acceptance: Sampling reads CPU data. All intermediate tensors are GPU.
-  - Dependencies: T69.2.
-
-- [x] S69.4.1 End-to-end GPU residency test  Owner: TBD  Est: 1h  2026 03 06 [Pre-existing]
-  - Generate 10 tokens on GPU. Verify output matches CPU generation.
-  - Profile: cgocall % should drop significantly from 43% baseline.
-
-- [x] T69.5 Run golangci-lint on compute/ and tensor/  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T69.4.
-
-### E70: GPU Transpose Kernel (O70)
-
-Transpose is 8.1% of GPU inference time because it falls back to CPU.
-Write a CUDA kernel and wire it into GPUEngine.
+Pow in Gemma 3 inference is always `x^2` (scalar exponent). The current
+`gpuPow` requires same-shape tensors. Add a PowScalar kernel and detect
+the scalar-exponent pattern.
 
 Existing code:
-- `compute/gpu_engine.go` line 382 -- Transpose CPU fallback.
-- `internal/cuda/kernels/elementwise.go` -- existing kernel launchers.
-- `layers/transpose/transpose.go` -- Transpose layer.
+- `compute/gpu_kernels.go` line 363 -- `gpuPow` with sameShape guard.
+- `internal/cuda/kernels/elementwise.cu` -- existing CUDA kernels.
+- `internal/gpuapi/kernels.go` -- KernelRunner interface.
+- `layers/core/pow.go` -- Pow layer calling `engine.Pow(ctx, base, exponent)`.
 
-- [x] T70.1 Write CUDA transpose kernel  Owner: TBD  Est: 3h  2026 03 06
-  - Create `internal/cuda/kernels/transpose.cu` with:
-    - 2D transpose: shared-memory tiled transpose (32x32 tiles).
-    - 3D transpose: permute dims [0,2,1] (batch of 2D transposes).
-    - 4D transpose: permute dims [0,1,3,2] (attention head transpose).
-  - Input: device pointer, shape, permutation, output device pointer, stream.
-  - Acceptance: Kernel compiles with nvcc for sm_121. Correct output for
-    2D (128x256), 3D (4x128x64), 4D (2x8x128x64) test cases.
+- [ ] T75.1 Write CUDA PowScalar kernel  Owner: TBD  Est: 1.5h
+  - Add to `internal/cuda/kernels/elementwise.cu`:
+    `pow_scalar_kernel(float *x, float p, float *out, int n)` computing
+    `out[i] = powf(x[i], p)`.
+  - Acceptance: Kernel compiles for sm_121. Correct output for x^2 (n=2048)
+    and x^0.5 (same as sqrt).
   - Dependencies: none.
 
-- [x] S70.1.1 CUDA transpose kernel unit tests  Owner: TBD  Est: 1.5h  2026 03 06
-  - Test: 2D transpose matches CPU transpose within 0 tolerance (exact).
-  - Test: 3D transpose with batch dimension.
-  - Test: 4D transpose with attention head layout.
-  - Test: non-square matrices (128x256, 256x128).
-  - Test: edge cases (1x1, 1xN, Nx1).
+- [ ] S75.1.1 PowScalar kernel unit tests  Owner: TBD  Est: 1h
+  - Test: x^2 for 2048 elements matches CPU Pow within 1e-5.
+  - Test: x^0.5 matches Sqrt within 1e-5.
+  - Test: x^1 is identity within 1e-5.
+  - Test: x^0 is all 1s.
 
-- [x] T70.2 Write Go wrapper for transpose kernel  Owner: TBD  Est: 1.5h  2026 03 06
-  - Create `internal/cuda/kernels/transpose.go` (build tag: `//go:build cuda`).
-  - CGo wrapper calling the CUDA kernel.
-  - Signature: `func Transpose(input, output unsafe.Pointer, shape []int, perm []int, stream unsafe.Pointer) error`
-  - Acceptance: Go wrapper compiles and calls kernel correctly.
-  - Dependencies: T70.1.
+- [ ] T75.2 Add PowScalar to KernelRunner interface and Go wrapper  Owner: TBD  Est: 1h
+  - Add `PowScalar(a unsafe.Pointer, scalar float32, c unsafe.Pointer, n int, stream Stream) error`
+    to `internal/gpuapi/kernels.go` KernelRunner.
+  - Add Go CGo wrapper in `internal/cuda/kernels/elementwise.go`.
+  - Add stub implementations in `internal/gpuapi/cuda_kernels.go`,
+    `internal/gpuapi/rocm_kernels.go`, `internal/gpuapi/opencl_kernels.go`.
+  - Acceptance: Compiles on all backends. CUDA backend calls the kernel.
+  - Dependencies: T75.1.
 
-- [x] T70.3 Wire GPU transpose into GPUEngine  Owner: TBD  Est: 2h  2026 03 06
-  - Replace the CPU fallback in `compute/gpu_engine.go` Transpose method.
-  - When input has GPUStorage, use the CUDA transpose kernel.
-  - When input has CPUStorage, fall back to CPU (or copy H2D, transpose, keep
-    on GPU if tensor residency is active).
-  - Acceptance: GPUEngine.Transpose uses GPU kernel for GPU-resident tensors.
-    Output has GPUStorage. Parity with CPU within 0 tolerance.
-  - Dependencies: T70.1, T70.2, T69.2.
+- [ ] T75.3 Wire PowScalar into GPUEngine.Pow  Owner: TBD  Est: 1.5h
+  - Modify `gpuPow` in `compute/gpu_kernels.go`:
+    - If `!sameShape(base, exponent)` and exponent has 1 element total,
+      extract the scalar value and use `gpuScalarOp` with `kernels.PowScalar`.
+    - If `!sameShape(base, exponent)` and base has 1 element total,
+      create a Fill tensor and use same-shape Pow.
+    - Otherwise keep CPU fallback.
+  - Acceptance: `engine.Pow(x_gpu, scalar_2_tensor)` runs on GPU.
+    Output has GPUStorage. Parity with CPU within 1e-5.
+  - Dependencies: T75.2.
 
-- [x] S70.3.1 GPU transpose parity tests  Owner: TBD  Est: 1h  2026 03 06
-  - Compare GPUEngine.Transpose vs CPUEngine.Transpose for shapes used in
-    Gemma 3: [2048x256], [1x8x128x64], [8x128x64].
+- [ ] S75.3.1 PowScalar parity test  Owner: TBD  Est: 1h
+  - Compare GPUEngine.Pow(x, scalar_tensor) vs CPUEngine.Pow for:
+    - Shape [1, 2048] ^ [1] (RMSNorm pattern).
+    - Shape [8, 128, 64] ^ [1].
   - Verify output has GPUStorage.
 
-- [x] T70.4 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T70.3.
+- [ ] T75.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
+  - Packages: internal/cuda/kernels/, internal/gpuapi/, compute/.
+  - Dependencies: T75.3.
 
-### E71: GPU Element-wise Broadcasting (O71)
+### E76: Scalar-Broadcast for All Binary Ops (O76)
 
-GPU binary ops fall back to CPU when shapes differ (4.4% of time).
-Add broadcasting support to the GPU element-wise kernels.
-
-Existing code:
-- `compute/gpu_engine.go` -- sameShape() guard before GPU binary ops.
-- `compute/gpu_kernels.go` -- element-wise kernel launchers.
-- `internal/cuda/kernels/elementwise.cu` -- CUDA element-wise kernels.
-
-- [x] T71.1 Identify broadcasting patterns in Gemma 3 inference  Owner: TBD  Est: 1h  2026 03 06
-  - Profile or log the shapes of operands that trigger the sameShape() fallback
-    during Gemma 3 2B Q4 forward pass.
-  - Common patterns: scalar broadcast (1 vs N), row broadcast (1xK vs MxK),
-    column broadcast (Mx1 vs MxK).
-  - Acceptance: List of specific shape pairs that trigger CPU fallback.
-  - Dependencies: none.
-
-- [x] S71.1.1 Broadcasting pattern report  Owner: TBD  Est: 30m  2026 03 06
-
-- [x] T71.2 Add broadcasting to CUDA element-wise kernels  Owner: TBD  Est: 3h  2026 03 06
-  - Modify `internal/cuda/kernels/elementwise.cu` to handle:
-    - Scalar broadcast: one operand has 1 element, other has N.
-    - Row broadcast: shapes [1,K] op [M,K] (or [M,K] op [1,K]).
-    - Column broadcast: shapes [M,1] op [M,K] (or [M,K] op [M,1]).
-  - Use stride-based indexing in the kernel to handle broadcast dimensions.
-  - Acceptance: Kernels produce correct results for all 3 broadcast patterns.
-  - Dependencies: T71.1.
-
-- [x] S71.2.1 Broadcasting kernel tests  Owner: TBD  Est: 1.5h  2026 03 06
-  - Test: scalar broadcast for Add, Mul (1 vs 1024 elements).
-  - Test: row broadcast for Add ([1,256] + [128,256]).
-  - Test: column broadcast for Mul ([128,1] * [128,256]).
-  - Test: same-shape still works (no regression).
-  - Compare with CPU results within 1e-5.
-
-- [x] T71.3 Remove sameShape guard in GPUEngine binary ops  Owner: TBD  Est: 1.5h  2026 03 06
-  - Modify `compute/gpu_engine.go` binary op methods (Add, Sub, Mul, Div) to
-    use GPU broadcasting kernels instead of falling back to CPU.
-  - Keep CPU fallback only for unsupported broadcast patterns (e.g., both
-    dimensions differ and neither is 1).
-  - Acceptance: Gemma 3 forward pass on GPU has 0 binary op CPU fallbacks.
-  - Dependencies: T71.2.
-
-- [x] S71.3.1 End-to-end broadcasting parity test  Owner: TBD  Est: 1h  2026 03 06
-  - Run Gemma 3 forward pass on GPU and CPU.
-  - Verify logits match within tolerance.
-  - Verify no binary op CPU fallbacks in log.
-
-- [x] T71.4 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T71.3.
-
-### E72: GPU Gather Kernel (O72)
-
-Embedding lookup (Gather) falls back to CPU. For GPU-resident inference,
-embedding weights should be on GPU and lookup should produce GPU tensors.
+Extend `gpuBroadcastOp` to detect scalar-vs-tensor patterns ([1] op [M,D])
+and dispatch to existing scalar kernel variants. Also add SubScalar which
+is currently missing.
 
 Existing code:
-- `compute/gpu_engine.go` line 423 -- Gather CPU fallback.
-- `layers/gather/gather.go` -- Gather layer (embedding lookup).
-- `layers/embeddings/token_embedding.go` -- TokenEmbedding using Gather.
+- `compute/gpu_kernels.go` line 77 -- `gpuBroadcastOp` switch statement.
+- `compute/gpu_kernels.go` line 258 -- `gpuScalarOp` helper.
+- KernelRunner has AddScalar, MulScalar, DivScalar but no SubScalar.
 
-- [x] T72.1 Write CUDA gather kernel  Owner: TBD  Est: 2h  2026 03 06
-  - Create `internal/cuda/kernels/gather.cu`:
-    - Input: embedding table (V x D), indices (N), output (N x D).
-    - Each thread block handles one index, copies D elements.
-  - Acceptance: Kernel compiles for sm_121. Correct output for V=32000, D=2048,
-    N=128 (typical Gemma 3 vocabulary lookup).
+- [ ] T76.1 Write CUDA SubScalar kernel  Owner: TBD  Est: 1h
+  - Add to `internal/cuda/kernels/elementwise.cu`:
+    `sub_scalar_kernel(float *a, float scalar, float *c, int n)` computing
+    `c[i] = a[i] - scalar`.
+  - Add `SubScalar` to KernelRunner interface and all backend stubs.
+  - Add Go CGo wrapper.
+  - Acceptance: Kernel compiles. Correct output for a - 0.5 (n=1024).
   - Dependencies: none.
 
-- [x] S72.1.1 CUDA gather kernel tests  Owner: TBD  Est: 1h  2026 03 06
-  - Test: single index lookup.
-  - Test: batch of 128 indices.
-  - Test: out-of-bounds index handling (should clamp or error).
-  - Compare with CPU Gather output (exact match for integer indices).
+- [ ] S76.1.1 SubScalar kernel unit tests  Owner: TBD  Est: 45m
+  - Test: a - 0.0 is identity.
+  - Test: a - scalar matches CPU Sub within 1e-5.
+  - Test: edge case a - large_value.
 
-- [x] T72.2 Write Go wrapper and wire into GPUEngine  Owner: TBD  Est: 2h  2026 03 06
-  - Create `internal/cuda/kernels/gather.go` with CGo wrapper.
-  - Replace CPU fallback in `compute/gpu_engine.go` Gather method.
-  - When embedding table has GPUStorage and indices are provided, use GPU kernel.
-  - Acceptance: GPUEngine.Gather uses GPU kernel. Output has GPUStorage.
-  - Dependencies: T72.1, T69.2.
+- [ ] T76.2 Add scalar-broadcast detection to gpuBroadcastOp  Owner: TBD  Est: 2h
+  - In `gpuBroadcastOp`, before the existing switch statement:
+    - If `b` has exactly 1 element total (product of shape == 1),
+      extract `b.Data()[0]` as scalar and dispatch to the matching
+      scalar kernel (AddScalar, SubScalar, MulScalar, DivScalar).
+    - If `a` has exactly 1 element total, extract scalar and dispatch
+      with operands swapped (for non-commutative ops like Sub/Div,
+      use a reverse-scalar kernel or the broadcast kernel with stride 0).
+  - For the `a`-is-scalar case on Sub and Div (non-commutative):
+    - Sub: compute `scalar - b[i]` as `-(b[i] - scalar)` using SubScalar
+      + MulScalar(-1) or add a `SubScalarRev` kernel. Simpler: use the
+      existing broadcast kernel with strides (saRow=0, saCol=0).
+  - Acceptance: All 4 binary ops (Add, Sub, Mul, Div) accept scalar-vs-tensor
+    on GPU. No CPU fallback for these patterns.
+  - Dependencies: T76.1.
 
-- [x] S72.2.1 GPU gather parity test  Owner: TBD  Est: 1h  2026 03 06
-  - Compare GPU vs CPU Gather for Gemma 3 vocabulary size.
-  - Verify output tensor has GPUStorage.
+- [ ] S76.2.1 Scalar-broadcast parity tests  Owner: TBD  Est: 1.5h
+  - Test: [1] + [128, 2048] matches CPU Add within 1e-5.
+  - Test: [128, 2048] - [1] matches CPU Sub within 1e-5.
+  - Test: [1] * [128, 2048] matches CPU Mul within 1e-5.
+  - Test: [128, 2048] / [1] matches CPU Div within 1e-5.
+  - Test: [1] - [128, 2048] (scalar on left, non-commutative).
+  - Test: [1] / [128, 2048] (scalar on left, non-commutative).
+  - Verify all outputs have GPUStorage.
 
-- [x] T72.3 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T72.2.
+- [ ] T76.3 Add gpuSubScalar method to GPUEngine  Owner: TBD  Est: 30m
+  - Wire SubScalar kernel through `gpuScalarOp` like AddScalar/MulScalar.
+  - Acceptance: GPUEngine.Sub(tensor, scalar_tensor) uses GPU kernel.
+  - Dependencies: T76.1.
 
-### E73: Fused GPU RMSNorm Kernel (O73)
+- [ ] T76.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
+  - Packages: internal/cuda/kernels/, internal/gpuapi/, compute/.
+  - Dependencies: T76.3.
 
-RMSNorm decomposes into ~5 element-wise ops (square, mean, add eps, rsqrt,
-mul weight). Each launches a separate kernel. A fused kernel does one pass.
+### E77: GPU Slice, Split, and Concat Kernels (O77)
+
+`GPUStorage.Slice()` is the #1 D2H source (24%). When a CPU fallback op
+reads data from a GPU-resident tensor, `Slice()` copies the entire buffer
+D2H. The fix is to keep sliced/split/concatenated tensors on GPU.
 
 Existing code:
-- `compute/fused_rmsnorm.go` -- CPU fused RMSNorm (single-pass).
-- `layers/normalization/rms_norm.go` -- RMSNorm layer.
-- `internal/cuda/kernels/elementwise.go` -- existing kernel launchers.
+- `tensor/gpu_storage.go` line 188 -- `GPUStorage.Slice()` with D2H copy.
+- `compute/gpu_engine.go` line 667 -- `Split` delegates to CPU.
+- `compute/gpu_engine.go` line 671 -- `Concat` delegates to CPU.
+- `compute/cpu_engine.go` -- CPU Split/Concat implementations.
 
-- [x] T73.1 Write CUDA fused RMSNorm kernel  Owner: TBD  Est: 3h  2026 03 06
-  - Create `internal/cuda/kernels/rmsnorm.cu`:
-    - Input: x (M x D), weight (D), eps, output (M x D).
-    - Each thread block handles one row: compute mean(x^2), rsqrt, scale.
-    - Use shared memory for partial sums in reduction.
-  - Acceptance: Kernel compiles for sm_121. Correct output within 1e-5 of
-    CPU fused RMSNorm for shapes [1,2048] and [128,2048].
+- [ ] T77.1 Write CUDA Slice kernel  Owner: TBD  Est: 2h
+  - Add to `internal/cuda/kernels/slice.cu`:
+    `slice_strided_kernel(float *in, float *out, int *srcStrides, int *starts,
+     int *outShape, int ndim, int total)` -- copies a contiguous sub-region.
+  - For the common case (contiguous last-dim slice), a memcpy-based fast path.
+  - Add `Slice` to KernelRunner interface:
+    `Slice(in, out unsafe.Pointer, srcStrides, starts, outShape []int32, ndim, total int, stream Stream) error`
+  - Add Go CGo wrapper and backend stubs.
+  - Acceptance: Kernel compiles for sm_121. Correct output for 2D and 3D slices.
   - Dependencies: none.
 
-- [x] S73.1.1 CUDA RMSNorm kernel tests  Owner: TBD  Est: 1.5h  2026 03 06
-  - Test: single row (1x2048).
-  - Test: batch (128x2048).
-  - Test: small dimension (1x64) for edge case.
-  - Test: weight vector applied correctly.
-  - Compare with CPU fused RMSNorm within 1e-5.
+- [ ] S77.1.1 GPU Slice kernel unit tests  Owner: TBD  Est: 1.5h
+  - Test: 2D slice [4,8] -> rows [1:3] gives [2,8].
+  - Test: 2D slice [4,8] -> cols [2:6] gives [4,4].
+  - Test: 3D slice [2,4,8] -> [0:1, 1:3, :] gives [1,2,8].
+  - Test: full slice (no-op) returns same data.
+  - Compare with CPU Slice within 0 tolerance (exact).
 
-- [x] T73.2 Write Go wrapper and wire into GPUEngine  Owner: TBD  Est: 2h  2026 03 06
-  - Create `internal/cuda/kernels/rmsnorm.go` with CGo wrapper.
-  - Add `FusedRMSNorm` method to GPUEngine (or intercept in the RMSNorm
-    layer when engine is GPUEngine).
-  - Acceptance: RMSNorm uses fused GPU kernel when tensors are GPU-resident.
-  - Dependencies: T73.1, T69.2.
+- [ ] T77.2 Wire GPU Slice into GPUEngine  Owner: TBD  Est: 2h
+  - Modify tensor Slice to detect GPUStorage and use the GPU kernel.
+  - Option A: Add `Slice` method to Engine interface.
+  - Option B: Override in `tensor/gpu_storage.go` to use a kernel-based
+    sub-tensor extraction when a KernelRunner is available.
+  - The simpler approach: add a `SliceGPU` method on GPUEngine that layers
+    can call, similar to FusedRMSNormer. Layers that call tensor.Slice()
+    in the hot path (attention mask creation, Split) type-assert the engine.
+  - Acceptance: GPU-resident tensor.Slice() returns GPU-resident output.
+    No D2H copy in pprof.
+  - Dependencies: T77.1.
 
-- [x] S73.2.1 GPU RMSNorm parity test  Owner: TBD  Est: 1h  2026 03 06
-  - Compare GPU fused RMSNorm vs CPU fused RMSNorm for Gemma 3 hidden size.
+- [ ] S77.2.1 GPU Slice parity test  Owner: TBD  Est: 1h
+  - Compare GPU Slice vs CPU Slice for shapes used in Gemma 3 inference.
   - Verify output has GPUStorage.
 
-- [x] T73.3 Run golangci-lint on internal/cuda/kernels/ and compute/  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T73.2.
+- [ ] T77.3 Write GPU Split using Slice kernel  Owner: TBD  Est: 1.5h
+  - Modify `GPUEngine.Split` to call the GPU Slice kernel for each split chunk
+    instead of delegating to CPU.
+  - Split along axis: compute start/end for each chunk, call Slice kernel.
+  - Acceptance: GPUEngine.Split returns GPU-resident tensors. Parity with CPU.
+  - Dependencies: T77.2.
 
-### E74: End-to-End GPU Benchmark (O74)
+- [ ] S77.3.1 GPU Split parity test  Owner: TBD  Est: 1h
+  - Split [8, 2048] into 8 chunks of [1, 2048] along axis 0.
+  - Split [1, 2048] into 2 chunks of [1, 1024] along axis 1 (head split).
+  - Verify all output tensors have GPUStorage.
 
-After all GPU optimizations, measure tok/s on DGX Spark and compare with
-baselines.
+- [ ] T77.4 Write CUDA Concat kernel  Owner: TBD  Est: 2h
+  - Add to `internal/cuda/kernels/concat.cu`:
+    `concat_kernel(float **inputs, int *inputSizes, float *output, int numInputs,
+     int outerStride, int innerSize, int axis)`.
+  - Add `Concat` to KernelRunner interface.
+  - Wire into GPUEngine.Concat.
+  - Acceptance: GPUEngine.Concat uses GPU kernel for GPU-resident tensors.
+    Output has GPUStorage. Parity with CPU.
+  - Dependencies: none.
 
-- [x] T74.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h  2026 03 06
-  - Build zerfoo with CUDA tags on DGX Spark including all E69-E73 changes.
+- [ ] S77.4.1 GPU Concat parity test  Owner: TBD  Est: 1h
+  - Concat 8 tensors of [1, 2048] along axis 0 gives [8, 2048].
+  - Concat 2 tensors of [1, 1024] along axis 1 gives [1, 2048].
+  - Verify output has GPUStorage.
+
+- [ ] T77.5 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
+  - Packages: internal/cuda/kernels/, internal/gpuapi/, compute/, tensor/.
+  - Dependencies: T77.4.
+
+### E78: Float32 Weight Upload (O78)
+
+With Pow and binary ops now on GPU, uploading float32 weights to GPU is
+beneficial (previously it caused D2H from CPU fallback ops). This removes
+the remaining H2D copies for float32 normalization weights and biases.
+
+- [ ] T78.1 Enable float32 weight upload in GPUEngine.UploadWeights  Owner: TBD  Est: 1h
+  - Remove the skip for non-Q4 tensors in `GPUEngine.UploadWeights`.
+  - Upload all float32 weight tensors to GPU using NewGPUStorageFromSlice.
+  - Acceptance: Both Q4 and float32 weights are GPU-resident after load.
+  - Dependencies: E75, E76 (Pow and binary ops must be on GPU first).
+
+- [ ] S78.1.1 Float32 weight upload test  Owner: TBD  Est: 45m
+  - Load model with -device cuda.
+  - Verify all Parameter tensors (including float32 norm weights) have GPUStorage.
+  - Run forward pass. Verify correct output.
+
+- [ ] T78.2 Run golangci-lint on compute/ and inference/  Owner: TBD  Est: 15m
+  - Dependencies: T78.1.
+
+### E79: End-to-End GPU Benchmark (O78)
+
+After all optimizations, measure tok/s on DGX Spark and compare with baselines.
+
+- [ ] T79.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h
+  - Build zerfoo with CUDA tags on DGX Spark including all E75-E78 changes.
   - Run `bench_tps -model ~/models/gemma3-q4 -device cuda -tokens 100`.
   - Capture pprof profile.
-  - Acceptance: Profile captured showing new GPU utilization breakdown.
-  - Dependencies: T69.4, T70.3, T71.3, T72.2, T73.2.
-  - Result: cgocall 58% (down from 43% baseline but now includes activation H2D/D2H),
-    Pow CPU fallback 8.9%, binaryOp CPU fallback 10.4%, GPUStorage.Slice D2H 24%.
+  - Acceptance: Profile captured showing reduced cgocall % and eliminated
+    CPU fallbacks.
+  - Dependencies: T78.1, T77.5.
 
-- [x] S74.1.1 GPU profile report  Owner: TBD  Est: 30m  2026 03 06
-  - GPU: 6.84 tok/s median. cgocall 58%. Remaining CPU fallbacks: Pow (8.9%),
-    some broadcast patterns (10.4%), GPUStorage.Slice D2H (24%).
+- [ ] S79.1.1 GPU profile report  Owner: TBD  Est: 30m
+  - Document: tok/s, cgocall %, remaining CPU fallbacks, GPU utilization.
 
-- [x] T74.2 Compare GPU vs CPU tok/s  Owner: TBD  Est: 1h  2026 03 06
+- [ ] T79.2 Compare GPU vs CPU tok/s  Owner: TBD  Est: 1h
   - Run same prompt with -device cpu and -device cuda.
   - Measure tok/s for both. 3 runs each, report median.
   - Acceptance: GPU tok/s >= 10 (target). If not met, identify remaining
     bottleneck and document what would be needed.
-  - Dependencies: T74.1.
-  - Result: GPU 6.84 tok/s, CPU 6.61 tok/s. Target NOT met.
-    Remaining bottlenecks: GPU PowScalar kernel needed, scalar-broadcast for
-    all binary ops, more complete GPU op coverage to eliminate D2H round-trips.
+  - Dependencies: T79.1.
 
-- [x] S74.2.1 Benchmark comparison report  Owner: TBD  Est: 30m  2026 03 06
-  - GPU: 6.84 tok/s (up from 5.12 baseline, +33.6%). CPU: 6.61 tok/s.
-    GPU now faster than CPU. 10 tok/s target requires GPU PowScalar,
-    full scalar-broadcast, and eliminating remaining D2H round-trips.
+- [ ] S79.2.1 Benchmark comparison report  Owner: TBD  Est: 30m
 
-- [x] T74.3 Verify output correctness  Owner: TBD  Est: 1h  2026 03 06
+- [ ] T79.3 Verify output correctness  Owner: TBD  Est: 1h
   - Generate 50 tokens with same prompt on CPU and GPU.
-  - Compare output text (may differ due to floating point but should be
-    coherent on both).
-  - Acceptance: Both outputs produce coherent English text. No NaN or Inf.
-  - Dependencies: T74.1.
-  - Result: GPU and CPU both produce coherent English text. No NaN or Inf.
-    Fixed N-D broadcast shape bug (98c3f60) that was causing prefill failures.
+  - Compare output text. Both should produce coherent English text.
+  - Acceptance: No NaN or Inf. Coherent output on both devices.
+  - Dependencies: T79.1.
 
-- [x] S74.3.1 Output correctness test  Owner: TBD  Est: 30m  2026 03 06
+- [ ] S79.3.1 Output correctness test  Owner: TBD  Est: 30m
 
-- [x] T74.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m  2026 03 06
-  - Dependencies: T74.3.
-  - Result: 0 issues on compute/, graph/, tensor/, inference/.
+- [ ] T79.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+  - Dependencies: T79.3.
 
 ---
 
 ## 4. Parallel Work
 
-Five epics fall into 4 tracks. E69 (tensor residency) is the foundation
-that most other epics depend on, but kernel development can proceed in
-parallel.
+Five epics fall into 3 tracks. E75/E76 (scalar ops) and E77 (D2H elimination)
+are independent kernel work. E78 (weight upload) depends on E75+E76. E79
+(benchmark) depends on all.
 
 | Track | Epics | Description | Sync Points |
 |-------|-------|-------------|-------------|
-| A: Tensor Residency | E69 | GPU-resident tensor pipeline | Foundation for all others |
-| B: GPU Kernels | E70, E72 | Transpose and Gather CUDA kernels | T70.3, T72.2 wait on E69.T69.2 |
-| C: Broadcasting + Fusion | E71, E73 | Element-wise broadcasting + fused RMSNorm | T71.3, T73.2 wait on E69.T69.2 |
-| D: Benchmark | E74 | End-to-end measurement | Waits on all of E69-E73 |
+| A: Scalar Kernels | E75, E76 | PowScalar + SubScalar + scalar-broadcast | Converge before E78 |
+| B: D2H Elimination | E77 | GPU Slice/Split/Concat kernels | Converge before E79 |
+| C: Weight Upload + Benchmark | E78, E79 | Float32 upload + final measurement | After A + B |
 
 ### Within-Track Parallelism
 
 | Track | Parallel Tasks | Notes |
 |-------|----------------|-------|
-| B | T70.1 and T72.1 | CUDA kernel writing is independent |
-| C | T71.1 and T73.1 | Pattern analysis and kernel writing are independent |
-| B+C | T70.1, T72.1, T71.2, T73.1 | All kernel development can happen in parallel |
+| A | T75.1 and T76.1 | PowScalar and SubScalar kernels are independent |
+| B | T77.1 and T77.4 | Slice and Concat kernels are independent |
+| A+B | T75.1, T76.1, T77.1, T77.4 | All kernel development in parallel |
 
 ### Execution Order
 
-Phase 1 (parallel):
-- E69.T69.1 (audit) starts immediately.
-- E70.T70.1, E72.T72.1, E73.T73.1 (CUDA kernels) start immediately.
-- E71.T71.1 (broadcasting patterns) starts immediately.
+Wave 1 (parallel):
+- T75.1 (PowScalar kernel), T76.1 (SubScalar kernel), T77.1 (Slice kernel),
+  T77.4 (Concat kernel) -- all independent CUDA kernel work.
 
-Phase 2 (after E69.T69.1):
-- E69.T69.2 (GPU-resident tensors) -- critical path.
-- E70.T70.2, E71.T71.2 (Go wrappers) can proceed in parallel.
+Wave 2 (after Wave 1):
+- T75.2 (PowScalar Go wrapper), T76.2 (scalar-broadcast detection),
+  T76.3 (SubScalar wiring), T77.2 (GPU Slice wiring), T77.3 (GPU Split).
 
-Phase 3 (after E69.T69.2):
-- E69.T69.3, T69.4 (weight upload, logits D2H).
-- E70.T70.3, E71.T71.3, E72.T72.2, E73.T73.2 (wire into GPUEngine).
+Wave 3 (after Wave 2):
+- T75.3 (wire PowScalar into GPUEngine.Pow).
+- All lint tasks (T75.4, T76.4, T77.5).
 
-Phase 4 (after all wiring):
-- E74 (benchmark).
+Wave 4 (after E75 + E76):
+- T78.1 (float32 weight upload).
+
+Wave 5 (after all):
+- E79 (benchmark).
 
 ---
 
@@ -462,11 +419,12 @@ Phase 4 (after all wiring):
 
 | Milestone | ID | Dependencies | Exit Criteria |
 |-----------|----|-------------|---------------|
-| M38: GPU tensor residency | E69 | none | Intermediate tensors stay on GPU. Weights uploaded at load. Only logits copied D2H. |
-| M39: GPU kernel coverage | E70, E71, E72, E73 | E69 | Zero CPU fallbacks for Transpose, binary ops, Gather, RMSNorm during Gemma 3 inference. |
-| M40: 10 tok/s GPU | E74 | E69-E73 | bench_tps reports >= 10 tok/s with -device cuda on DGX Spark. |
+| M41: Scalar GPU ops | E75, E76 | none | PowScalar + SubScalar + scalar-broadcast on GPU. Zero Pow/binary CPU fallbacks. |
+| M42: D2H eliminated | E77 | none | GPU Slice/Split/Concat. GPUStorage.Slice D2H < 5% in pprof. |
+| M43: Full GPU coverage | E78 | M41 | All float32 weights on GPU. Zero H2D in forward pass. |
+| M44: 10 tok/s GPU | E79 | M41, M42, M43 | bench_tps reports >= 10 tok/s with -device cuda on DGX Spark. |
 
-Critical path: E69.T69.2 -> E69.T69.3 -> E69.T69.4 -> E74.T74.1
+Critical path: T75.1 -> T75.2 -> T75.3 -> T78.1 -> T79.1
 
 ---
 
@@ -474,13 +432,12 @@ Critical path: E69.T69.2 -> E69.T69.3 -> E69.T69.4 -> E74.T74.1
 
 | ID | Risk | Impact | Likelihood | Mitigation |
 |----|------|--------|------------|------------|
-| R69 | GPU tensor residency breaks existing CPU interop | Tests fail, correctness issues | Medium | Parity tests for every modified method. Keep CPU fallback path intact. |
-| R70 | Unified memory on DGX Spark blurs H2D/D2H overhead | Tensor residency shows less improvement than expected | Medium | Profile with explicit device memory (cudaMalloc not cudaMallocManaged). If unified memory hides transfers, the improvement may already be partially captured. |
-| R71 | Broadcasting kernel adds complexity to all element-wise ops | Maintenance burden, potential bugs | Low | Only implement the 3 patterns observed in Gemma 3. Do not generalize to arbitrary broadcasting. |
-| R72 | Fused RMSNorm kernel has numerical differences from decomposed path | Output quality regression | Low | Test within 1e-5 tolerance. Use Kahan summation in reduction if needed. |
-| R73 | sm_121 shared memory limits constrain kernel tile sizes | Transpose or RMSNorm kernel hits shared memory limit | Medium | Use 32x32 tiles (4KB) for transpose. RMSNorm uses warp-level reduction for D<=8192. Profile shared memory usage. |
-| R74 | 10 tok/s target not achievable without faster GEMV | GPU still bottlenecked by MatMul kernel | Medium | If target not met, document remaining bottleneck. cuBLAS GEMV is already used; potential improvement via batched inference or BF16. |
-| R75 | DGX Spark network connectivity issues | Cannot deploy and test on GPU | Low | Keep local CPU tests passing. Batch DGX work into focused sessions. |
+| R76 | PowScalar kernel numerical precision differs from CPU powf | Output quality regression | Low | Test within 1e-5 tolerance. Use CUDA `powf` which matches glibc. |
+| R77 | GPU Slice kernel for non-contiguous strides is complex | Implementation takes longer than estimated | Medium | Start with contiguous fast path (memcpy). Add strided path only if profiling shows it in hot path. |
+| R78 | Float32 weight upload increases GPU memory usage | OOM on small GPUs | Low | DGX Spark GB10 has 128GB. Gemma 3 2B float32 weights are ~400MB. Not a concern. |
+| R79 | 10 tok/s target still not achieved after all changes | Unknown bottleneck remains | Medium | If target not met, re-profile and document. Possible next steps: batched inference, BF16 compute, or CUDA graph capture. |
+| R80 | Scalar-broadcast for non-commutative ops (Sub, Div) when scalar is on the left | Wrong results if operand order is not handled correctly | Medium | Add explicit tests for `[1] - [M,D]` and `[1] / [M,D]` cases. Use broadcast kernel with stride 0 for left-scalar. |
+| R81 | DGX Spark network connectivity | Cannot deploy and test on GPU | Low | Keep local CPU tests passing. Batch DGX work into focused sessions. |
 
 ---
 
@@ -503,7 +460,7 @@ A task is done when:
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(cuda): add GPU transpose kernel`.
+- Use Conventional Commits: `feat(cuda): add PowScalar kernel`.
 - Always run linters and formatters before committing.
 
 ### DGX Spark Protocol
@@ -536,50 +493,20 @@ A task is done when:
 
 ## 8. Progress Log
 
-### Change Summary -- 2026-03-06 (Phase 32 Complete)
+### Change Summary -- 2026-03-06
 
-All 6 epics (E69-E74) complete. GPU inference improved from 5.12 to 6.84 tok/s
-(+33.6%) on DGX Spark GB10. GPU now faster than CPU (6.61 tok/s). 10 tok/s
-target not met -- remaining bottlenecks documented in E74 results.
+Created Phase 33 plan. Trimmed Phase 32 completed epics (E69-E74) to
+docs/design.md section 15.14. Created ADR 023 for scalar ops strategy.
 
-Key implementations:
-- T69.1-T69.5: GPU tensor residency, Q4 weight pre-upload, Graph.ConstantTensors()
-- T70.1-T70.4: GPU Transpose (2D tiled + N-D stride-based)
-- T71.1-T71.4: GPU broadcasting (stride-based 2D) + N-D shape fix (98c3f60)
-- T72.1-T72.3: GPU Gather kernel
-- T73.1-T73.3: Fused GPU RMSNorm kernel
-- T74.1-T74.4: Benchmarked, profiled, verified correctness, lint clean
-
-Bug fixes:
-- fix(compute): N-D broadcast output shape in gpuBroadcastOp (98c3f60)
-- fix(compute): GPU Reshape zero-copy view for GPUStorage (7e0c11c)
-- fix(compute): nil axes in GPU Transpose (8525515)
-
-All 16 test/benchmark subtasks marked complete (verified on DGX Spark).
-
-### Change Summary -- 2026-03-06 (Initial)
-
-Created Phase 32 plan replacing Phase 31 plan.
-
-Trim performed:
-- Phase 31 completed epics (E59, E62.T62.1, E63.T63.1, E64-E68) extracted to
-  docs/design.md section 15.13.
-- Phase 31 incomplete tasks archived:
-  - E60 (speculative decoding): deferred to future phase.
-  - E61 (GGUF real models): deferred to future phase.
-  - E63 T63.2-T63.5 (DGX runner, GPU CI): deferred to future phase.
-  - E62 T62.2-T62.5 (GPU fallback fixes): evolved into Phase 32 E69-E73.
-
-New epics added:
-- E69: GPU Tensor Residency (biggest expected impact, 43% cgocall).
-- E70: GPU Transpose Kernel (8.1% CPU fallback).
-- E71: GPU Element-wise Broadcasting (4.4% CPU fallback).
-- E72: GPU Gather Kernel (embedding lookup fallback).
-- E73: Fused GPU RMSNorm Kernel (reduce kernel launch count).
-- E74: End-to-End GPU Benchmark (validate >10 tok/s target).
+New epics:
+- E75: PowScalar GPU Kernel (8.9% Pow CPU fallback).
+- E76: Scalar-Broadcast for All Binary Ops (10.4% CPU fallback).
+- E77: GPU Slice/Split/Concat (24% D2H elimination).
+- E78: Float32 Weight Upload (enable now that Pow/binary ops are on GPU).
+- E79: End-to-End GPU Benchmark (validate >= 10 tok/s target).
 
 ADRs created:
-- docs/adr/022-gpu-first-inference-pipeline.md: GPU-first strategy decision.
+- docs/adr/023-gpu-scalar-ops-d2h-elimination.md: Scalar ops strategy decision.
 
 ---
 
@@ -588,9 +515,9 @@ ADRs created:
 ### For a New Contributor
 
 - **Architecture:** Read docs/design.md for interface contracts, package layout,
-  GPU architecture, and troubleshooting. Design decisions in docs/adr/ (001-022).
-- **Phases 1-31:** All documented in docs/design.md sections 15.1-15.13.
-- **Phase 32:** This plan is the source of truth.
+  GPU architecture, and troubleshooting. Design decisions in docs/adr/ (001-023).
+- **Phases 1-32:** All documented in docs/design.md sections 15.1-15.14.
+- **Phase 33:** This plan is the source of truth.
 - **Quality:** See docs/QUALITY.md for test coverage report.
 - **How to build:**
   - CPU: `go build ./...`
@@ -601,23 +528,20 @@ ADRs created:
 
 ### Key Starting Points
 
-1. **E69 (Tensor Residency):** Start with `compute/gpu_engine.go`. Every method
-   that creates a result tensor needs to check if inputs are GPU-resident and
-   keep output on GPU. The `tensor/gpu_storage.go` GPUStorage type wraps device
-   pointers.
+1. **E75 (PowScalar):** `compute/gpu_kernels.go` line 363 -- `gpuPow` with
+   `sameShape` guard. When exponent has 1 element, extract scalar and use
+   `gpuScalarOp` with new `kernels.PowScalar`.
 
-2. **E70 (Transpose):** `compute/gpu_engine.go` line 382 is the CPU fallback.
-   Write kernel in `internal/cuda/kernels/transpose.cu`. Wire via Go wrapper.
+2. **E76 (Scalar-Broadcast):** `compute/gpu_kernels.go` line 77 --
+   `gpuBroadcastOp` switch. Add case before existing switch: if either operand
+   has 1 total element, extract scalar and dispatch to scalar kernel.
 
-3. **E71 (Broadcasting):** `compute/gpu_engine.go` `sameShape()` guard is the
-   trigger. GPU kernels in `internal/cuda/kernels/elementwise.cu` need stride
-   indexing.
+3. **E77 (GPU Slice):** `tensor/gpu_storage.go` line 188 -- `GPUStorage.Slice()`
+   is the D2H bottleneck. Add CUDA kernel in `internal/cuda/kernels/slice.cu`.
+   Wire via a `SliceGPU` method on GPUEngine.
 
-4. **E72 (Gather):** `compute/gpu_engine.go` line 423 is the CPU fallback.
-   Simple kernel: each thread copies one embedding row.
-
-5. **E73 (RMSNorm):** CPU fused version in `compute/fused_rmsnorm.go` is the
-   reference. GPU kernel does the same in one pass with shared memory reduction.
+4. **E78 (Weight Upload):** `compute/gpu_engine.go` line 154 -- remove the
+   skip for non-Q4 tensors. Upload float32 weights to GPU.
 
 ### External Dependencies
 
@@ -645,44 +569,28 @@ ADRs created:
 
 | File | Purpose |
 |------|---------|
-| `compute/engine.go` | Engine[T] interface (25 methods) |
+| `compute/engine.go` | Engine[T] interface (30+ methods) |
 | `compute/gpu_engine.go` | GPUEngine with CUDA acceleration + CPU fallback |
-| `compute/gpu_kernels.go` | Element-wise GPU kernel launchers |
-| `compute/gpu_cudnn.go` | cuDNN DNN operations |
-| `compute/fused_rmsnorm.go` | CPU fused RMSNorm (reference for GPU kernel) |
-| `compute/fused_rope.go` | CPU fused RoPE |
-| `tensor/storage.go` | Storage[T] interface, CPUStorage[T] |
-| `tensor/gpu_storage.go` | GPUStorage[T] with device pointer |
-| `internal/cuda/kernels/elementwise.go` | 25 element-wise kernel Go wrappers |
-| `internal/cuda/kernels/elementwise.cu` | CUDA element-wise kernel source |
-| `internal/cuda/kernels/gemm_q4.go` | Q4 dequant-GEMM Go wrapper |
-| `internal/cuda/kernels/flash_attention.go` | Flash attention kernel wrapper |
+| `compute/gpu_kernels.go` | gpuBinaryOp, gpuUnaryOp, gpuScalarOp, gpuBroadcastOp |
+| `compute/broadcast.go` | broadcastShape() for NumPy-style output shapes |
+| `internal/cuda/kernels/elementwise.cu` | CUDA element-wise kernels |
+| `internal/cuda/kernels/elementwise.go` | Go CGo wrappers for CUDA kernels |
+| `internal/cuda/kernels/slice.cu` | (NEW) GPU strided slice kernel |
+| `internal/cuda/kernels/concat.cu` | (NEW) GPU concat kernel |
+| `internal/gpuapi/kernels.go` | KernelRunner interface |
+| `internal/gpuapi/cuda_kernels.go` | CUDA KernelRunner implementation |
+| `tensor/gpu_storage.go` | GPUStorage[T] with Slice() D2H copy |
+| `layers/core/pow.go` | Pow layer calling engine.Pow() |
 | `inference/inference.go` | Load(), WithDevice(), engine creation |
-| `inference/engine_cuda.go` | CUDA engine creation (build-tag gated) |
-| `generate/generator.go` | Autoregressive decode loop |
 | `cmd/bench_tps/main.go` | tok/s benchmark binary |
-| `graph/compile.go` | Graph compiler, ExecutionPlan |
-| `internal/workerpool/pool.go` | Persistent worker pool |
 
 ### Estimated Effort Summary
 
 | Epic | Area | Tasks | Estimated Hours |
 |------|------|-------|----------------|
-| E69: GPU Tensor Residency | compute/, tensor/, inference/ | 5 tasks + 4 subtests | 14.75h |
-| E70: GPU Transpose Kernel | internal/cuda/, compute/ | 4 tasks + 2 subtests | 9.25h |
-| E71: GPU Broadcasting | internal/cuda/, compute/ | 4 tasks + 3 subtests | 9.0h |
-| E72: GPU Gather Kernel | internal/cuda/, compute/ | 3 tasks + 2 subtests | 6.25h |
-| E73: Fused GPU RMSNorm | internal/cuda/, compute/ | 3 tasks + 2 subtests | 7.75h |
-| E74: GPU Benchmark | DGX Spark | 4 tasks + 3 subtests | 5.75h |
-| **Total** | **GPU pipeline** | **23 tasks + 16 subtests** | **~53h** |
-
-### Archived from Phase 31
-
-The following Phase 31 tasks are deferred to future phases:
-
-| Epic | Status | Reason |
-|------|--------|--------|
-| E60: Speculative Decoding | All tasks incomplete | Needs draft model creation, not GPU-related |
-| E61: GGUF Real Models | All tasks incomplete | Needs HF downloads, not GPU-related |
-| E63 T63.2-T63.5 | Incomplete | DGX runner setup, GPU CI infrastructure |
-| E62 T62.4 | Incomplete | GPU PagedAttention, depends on E69 tensor residency |
+| E75: PowScalar Kernel | internal/cuda/, compute/ | 4 tasks + 2 subtests | 5.25h |
+| E76: Scalar-Broadcast | internal/cuda/, compute/ | 4 tasks + 2 subtests | 5.75h |
+| E77: GPU Slice/Split/Concat | internal/cuda/, compute/, tensor/ | 5 tasks + 4 subtests | 11.5h |
+| E78: Float32 Weight Upload | compute/, inference/ | 2 tasks + 1 subtest | 2.0h |
+| E79: GPU Benchmark | DGX Spark | 4 tasks + 3 subtests | 5.25h |
+| **Total** | **GPU scalar ops + D2H** | **19 tasks + 12 subtests** | **~30h** |
