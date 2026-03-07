@@ -1,3 +1,33 @@
+# Phase 34 -- Track 0: Composition Fixes
+
+## Status: In Progress
+
+## 2026-03-07 -- Session Start
+
+Track 0, Wave 0-1: Refactor violated layers to compose Engine primitives.
+
+### Completed
+
+| Task | File | Commit | Summary |
+|------|------|--------|---------|
+| T96.3 | layers/activations/gelu.go | ea3e04a | Gelu: replaced BaseActivation closure with explicit engine calls (Mul, MulScalar, Add, AddScalar, Tanh). Also fixed FastGelu to use engine.Tanh. |
+| T96.2 | layers/attention/qk_norm.go | 8d0be2a | QKNorm: replaced manual Data() loops with engine.Mul, ReduceMean, AddScalar, Rsqrt, Mul. |
+| T96.4 | layers/normalization/batch_norm.go | 0c9f356 | BatchNorm: replaced per-channel loops with engine.Reshape (broadcast) + Sub, Div, Mul, Add. |
+| T96.5 | layers/attention/local_attention.go | 35b9cf6 | LocalAttention mask: build data slice directly, pass to tensor.New. No more Data() mutation. |
+| T96.1 | layers/core/matmul_nbits.go | ec251e2 | MatMulNBits: eagerly dequantize at construction so Forward() only uses engine.MatMul. |
+
+### Remaining Track 0 Tasks
+
+Priority 3 (not on Gemma 3 path):
+- T96.6 Conv2d: im2col + engine.MatMul decomposition (3h est.)
+- T96.7/T96.8 MoE: needs engine.TopK or sort primitive
+- T96.9 PolynomialExpansion: per-term engine.Pow + Mul
+- T96.10 SpectralFingerprint (core): DFT -> MatMul with Fourier basis
+- T96.11 S4: sequential scan, per-step engine calls
+- T96.12 SpectralFeature (features): external Gonum FFT
+
+---
+
 # Phase 29 Updates
 
 ## 2026-03-06: Q4 B-Operand NEON + Parallel GEMV (6.5 tok/s)
