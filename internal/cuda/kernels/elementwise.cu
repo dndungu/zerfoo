@@ -31,6 +31,60 @@ __global__ void kernel_pow(const float* base, const float* exp, float* c, int n)
     if (idx < n) c[idx] = powf(base[idx], exp[idx]);
 }
 
+// ---------- Broadcast binary elementwise ----------
+// Supports 2D broadcasting via row/col strides.
+// For [M,D] op [1,D]: stride_b_row=0, stride_b_col=1
+// For [M,D] op [M,1]: stride_b_row=1, stride_b_col=0
+// For [M,D] op [M,D]: stride_b_row=D, stride_b_col=1
+
+__global__ void kernel_add_broadcast(const float* a, const float* b, float* c,
+                                      int stride_a_row, int stride_a_col,
+                                      int stride_b_row, int stride_b_col,
+                                      int M, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * D) return;
+    int row = idx / D;
+    int col = idx % D;
+    c[idx] = a[row * stride_a_row + col * stride_a_col]
+           + b[row * stride_b_row + col * stride_b_col];
+}
+
+__global__ void kernel_sub_broadcast(const float* a, const float* b, float* c,
+                                      int stride_a_row, int stride_a_col,
+                                      int stride_b_row, int stride_b_col,
+                                      int M, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * D) return;
+    int row = idx / D;
+    int col = idx % D;
+    c[idx] = a[row * stride_a_row + col * stride_a_col]
+           - b[row * stride_b_row + col * stride_b_col];
+}
+
+__global__ void kernel_mul_broadcast(const float* a, const float* b, float* c,
+                                      int stride_a_row, int stride_a_col,
+                                      int stride_b_row, int stride_b_col,
+                                      int M, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * D) return;
+    int row = idx / D;
+    int col = idx % D;
+    c[idx] = a[row * stride_a_row + col * stride_a_col]
+           * b[row * stride_b_row + col * stride_b_col];
+}
+
+__global__ void kernel_div_broadcast(const float* a, const float* b, float* c,
+                                      int stride_a_row, int stride_a_col,
+                                      int stride_b_row, int stride_b_col,
+                                      int M, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * D) return;
+    int row = idx / D;
+    int col = idx % D;
+    c[idx] = a[row * stride_a_row + col * stride_a_col]
+           / b[row * stride_b_row + col * stride_b_col];
+}
+
 // ---------- Scalar operations ----------
 
 __global__ void kernel_add_scalar(const float* a, float scalar, float* c, int n) {
@@ -194,6 +248,50 @@ static inline void grid_config(int n, int* grid, int* block) {
 }
 
 extern "C" {
+
+cudaError_t launch_add_broadcast(const float* a, const float* b, float* c,
+                                  int stride_a_row, int stride_a_col,
+                                  int stride_b_row, int stride_b_col,
+                                  int M, int D, cudaStream_t stream) {
+    int n = M * D;
+    int grid, block; grid_config(n, &grid, &block);
+    kernel_add_broadcast<<<grid, block, 0, stream>>>(a, b, c,
+        stride_a_row, stride_a_col, stride_b_row, stride_b_col, M, D);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_sub_broadcast(const float* a, const float* b, float* c,
+                                  int stride_a_row, int stride_a_col,
+                                  int stride_b_row, int stride_b_col,
+                                  int M, int D, cudaStream_t stream) {
+    int n = M * D;
+    int grid, block; grid_config(n, &grid, &block);
+    kernel_sub_broadcast<<<grid, block, 0, stream>>>(a, b, c,
+        stride_a_row, stride_a_col, stride_b_row, stride_b_col, M, D);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_mul_broadcast(const float* a, const float* b, float* c,
+                                  int stride_a_row, int stride_a_col,
+                                  int stride_b_row, int stride_b_col,
+                                  int M, int D, cudaStream_t stream) {
+    int n = M * D;
+    int grid, block; grid_config(n, &grid, &block);
+    kernel_mul_broadcast<<<grid, block, 0, stream>>>(a, b, c,
+        stride_a_row, stride_a_col, stride_b_row, stride_b_col, M, D);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_div_broadcast(const float* a, const float* b, float* c,
+                                  int stride_a_row, int stride_a_col,
+                                  int stride_b_row, int stride_b_col,
+                                  int M, int D, cudaStream_t stream) {
+    int n = M * D;
+    int grid, block; grid_config(n, &grid, &block);
+    kernel_div_broadcast<<<grid, block, 0, stream>>>(a, b, c,
+        stride_a_row, stride_a_col, stride_b_row, stride_b_col, M, D);
+    return cudaGetLastError();
+}
 
 cudaError_t launch_add(const float* a, const float* b, float* c, int n, cudaStream_t stream) {
     int grid, block; grid_config(n, &grid, &block);
