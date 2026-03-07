@@ -665,11 +665,30 @@ func (e *GPUEngine[T]) Sqrt(ctx context.Context, a *tensor.TensorNumeric[T], dst
 }
 
 func (e *GPUEngine[T]) Split(ctx context.Context, a *tensor.TensorNumeric[T], numSplits int, axis int) ([]*tensor.TensorNumeric[T], error) {
-	return e.cpu.Split(ctx, a, numSplits, axis)
+	if !isFloat32[T]() {
+		return e.cpu.Split(ctx, a, numSplits, axis)
+	}
+	gs, ok := a.GetStorage().(*tensor.GPUStorage[T])
+	if !ok {
+		return e.cpu.Split(ctx, a, numSplits, axis)
+	}
+	return e.gpuSplit(gs.Ptr(), a.Shape(), numSplits, axis)
 }
 
 func (e *GPUEngine[T]) Concat(ctx context.Context, tensors []*tensor.TensorNumeric[T], axis int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	return e.cpu.Concat(ctx, tensors, axis, dst...)
+	if !isFloat32[T]() || len(tensors) == 0 {
+		return e.cpu.Concat(ctx, tensors, axis, dst...)
+	}
+	// Check all inputs are GPU-resident.
+	ptrs := make([]unsafe.Pointer, len(tensors))
+	for i, t := range tensors {
+		gs, ok := t.GetStorage().(*tensor.GPUStorage[T])
+		if !ok {
+			return e.cpu.Concat(ctx, tensors, axis, dst...)
+		}
+		ptrs[i] = gs.Ptr()
+	}
+	return e.gpuConcat(ptrs, tensors, axis, dst...)
 }
 
 func (e *GPUEngine[T]) Repeat(ctx context.Context, a *tensor.TensorNumeric[T], axis int, repetitions int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
