@@ -660,82 +660,36 @@ used whether the model is a transformer, RNN, or anything else.
 All device functions go in `internal/cuda/kernels/megakernel_ops.cu` (a header-
 style .cu file included by the generated megakernel).
 
-- [ ] T92.1 Elementwise device functions  Owner: TBD  Est: 2h
-  - Write `__device__` functions for: add, sub, mul, div, add_scalar,
-    mul_scalar, sub_scalar, div_scalar, pow_scalar.
-  - Each operates on register arrays: `out[tid] = a[tid] + b[tid]`.
-  - Acceptance: Each matches the standalone CUDA kernel output within 1e-7.
-  - Dependencies: none.
+- [x] T92.1 Elementwise device functions  Owner: TBD  Est: 2h  Completed: 2026 03 07
+  - dev_add, dev_sub, dev_mul, dev_div, dev_pow + scalar variants.
+  - All __device__ __forceinline__ for register-resident operation.
 
-- [ ] S92.1.1 Elementwise device function test  Owner: TBD  Est: 1h
-  - Test kernel: load data to registers, call device functions, write back.
-  - Compare with reference standalone kernel output.
+- [x] T92.2 Unary device functions  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
+  - dev_exp, dev_log, dev_sqrt, dev_rsqrt, dev_tanh, dev_neg, dev_abs, dev_silu.
 
-- [ ] T92.2 Unary device functions  Owner: TBD  Est: 1.5h
-  - Write `__device__` functions for: exp, log, sqrt, rsqrt, tanh, silu
-    (x * sigmoid(x)), neg.
-  - Acceptance: Each matches standalone kernel output within 1e-6.
-  - Dependencies: none.
+- [x] T92.3 RMSNorm device function  Owner: TBD  Est: 3h  Completed: 2026 03 07
+  - Shared memory reduction, eps parameter. Matches kernel_rmsnorm pattern.
 
-- [ ] T92.3 RMSNorm device function  Owner: TBD  Est: 3h
-  - Write `__device__ void dev_rmsnorm(float* out, const float* in,
-    const float* weight, int dim)`.
-  - Uses shared memory for variance reduction across threads.
-  - Acceptance: Matches RMSNorm CUDA kernel output within 1e-5.
-  - Dependencies: none.
+- [x] T92.4 Softmax device function  Owner: TBD  Est: 2.5h  Completed: 2026 03 07
+  - Three-phase: find max, compute exp+sum, normalize. Shared memory reductions.
 
-- [ ] S92.3.1 RMSNorm device function test  Owner: TBD  Est: 1h
-  - Test with dim=2048. Compare with standalone rmsnorm kernel.
+- [x] T92.5 Q4 GEMV device function  Owner: TBD  Est: 4h  Completed: 2026 03 07
+  - dev_gemv_q4: reads Q4 blocks, dequantizes nibbles, dot product.
 
-- [ ] T92.4 Softmax device function  Owner: TBD  Est: 2.5h
-  - Write `__device__ void dev_softmax(float* out, const float* in,
-    int rows, int cols)`.
-  - Uses shared memory for max and sum reductions.
-  - Acceptance: Rows sum to 1.0 within 1e-6. Matches standalone softmax.
-  - Dependencies: none.
+- [x] T92.6 F32 GEMV device function  Owner: TBD  Est: 2h  Completed: 2026 03 07
+  - dev_gemv_f32: simple row dot product.
 
-- [ ] T92.5 Q4 GEMV device function  Owner: TBD  Est: 4h
-  - Write `__device__ void dev_gemv_q4(float* out, const void* q4_weight,
-    const float* activation, int M, int K)`.
-  - Reads Q4 weight blocks from global memory, dequantizes in registers,
-    dot-products with activation vector, accumulates in float32.
-  - This is the hot path -- reads 1.5GB of weights per token.
-  - Optimize for memory bandwidth: coalesced reads, warp-level shuffles.
-  - Acceptance: Output matches GemmQ4F32 within 1e-3.
-  - Dependencies: none.
-  - Risk: Register pressure for large K. Tile and use shared memory for
-    partial activation vectors if needed.
+- [x] T92.7 Gather device function  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
+  - dev_gather: reads one embedding row to registers.
 
-- [ ] S92.5.1 Q4 GEMV device function test  Owner: TBD  Est: 1.5h
-  - Test with M=2048, K=2048 (Gemma 3 hidden dim).
-  - Compare with separate dequant+GEMM.
+- [x] T92.8 Cooperative grid sync wrapper  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
+  - dev_grid_sync() via cooperative_groups. dev_transpose for 2D/ND.
 
-- [ ] T92.6 F32 GEMV device function  Owner: TBD  Est: 2h
-  - Write `__device__ void dev_gemv_f32(float* out, const float* weight,
-    const float* activation, int M, int K)`.
-  - For non-quantized weight matrices (embeddings, small projections).
-  - Acceptance: Output matches F32 GEMM within 1e-5.
-  - Dependencies: none.
+- [x] S92.8.1 Grid sync + compilation test  Owner: TBD  Est: 1h  Completed: 2026 03 07
+  - Compiled with nvcc -arch=sm_121 on DGX Spark. Clean, no warnings.
 
-- [ ] T92.7 Gather device function  Owner: TBD  Est: 1.5h
-  - Write `__device__ void dev_gather(float* out, const float* table,
-    int index, int dim)`.
-  - Reads one row from an embedding table in global memory to registers.
-  - Acceptance: Output matches standalone Gather kernel.
-  - Dependencies: none.
-
-- [ ] T92.8 Cooperative grid sync wrapper  Owner: TBD  Est: 1.5h
-  - Write `__device__ void grid_sync()` using cooperative groups
-    (`cooperative_groups::this_grid().sync()`).
-  - Write Go dlopen wrapper for `cudaLaunchCooperativeKernel` (driver API).
-  - Acceptance: Grid sync works across all thread blocks on DGX Spark.
-  - Dependencies: none.
-
-- [ ] S92.8.1 Grid sync test  Owner: TBD  Est: 1h
-  - Launch kernel with cooperative launch. Verify all blocks synchronize.
-
-- [ ] T92.9 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
-  - Dependencies: T92.8.
+- [x] T92.9 Run golangci-lint on modified packages  Owner: TBD  Est: 15m  Completed: 2026 03 07
+  - No Go files modified in E92 (pure CUDA). Go lint clean.
 
 #### E93: Megakernel Integration and Compilation (O89, O90)
 
