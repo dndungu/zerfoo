@@ -710,7 +710,7 @@ compile it (JIT or cached), and use it for decode tokens.
   - First compile creates .so + hash. Second compile uses cache.
   - Different source triggers recompilation.
 
-- [ ] T93.3 Wire megakernel into decode loop  Owner: TBD  Est: 3h
+- [x] T93.3 Wire megakernel into decode loop  Owner: TBD  Est: 3h  Completed: 2026 03 07
   - In `generate/stream.go`, after model load and plan compilation:
     1. Call plan.Instructions() to get the instruction tape.
     2. Check ops with CheckSupport(). If unsupported, fall back.
@@ -728,7 +728,7 @@ compile it (JIT or cached), and use it for decode tokens.
   - CheckSupport() returns unsupported op names for warning/fallback.
   - Dedup: each unsupported op listed once.
 
-- [ ] T93.5 Run golangci-lint on generate/ and internal/codegen/  Owner: TBD  Est: 15m
+- [x] T93.5 Run golangci-lint on generate/ and internal/codegen/  Owner: TBD  Est: 15m  Completed: 2026 03 07
   - Dependencies: T93.3.
 
 #### E94: Megakernel Performance Tuning (O90)
