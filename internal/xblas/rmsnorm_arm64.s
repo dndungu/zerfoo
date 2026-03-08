@@ -96,7 +96,7 @@ sumsq_reduce:
 
 	// S4 now holds sum of squares.
 	// Compute mean = sumSq / D
-	WORD	$0x1E220060     // SCVTF S0, W3 -- F0 = float(D)
+	WORD	$0x9E220060     // SCVTF S0, X3 -- F0 = float(D)
 	FDIVS	F0, F4, F4      // F4 = sumSq / D
 
 	// Add eps
