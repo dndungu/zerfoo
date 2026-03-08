@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -13,6 +14,12 @@ import (
 // compositeNode wraps an engine and performs multiple primitive ops internally.
 // This simulates a real composite layer like FFN or RMSNorm.
 type compositeNode struct {
+	engine      compute.Engine[float32]
+	outputShape []int
+}
+
+// opaqueNode uses UnaryOp (opaque closure) which should trigger fallback.
+type opaqueNode struct {
 	engine      compute.Engine[float32]
 	outputShape []int
 }
@@ -32,6 +39,20 @@ func (n *compositeNode) Forward(ctx context.Context, inputs ...*tensor.TensorNum
 }
 
 func (n *compositeNode) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[float32], _ ...*tensor.TensorNumeric[float32]) ([]*tensor.TensorNumeric[float32], error) {
+	return nil, nil
+}
+
+func (n *opaqueNode) OpType() string                     { return "OpaqueLayer" }
+func (n *opaqueNode) Attributes() map[string]any         { return nil }
+func (n *opaqueNode) OutputShape() []int                 { return n.outputShape }
+func (n *opaqueNode) Parameters() []*Parameter[float32]  { return nil }
+
+func (n *opaqueNode) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	// Uses UnaryOp with an opaque closure -- should trigger opaque fallback.
+	return n.engine.UnaryOp(ctx, inputs[0], func(v float32) float32 { return v * 2 })
+}
+
+func (n *opaqueNode) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[float32], _ ...*tensor.TensorNumeric[float32]) ([]*tensor.TensorNumeric[float32], error) {
 	return nil, nil
 }
 
@@ -290,5 +311,37 @@ func TestCompileTracedReuseDifferentInput(t *testing.T) {
 		if got2[i] != want2[i] {
 			t.Errorf("result2[%d] = %v, want %v", i, got2[i], want2[i])
 		}
+	}
+}
+
+func TestCompileTracedOpaqueOpFallback(t *testing.T) {
+	// A graph containing a node that uses UnaryOp (opaque closure) should
+	// cause CompileTraced to return an error indicating opaque ops detected.
+	engine := compute.NewCPUEngine(numeric.Float32Ops{})
+	defer func() { _ = engine.Close(context.Background()) }()
+
+	proxy := compute.NewEngineProxy[float32](engine)
+	b := NewBuilder[float32](proxy)
+
+	in := b.Input([]int{1, 4})
+	opaque := &opaqueNode{engine: proxy, outputShape: []int{1, 4}}
+	out := b.AddNode(opaque, in)
+
+	g, err := b.Build(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.SetEngineProxy(proxy)
+
+	input, _ := tensor.New[float32]([]int{1, 4}, []float32{1, 2, 3, 4})
+	ctx := context.Background()
+
+	_, err = g.CompileTraced(ctx, input)
+	if err == nil {
+		t.Fatal("expected error for opaque ops, got nil")
+	}
+	want := "opaque ops"
+	if got := err.Error(); !strings.Contains(got, want) {
+		t.Errorf("error = %q, want it to contain %q", got, want)
 	}
 }

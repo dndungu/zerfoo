@@ -311,7 +311,12 @@ func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNu
 
 	proxy.StopTracing()
 
-	// Step 4: Convert traced ops to instructions.
+	// Step 4: Check for opaque ops. If present, fall back to non-traced Compile.
+	if tracer.HasOpaqueOps() {
+		return nil, errors.New("CompileTraced: trace contains opaque ops (e.g. UnaryOp); use Compile instead")
+	}
+
+	// Step 5: Convert traced ops to instructions.
 	tracedOps := tracer.TracedOps()
 	numSlots := tracer.NextSlot()
 
