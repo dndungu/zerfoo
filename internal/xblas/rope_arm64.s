@@ -63,7 +63,8 @@ neon_loop:
 	// FMUL V4.4S, V2.4S, V0.4S
 	WORD $0x6E20DC44
 	// FMLS V4.4S, V3.4S, V1.4S
-	WORD $0x4EB1CC64
+	// 0x4EA0CC00 | (Rm=1 << 16) | (Rn=3 << 5) | Rd=4 = 0x4EA1CC64
+	WORD $0x4EA1CC64
 
 	// out[i+halfDim] = in[i+halfDim]*cos[i] + in[i]*sin[i]
 	// FMUL V5.4S, V3.4S, V0.4S
