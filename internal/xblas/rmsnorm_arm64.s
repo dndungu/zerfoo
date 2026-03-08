@@ -96,7 +96,7 @@ sumsq_reduce:
 
 	// S4 now holds sum of squares.
 	// Compute mean = sumSq / D
-	SCVTF	R3, F0          // F0 = float(D)
+	WORD	$0x1E220060     // SCVTF S0, W3 -- F0 = float(D)
 	FDIVS	F0, F4, F4      // F4 = sumSq / D
 
 	// Add eps
@@ -124,7 +124,7 @@ sumsq_reduce:
 
 	// ---- Pass 2: Normalize ----
 	// Broadcast scale to V6.4S
-	VDUP	F8, V6.S4
+	WORD	$0x4E040506     // DUP V6.4S, V8.S[0] -- broadcast scale
 
 	// Restore x pointer
 	MOVD	R5, R1
