@@ -15,11 +15,26 @@ import (
 type Graph[T tensor.Numeric] struct {
 	mu           sync.Mutex
 	engine       compute.Engine[T]
+	engineProxy  *compute.EngineProxy[T]
 	nodes        []Node[T]
 	dependencies map[Node[T]][]Node[T]
 	inputs       []Node[T]
 	output       Node[T]
 	memo         map[Node[T]]*tensor.TensorNumeric[T]
+}
+
+// SetEngineProxy stores the EngineProxy used during graph construction.
+func (g *Graph[T]) SetEngineProxy(proxy *compute.EngineProxy[T]) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.engineProxy = proxy
+}
+
+// EngineProxy returns the EngineProxy stored on the graph, or nil if none was set.
+func (g *Graph[T]) EngineProxy() *compute.EngineProxy[T] {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.engineProxy
 }
 
 // Forward executes the forward pass of the entire graph.
