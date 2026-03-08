@@ -1,6 +1,34 @@
 # Phase 34 -- Track D: NEON SIMD CPU Acceleration
 
-## Status: In Progress (Wave D2 Complete)
+## Status: In Progress (Wave D3 Complete)
+
+## 2026-03-07 -- Wave D3: NEON Wiring + TensorArena
+
+### Completed
+
+| Task | File | Commit | Summary |
+|------|------|--------|---------|
+| T102.8 | compute/cpu_engine.go | 7ac9a35 | Wire NEON into CPUEngine: Softmax, Exp, Add/Sub/Mul/Div same-shape, scalar ops. neonBinaryF32 + scalarOp helpers. |
+| T102.8 | compute/fused_*.go | 0afe430 | Wire xblas into FusedRMSNorm, FusedRoPE, FusedSiLUGate. |
+| T103.1 | compute/tensor_arena.go | dc97cd7 | TensorArena: power-of-2 bucketed pool with per-bucket mutex. 5 tests + bench. |
+| T103.2 | compute/cpu_engine.go | e3775a8 | Wire TensorArena into getOrCreateDest for float32 engines. |
+| T101.4 | compute/ | (lint) | golangci-lint 0 issues. |
+| T102.9 | compute/, internal/xblas/ | (lint) | golangci-lint 0 issues. |
+| T103.3 | compute/ | (lint) | golangci-lint 0 issues. |
+
+### Deviation
+
+T103.1 was marked complete in Wave D1 but the commit (b4b5eb1) was empty.
+Re-implemented TensorArena from scratch in Wave D3.
+
+### Next: Wave D4 -- Benchmark Validation
+
+- T104.1: CPU ARM64 benchmark on DGX Spark (target >= 10 tok/s)
+- T104.2: Per-operation profiling
+- T104.3: Output correctness verification
+- T104.4: Final lint pass
+
+---
 
 ## 2026-03-07 -- Wave D2: All 6 NEON Assembly Kernels
 
