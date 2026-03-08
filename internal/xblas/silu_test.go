@@ -72,7 +72,7 @@ func TestSiLUF32_Range(t *testing.T) {
 
 func TestSiLUF32_Lengths(t *testing.T) {
 	for _, n := range []int{1, 4, 7, 128, 2048} {
-		t.Run("n="+siluItoa(n), func(t *testing.T) {
+		t.Run("n="+itoa(n), func(t *testing.T) {
 			xs := make([]float32, n)
 			outs := make([]float32, n)
 			for i := range xs {
@@ -192,16 +192,3 @@ func BenchmarkSiLUGateF32(b *testing.B) {
 	}
 }
 
-func siluItoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := [20]byte{}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
