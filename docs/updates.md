@@ -1,3 +1,41 @@
+# Phase 34 -- Track D: NEON SIMD CPU Acceleration
+
+## Status: In Progress (Wave D2 Complete)
+
+## 2026-03-07 -- Wave D2: All 6 NEON Assembly Kernels
+
+### Completed
+
+| Task | File | Commit | Summary |
+|------|------|--------|---------|
+| T102.1 | internal/xblas/softmax_arm64.s | bc775d8 | 3-pass NEON Softmax: FMAX for max, inline exp polynomial, normalize by 1/sum. 253 lines. |
+| T102.2 | internal/xblas/rmsnorm_arm64.s | a40a2f7 | NEON RMSNorm: dual accumulators, FRSQRTE + 2 Newton-Raphson iterations. 173 lines. Returns scale. |
+| T102.3 | internal/xblas/silu_arm64.s | d766923 | SiLUF32 + SiLUGateF32: inline exp polynomial + FRECPE + 2 NR for sigmoid. 394 lines. |
+| T102.4 | internal/xblas/rope_arm64.s | ef099ef | RoPE: 4-wide NEON for rotary dim, scalar tail, passthrough copy. 159 lines. |
+| T102.5 | internal/xblas/elementwise_arm64.s | a40a2f7 | VaddF32/VmulF32/VsubF32/VdivF32: NEON load-4/op/store-4 loops. 158 lines. |
+| T102.6 | internal/xblas/scalar_arm64.s | c751b5c | VmulScalarF32/VaddScalarF32/VdivScalarF32: VDUP broadcast + NEON loop. 129 lines. |
+| (lint) | rmsnorm_generic.go, rope_test.go | 0faf769 | D->dim captLocal fix, math/rand/v2 depguard fix. |
+
+### Wave D1 (Prior)
+
+| Task | File | Commit | Summary |
+|------|------|--------|---------|
+| T101.1 | compute/cpu_engine.go | f733d15 | Same-shape fast path in binaryOp (7-8x speedup). |
+| T101.2 | compute/cpu_engine.go | c28a529 | Pow x^2 specialization (13-15x speedup). |
+| T101.3 | compute/cpu_engine_bench_test.go | 3d8c3d7 | Scalar op baseline benchmarks. |
+| T102.7 | internal/xblas/vexp_arm64.s | 5931298 | VexpF32 shared exp polynomial (max error 8.98e-08). |
+| T103.1 | internal/xblas/arena.go | b4b5eb1 | TensorArena with power-of-2 bucketed pooling. |
+
+### Next: Wave D3
+
+- T101.4: Run golangci-lint on compute/
+- T102.8: Wire NEON functions into CPUEngine dispatch
+- T102.9: Run golangci-lint on internal/xblas/
+- T103.2: Wire TensorArena into CPUEngine
+- T103.3: Run golangci-lint on compute/
+
+---
+
 # Phase 34 -- Track A: purego / dlopen
 
 ## Status: In Progress
