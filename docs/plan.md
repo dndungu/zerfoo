@@ -348,7 +348,7 @@ Acceptance:
 - [x] S97.3.1 Graph EngineProxy integration test  Owner: TBD  Est: 1h  2026 03 08
   - All existing inference tests pass with EngineProxy wired into graph.
 
-##### T97.4 Implement CompileTraced() in graph/compile.go  Owner: TBD  Est: 4h
+##### T97.4 Implement CompileTraced() in graph/compile.go  Owner: TBD  Est: 4h  [x] 2026 03 08
 
 Add a new `CompileTraced()` method to `Graph[T]`:
 
@@ -388,7 +388,7 @@ Acceptance:
   MatMul, Concat, Split, Mul, Mul, MatMul) where Compile produces 1 ("FFN").
 - Dependencies: T97.2, T97.3.
 
-- [ ] S97.4.1 CompileTraced unit tests  Owner: TBD  Est: 2h
+- [x] S97.4.1 CompileTraced unit tests  Owner: TBD  Est: 2h  2026 03 08
   - Primitive node graph: CompileTraced matches Compile.
   - FFN composite: CompileTraced produces primitive ops.
   - GQA composite: CompileTraced produces ~20+ primitive ops.
@@ -468,7 +468,7 @@ Acceptance:
 
 - [x] S97.7.1 Gather tracing test  Owner: TBD  Est: 45m  2026 03 08
 
-##### T97.8 Run golangci-lint on compute/, graph/  Owner: TBD  Est: 30m
+##### T97.8 Run golangci-lint on compute/, graph/  Owner: TBD  Est: 30m  [x] 2026 03 08
   - Dependencies: T97.1-T97.7.
 
 #### E98: GPU KV Cache for Megakernel Attention (O98)
@@ -827,6 +827,24 @@ A task is done when:
 ---
 
 ## 8. Progress Log
+
+### Change Summary -- 2026-03-08 (v14)
+
+Wave C3 complete (3 tasks). CompileTraced tracing compiler implemented.
+
+**Track C completed tasks (Wave C3):**
+- T97.4 + S97.4.1: CompileTraced in graph/compile.go. Produces primitive-op
+  ExecutionPlans by tracing Forward via EngineProxy. makeTracedForward dispatch
+  covers all 22 traced ops. 5 table-driven tests. Commit 580eb11.
+- T97.8: golangci-lint clean on compute/ and graph/. 0 issues.
+
+**Also completed (Wave C3 prep):**
+- EngineProxy: All ops now record ExtraArgs (scalar, axis, shape, keepDims,
+  repetitions, numSplits). Tracer gains exported SlotFor/NextSlot. EngineProxy
+  gains Real(). Commit 216f921.
+
+**Next unblocked:** T97.6 (UnaryOp fallback), T99.4 (emitter coverage),
+T98.2 (GPU KV cache -- requires DGX Spark).
 
 ### Change Summary -- 2026-03-08 (v13)
 
