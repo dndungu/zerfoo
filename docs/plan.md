@@ -2,130 +2,60 @@
 
 ## 1. Context
 
+See docs/design.md for full architecture context and Phases 1-33 history.
+See docs/design.md section 15.16 for Phase 34 completed work (Tracks 0/A/B).
+
 ### Problem Statement
 
 Phase 33 achieved 10.32 tok/s peak (7.78 median) for Gemma 3 2B Q4 on DGX Spark
-GB10. Ollama/llama.cpp on the same hardware achieves:
+GB10. Ollama/llama.cpp on the same hardware achieves ~100 tok/s. The theoretical
+max is ~182 tok/s (273 GB/s / 1.5GB model).
 
-| Model | Quant | Ollama tok/s | Zerfoo tok/s | Gap |
-|-------|-------|-------------|-------------|-----|
-| Gemma 3 1B | Q4 | 205 | n/a | n/a |
-| Gemma 3 4B | Q4 | 77.7 | n/a | n/a |
-| Gemma 3 2B | Q4 | ~100 (est.) | 7.78 median | ~13x |
+Track A (purego) and Track B (megakernel infrastructure) are mostly complete.
+The megakernel does NOT fire on the real model because graph.Compile() records
+composite node OpTypes (GroupedQueryAttention, FFN, EmbeddingLookup, LMHead)
+instead of primitive Engine ops (MatMul, Softmax, Add, etc.). The codegen
+emitter table only knows primitives, so CheckSupport() fails and falls back.
 
-The DGX Spark GB10 has 273 GB/s LPDDR5x bandwidth. For a 1.5GB Q4 model, the
-theoretical max is ~182 tok/s. Zerfoo at 7.78 median is 4.3% of theoretical;
-llama.cpp reaches 13-55% depending on model size.
+Track C (tracing compiler) resolves this: an EngineProxy records every Engine
+method call during compilation, automatically decomposing composite nodes into
+primitive ops. See docs/adr/028-tracing-compiler.md.
 
-The gap has three causes:
-
-1. **CGo overhead and build complexity**: 8 files use `import "C"` with
-   `//go:build cuda` tags. Each CGo call costs ~100-200ns. With 650+ calls per
-   token, that is ~65-130us per token. More importantly, CGo forces compile-time
-   GPU detection and slow builds.
-
-2. **Per-op kernel launches**: Each forward pass dispatches 25+ GPU operations
-   individually. For single-token decode with small tensors (batch=1), kernel
-   launch overhead (~5-10us each) dominates compute. 650 launches x 5us = 3.2ms
-   overhead per token.
-
-3. **Global memory round-trips**: Every intermediate activation is written to
-   and read from global GPU memory between ops. For a 26-layer transformer with
-   ~25 ops per layer, that is ~650 global memory round-trips per token. llama.cpp
-   uses fused kernels and CUDA graphs to minimize this.
-
-Phase 34 addresses these with three tracks executed sequentially:
-
-- **Track 0 (composition fixes)**: A 5-agent audit found 12 layers that do
-  complex math inline instead of composing Engine primitives. These must be
-  fixed first -- the megakernel code generator only sees ops in the instruction
-  tape. See docs/adr/027-composition-prerequisite.md.
-
-- **Track A (purego)**: Replace CGo with dlopen-based pure Go bindings. Quick
-  win: cleaner build, runtime GPU detection, single binary, minor perf gain.
-  Benefits ALL layer types and architectures.
-
-- **Track B (megakernel)**: Generate a single CUDA kernel from the compiled
-  ExecutionPlan instruction tape. Because Zerfoo is compositional (all complex
-  layers decompose into primitive Engine ops), the generator is architecture-
-  agnostic: it maps each primitive op (Add, MatMul, RMSNorm, Softmax, etc.) to
-  a register-resident CUDA device function and chains them in instruction order.
-  Any model that compiles into an ExecutionPlan gets a megakernel automatically.
-  Maximum performance: one launch per token, all intermediates in registers/
-  shared memory.
-
-See docs/design.md for full architecture context and Phases 1-33 history.
-Decision rationale: docs/adr/024-cuda-graph-fused-kernels.md (original approach),
-docs/adr/025-purego-cuda-bindings.md (purego), docs/adr/026-megakernel-decode.md
-(megakernel).
-
-### What Was Delivered (Phase 33)
-
-| Area | Key Result |
-|------|------------|
-| PowScalar GPU kernel | Eliminated 8.9% Pow CPU fallback |
-| SubScalar GPU kernel | Completed scalar-op coverage |
-| Scalar-broadcast detection | Eliminated 10.4% binary op CPU fallback |
-| GPU Split/Concat (D2D memcpy) | Eliminated 24% D2H from GPUStorage.Slice |
-| Float32 weight upload | All weights GPU-resident at load time |
-| Benchmark | 10.32 tok/s peak / 7.78 median GPU on DGX Spark GB10 |
-
-### Current Architecture
-
-The decode loop in `generate/stream.go` calls `ExecutionPlan.Run()` per token.
-`Run()` iterates a flat `[]Instruction` array. Each instruction calls
-`node.Forward(ctx, inputs)` which dispatches to `GPUEngine` methods. Each method
-calls a CGo wrapper which launches a CUDA kernel.
-
-```
-Token loop (Go)
-  -> ExecutionPlan.Run() (Go, per-instruction loop)
-    -> node.Forward() (Go)
-      -> GPUEngine.Add() (Go)
-        -> pool.Alloc() (Go)
-        -> C.launch_add() (CGo -> CUDA kernel launch)
-        -> pool.Free() for temporaries (Go)
-```
-
-After Track A (purego), the CGo layer is replaced:
-```
-Token loop (Go)
-  -> ExecutionPlan.Run()
-    -> node.Forward()
-      -> GPUEngine.Add()
-        -> pool.Alloc()
-        -> dlcall(launch_add, ...) (pure Go -> dlopen -> CUDA kernel launch)
-```
-
-After Track B (megakernel), the entire inner loop collapses:
-```
-Token loop (Go)
-  -> megakernel.Launch(input_token_embedding, output_logits)
-     (one CUDA kernel does everything: all 26 layers, all ops, all in registers)
-```
+CPU inference is 6.86 tok/s. llama.cpp achieves ~100 tok/s on the same hardware
+because it uses NEON SIMD assembly for all hot-path operations (softmax, rmsnorm,
+silu, elementwise, rope, scalar ops), has zero-allocation compute graphs, and uses
+quantized integer accumulation. Zerfoo currently has NEON assembly only for matmul
+(q4dot, vdotf32, sgemmAccRow). Track D adds NEON SIMD for all remaining hot-path
+ops, same-shape fast paths to eliminate broadcasting overhead, and a tensor arena.
+See docs/adr/029-neon-simd-cpu-acceleration.md.
 
 ### Objectives
 
-- O96: Refactor all layers with inline math to compose Engine primitives.
-- O87: Replace all CGo CUDA bindings with dlopen-based pure Go bindings.
-- O88: Eliminate `//go:build cuda` tags. Single binary, runtime GPU detection.
+- O96: Refactor remaining layers with inline math to compose Engine primitives.
+- O87: Replace remaining CGo CUDA bindings with dlopen-based pure Go bindings.
+- O88: Eliminate remaining `//go:build cuda` tags.
+- O97: Implement tracing compiler that decomposes composite nodes into primitives.
+- O98: Implement GPU KV cache for megakernel attention.
 - O89: Generate a single-kernel decode for Gemma 3 2B transformer.
 - O90: Achieve >= 50 tok/s median for Gemma 3 2B Q4 on DGX Spark GB10.
+- O101: NEON SIMD acceleration for all CPU hot-path operations.
+- O102: Same-shape fast paths and Pow x^2 specialization in CPUEngine.
+- O103: Tensor arena for buffer reuse across engine operations.
+- O104: Achieve >= 10 tok/s CPU ARM64 for Gemma 3 2B Q4 on DGX Spark GB10.
 
 ### Non-Goals
 
 - Multi-GPU inference or tensor parallelism.
-- Megakernel for batch > 1 (activations must fit in registers/shared memory).
+- Megakernel for batch > 1.
 - Training pipeline changes.
-- ROCm/OpenCL kernel implementations (stubs remain, dlopen pattern extends).
-- Vulkan, SYCL, or Metal backends.
-- Prefill optimization (focus is on per-token decode latency).
-- Quantized KV cache (separate phase).
+- ROCm/OpenCL/Vulkan/Metal backends.
+- Prefill optimization (focus is per-token decode latency).
+- Quantized KV cache.
+- AMD64 AVX2 SIMD (future, same pattern as ARM64).
 
 ### Constraints and Assumptions
 
-- Go standard library plus golang.org/x/sys/unix for dlopen/dlsym. No other
-  third-party dependencies.
+- Go standard library only. No third-party test/CLI/DI libraries.
 - Pre-commit hook rejects multi-directory commits.
 - golangci-lint, go vet, gofmt required for all changes.
 - Tests must pass with `-race` flag.
@@ -133,21 +63,18 @@ Token loop (Go)
 - DGX Spark GB10 at `ssh ndungu@192.168.86.250` for all GPU validation.
 - Go 1.25.0, CUDA 13.0, sm_121 (Blackwell) on DGX Spark.
 - Target model: Gemma 3 2B Q4 (ZMF), path: ~/models/gemma3-q4/model.zmf.
-- GPU baseline from Phase 33: 10.32 tok/s peak, 7.78 tok/s median.
-- CUDA cooperative launch requires sm_60+ and CUDA 12+ (DGX Spark qualifies).
-- Megakernel is Gemma 3 specific but code generator is designed for extensibility.
-- Existing .cu kernel source files and Makefile are unchanged for Track A.
+- ARM64 NEON assembly uses Go plan9 syntax in _arm64.s files.
+- Generic fallbacks in _generic.go files for non-ARM64 platforms.
 
 ### Success Metrics
 
-| Metric | Current | Track A Target | Track B Target | How Measured |
-|--------|---------|---------------|---------------|-------------|
-| GPU tok/s median | 7.78 | >= 10 | >= 50 | bench_tps -device cuda, 7 runs, median |
-| GPU tok/s peak | 10.32 | >= 12 | >= 60 | bench_tps -device cuda, best of 7 |
-| Build tags required | cuda | none | none | go build ./... compiles on any machine |
-| CGo calls per token | ~650 | 0 (dlopen) | 0 | runtime.cgocall count |
-| Kernel launches per token | ~650 | ~650 | 1 | nsys profile |
-| Global mem round-trips | ~650 | ~650 | ~26 (weight reads only) | nsys profile |
+| Metric | Current | Target | How Measured |
+|--------|---------|--------|-------------|
+| GPU tok/s median | 7.78 | >= 50 | bench_tps -device cuda, 7 runs, median |
+| GPU tok/s peak | 10.32 | >= 60 | bench_tps -device cuda, best of 7 |
+| CPU tok/s ARM64 | 6.86 | >= 10 | bench_tps -device cpu, 7 runs, median |
+| Kernel launches per token | ~650 | 1 | nsys profile |
+| Global mem round-trips | ~650 | ~26 (weight reads only) | nsys profile |
 
 ---
 
@@ -157,135 +84,44 @@ Token loop (Go)
 
 | ID | Deliverable | Track | Rationale |
 |----|-------------|-------|-----------|
-| D430 | All layers compose Engine primitives | 0 | Prerequisite for megakernel instruction-tape coverage |
-| D421 | dlopen/dlsym CUDA runtime loader | A | Load libcudart.so at runtime |
-| D422 | dlopen kernel function wrappers | A | Replace all 8 CGo files |
-| D423 | Remove build tags, runtime GPU detection | A | Single binary for CPU+GPU |
-| D424 | Benchmark Track A improvements | A | Validate purego gains |
-| D425 | ExecutionPlan-to-CUDA code generator | B | Emit model-specific .cu |
-| D426 | Megakernel for Gemma 3 2B decode | B | One kernel, all 26 layers |
-| D427 | JIT/AOT compilation and loading | B | nvrtc or cached nvcc |
-| D428 | Megakernel integration in generate loop | B | Wire into token generation |
-| D429 | End-to-end benchmark >= 50 tok/s | B | Validate all improvements |
+| D430 | Remaining layers compose Engine primitives | 0 | Prerequisite for tracing |
+| D431 | EngineProxy with tracing mode | C | Automatic primitive decomposition |
+| D432 | GPU KV cache for megakernel | C | Attention in megakernel needs GPU-resident KV |
+| D433 | CompileTraced() in graph/ | C | Traced instruction tape with primitive ops |
+| D434 | Megakernel fires on real Gemma 3 model | C+B | End-to-end integration |
+| D425 | Megakernel performance tuning | B | nsys profiling, memory optimization |
+| D429 | End-to-end benchmark >= 50 tok/s | B | Final validation |
+| D435 | Same-shape binaryOp fast path + Pow x^2 | D | Eliminate broadcasting overhead |
+| D436 | NEON Softmax, RMSNorm, SiLU, RoPE assembly | D | Vectorize CPU hot-path ops |
+| D437 | NEON vectorized elementwise + scalar ops | D | SIMD Add/Mul/Sub/MulScalar/etc. |
+| D438 | Tensor arena for buffer reuse | D | Eliminate GC allocation overhead |
+| D439 | CPU benchmark >= 10 tok/s ARM64 | D | Final CPU validation |
 
 ### Out of Scope
 
-- Megakernel templates for RNN, S4, HRM, convolution architectures (future).
-- CUDA graph capture (subsumed by megakernel; if megakernel underperforms,
-  revisit as fallback -- see archived E80-E82 below).
-- Individual fused kernels (SwiGLU, Scale+Softmax, dequant+GEMV) as separate
-  ops (subsumed by megakernel; the megakernel fuses everything).
-- BF16 elementwise kernels.
-- Flash attention changes.
-- Multi-sequence batch decode.
-
-### Archived Epics (from previous Phase 34 plan)
-
-The following epics from the original Phase 34 plan are archived. They are
-superseded by the megakernel approach but can be revived as fallback if the
-megakernel proves infeasible for certain ops.
-
-- E80: Pre-Allocated Buffer Pool -- subsumed by megakernel (no intermediate
-  buffers at all). Could be useful as standalone optimization if megakernel
-  is deferred.
-- E81: CUDA Graph CGo Wrappers -- subsumed by megakernel (single launch).
-- E82: CUDA Graph Capture -- subsumed by megakernel (single launch).
-- E83: Fused SwiGLU Kernel -- subsumed by megakernel (fused inline).
-- E84: Fused Scale+Softmax -- subsumed by megakernel (fused inline).
-- E85: Fused Dequant+GEMV Q4 -- subsumed by megakernel (fused inline).
-- E86: End-to-End Benchmark -- replaced by E93 and E95.
+- Megakernel for non-transformer architectures (future, automatic via tracing).
+- CUDA graph capture (subsumed by megakernel).
+- Individual fused kernels (subsumed by megakernel).
+- purego loaders for cublas/cudnn/nccl/tensorrt.
+- AMD64 AVX2 SIMD implementations (future, same file pattern).
 
 ---
 
 ## 3. Checkable Work Breakdown
 
-### Track 0: Composition Fixes (Prerequisite for Megakernel)
+### Track 0: Remaining Composition Fixes
 
-A 5-agent parallel audit of all 18 layer sub-packages found 12 composition
-violations: layers that do complex math inline (direct tensor.Data() access,
-manual loops, external library calls) instead of composing Engine primitives.
-These ops are invisible to the ExecutionPlan instruction tape and would not
-appear in the megakernel.
+E96 Priority 1 (T96.1-T96.3) and Priority 2 (T96.4-T96.5) are complete.
+See docs/design.md section 15.16. Remaining:
 
-Decision rationale: docs/adr/027-composition-prerequisite.md.
+#### E96: Refactor Violated Layers (remaining)
 
-#### E96: Refactor Violated Layers to Compose Engine Primitives (O96)
-
-##### Priority 1: Gemma 3 Inference Path (blocks megakernel for Gemma 3)
-
-- [x] T96.1 Refactor MatMulNBits to compose engine dequant + MatMul  Owner: TBD  Est: 3h  Done: 2026 03 07
-  - File: `layers/core/matmul_nbits.go` lines 118-172.
-  - Violation: Inline Q4 dequantization with manual numeric.Unpack4BitSlice
-    loops and manual scaling.
-  - Fix: Add `engine.DequantQ4(ctx, q4Tensor) (*TensorNumeric[T], error)` to
-    Engine interface if not present, or use existing engine.UnaryOp with a
-    dequant function. Then call engine.MatMul on the dequantized result.
-  - If engine.DequantQ4 does not exist: create it as a new Engine method that
-    delegates to the existing dequant logic in CPUEngine, and to the existing
-    GPU dequant kernel in GPUEngine.
-  - Acceptance: MatMulNBits.Forward() contains zero tensor.Data() calls. Output
-    matches current implementation within 1e-5. All existing MatMulNBits tests pass.
-  - Dependencies: none.
-
-- [x] S96.1.1 MatMulNBits composition parity test  Owner: TBD  Est: 1h  Done: 2026 03 07
-  - Existing tests pass. Forward() no longer calls tensor.Data() (dequant at construction).
-
-- [x] T96.2 Refactor QKNorm to compose engine primitives  Owner: TBD  Est: 2h  Done: 2026 03 07
-  - File: `layers/attention/qk_norm.go` lines 30-62.
-  - Violation: Manual tensor.Data() loops computing RMS normalization.
-  - Fix: Replace with engine.Mul -> engine.ReduceMean -> engine.AddScalar ->
-    engine.Rsqrt -> engine.Mul (same pattern as RMSNorm layer).
-  - Acceptance: QKNorm.Forward() contains zero tensor.Data() calls. Output
-    matches within 1e-5. Existing tests pass.
-  - Dependencies: none.
-
-- [x] S96.2.1 QKNorm composition parity test  Owner: TBD  Est: 45m  Done: 2026 03 07
-  - Compare old vs new for Q and K shapes used in Gemma 3. Existing tests pass.
-
-- [x] T96.3 Refactor Gelu to use engine.Tanh instead of math.Tanh  Owner: TBD  Est: 1h  Done: 2026 03 07
-  - File: `layers/activations/gelu.go` lines 21-40.
-  - Violation: Uses math.Tanh inside a closure passed to engine.UnaryOp.
-    The UnaryOp applies element-wise, but the closure internals are opaque
-    to the instruction tape.
-  - Fix: Decompose into explicit engine calls: engine.Pow (x^3),
-    engine.MulScalar (0.044715), engine.Add, engine.MulScalar (sqrt(2/pi)),
-    engine.Tanh, engine.AddScalar (1), engine.Mul, engine.MulScalar (0.5).
-    This matches the FastGelu pattern already used in the codebase.
-  - Acceptance: Gelu.Forward() uses only engine method calls. Output matches
-    within 1e-5. Existing tests pass.
-  - Dependencies: none.
-
-- [x] S96.3.1 Gelu composition parity test  Owner: TBD  Est: 45m  Done: 2026 03 07
-  - Compare old vs new for input shapes [1,2048] and [1,8192]. Existing tests pass.
-
-##### Priority 2: Other Model Variants
-
-- [x] T96.4 Refactor BatchNormalization to compose engine primitives  Owner: TBD  Est: 2h  Done: 2026 03 07
-  - File: `layers/normalization/batch_norm.go` lines 35-93.
-  - Violation: Manual per-channel loops with tensor.Data() access.
-  - Fix: Use engine.Sub (subtract mean), engine.AddScalar (epsilon),
-    engine.Sqrt, engine.Div (normalize), engine.Mul (scale), engine.Add (bias).
-  - Acceptance: Zero tensor.Data() in Forward(). Output within 1e-5.
-  - Dependencies: none.
-
-- [x] S96.4.1 BatchNorm composition parity test  Owner: TBD  Est: 45m  Done: 2026 03 07
-
-- [x] T96.5 Refactor LocalAttention mask to compose engine primitives  Owner: TBD  Est: 1.5h  Done: 2026 03 07
-  - File: `layers/attention/local_attention.go` lines 97-125.
-  - Violation: createLocalAttentionMask() manually fills mask via tensor.Data().
-  - Fix: Use engine.Fill to create base mask, engine.AddScalar or engine ops
-    for mask pattern. Or create mask as a Constant node in the graph.
-  - Acceptance: Zero tensor.Data() in mask creation. Output matches.
-  - Dependencies: none.
-
-- [x] S96.5.1 LocalAttention mask parity test  Owner: TBD  Est: 45m  Done: 2026 03 07
+##### Priority 2: Other Model Variants (continued)
 
 - [ ] T96.6 Refactor Conv2d to im2col + engine.MatMul  Owner: TBD  Est: 3h
   - File: `layers/core/conv2d.go` lines 60-144.
   - Violation: 6-nested loop convolution with direct data access.
-  - Fix: Implement im2col transform (unfold input patches into columns),
-    then engine.MatMul(weight_matrix, col_matrix), then reshape output.
-    Add engine.Im2Col if needed, or implement as engine.Reshape + engine.Gather.
+  - Fix: im2col transform then engine.MatMul(weight_matrix, col_matrix).
   - Acceptance: Zero nested compute loops in Forward(). Output within 1e-5.
   - Dependencies: none.
 
@@ -295,63 +131,38 @@ Decision rationale: docs/adr/027-composition-prerequisite.md.
 
 - [ ] T96.7 Refactor MoEGate to compose engine primitives  Owner: TBD  Est: 2h
   - File: `layers/core/moe.go` lines 43-100.
-  - Violation: Manual tensor.Data() loops for expert routing, sorting, normalization.
-  - Fix: Use engine.Softmax for routing probs, add engine.TopK if not present
-    (or compose from engine.Sort + engine.Slice), engine.Div for normalization.
-  - Acceptance: Zero tensor.Data() in Forward(). Output matches.
+  - Fix: engine.Softmax for routing, engine.TopK or engine.Sort + engine.Slice.
   - Dependencies: none.
 
 - [ ] T96.8 Refactor MixtureOfExperts to compose engine primitives  Owner: TBD  Est: 2h
   - File: `layers/core/moe.go` lines 217-282.
-  - Violation: Manual token extraction and weighted sum with tensor.Data().
-  - Fix: Use engine.Gather for token extraction, compose expert Forward calls,
-    engine.MulScalar for weighting, engine.Add for accumulation.
-  - Acceptance: Zero tensor.Data() in Forward(). Output matches.
+  - Fix: engine.Gather for token extraction, engine.MulScalar + engine.Add.
   - Dependencies: T96.7.
 
 - [ ] S96.8.1 MoE composition parity test  Owner: TBD  Est: 1h
-  - Test both MoEGate and MixtureOfExperts together.
 
 - [ ] T96.9 Refactor PolynomialExpansion to compose engine primitives  Owner: TBD  Est: 1.5h
   - File: `layers/core/polynomial.go` lines 191-249.
-  - Violation: Manual tensor.Data() loops for power computation.
-  - Fix: Use engine.Pow for each term, engine.MulScalar for coefficients,
-    engine.Add for accumulation.
-  - Acceptance: Zero tensor.Data() in Forward(). Output within 1e-5.
+  - Fix: engine.Pow for each term, engine.MulScalar, engine.Add.
   - Dependencies: none.
 
 - [ ] S96.9.1 Polynomial composition parity test  Owner: TBD  Est: 45m
 
 - [ ] T96.10 Refactor SpectralFingerprint to compose engine primitives  Owner: TBD  Est: 2h
   - File: `layers/core/spectral_fingerprint.go` lines 96-157.
-  - Violation: Inline DFT with manual cos/sin loops.
-  - Fix: Use engine.UnaryOp with cos/sin, or add engine.DFT primitive.
-    Alternatively, decompose DFT into engine.MatMul with a precomputed
-    Fourier basis matrix.
-  - Acceptance: Zero tensor.Data() compute loops. Output within 1e-4.
+  - Fix: engine.MatMul with precomputed Fourier basis matrix.
   - Dependencies: none.
 
 - [ ] T96.11 Refactor S4 layer to compose engine primitives  Owner: TBD  Est: 3h
-  - File: `layers/sequence/s4.go` lines 184-222 (forward), 264-346 (backward).
-  - Violation: 4-nested loop diagonal SSM scan with tensor.Data() access.
-  - Fix: Decompose scan into per-step engine calls: engine.Exp (discrete A),
-    engine.Mul (a * x_prev), engine.Add (+ b * u), engine.Mul (c * x) for
-    output. This makes each scan step visible in the instruction tape.
-  - Risk: Per-step engine calls add overhead vs fused scan. For inference
-    correctness this is acceptable; optimization can add an engine.SSMScan
-    primitive later.
-  - Acceptance: Zero tensor.Data() in Forward(). Output within 1e-5.
+  - File: `layers/sequence/s4.go` lines 184-222.
+  - Fix: Per-step engine.Exp, engine.Mul, engine.Add for scan.
   - Dependencies: none.
 
 - [ ] S96.11.1 S4 composition parity test  Owner: TBD  Est: 1h
-  - Compare old vs new for sequence lengths 32, 128, 512.
 
 - [ ] T96.12 Refactor SpectralFeature to remove Gonum FFT  Owner: TBD  Est: 2h
   - File: `layers/features/spectral.go` lines 57-77.
-  - Violation: External Gonum FFT library call + manual tensor.Data().
-  - Fix: Same approach as SpectralFingerprint (T96.10). Use engine.MatMul
-    with precomputed Fourier basis, or add engine.FFT primitive.
-  - Acceptance: Zero external library calls. Zero tensor.Data() access.
+  - Fix: engine.MatMul with precomputed Fourier basis.
   - Dependencies: none.
 
 - [ ] S96.12.1 SpectralFeature composition parity test  Owner: TBD  Est: 45m
@@ -359,402 +170,555 @@ Decision rationale: docs/adr/027-composition-prerequisite.md.
 ##### Quality Gate
 
 - [ ] T96.13 Run golangci-lint on all modified layer packages  Owner: TBD  Est: 30m
-  - Dependencies: T96.1-T96.12.
+  - Dependencies: T96.6-T96.12.
 
 - [ ] T96.14 Run full test suite and verify no regressions  Owner: TBD  Est: 1h
-  - `go test ./... -race -count=1`
-  - Verify zero tensor.Data() calls in any layer Forward() method (grep).
   - Dependencies: T96.13.
 
 - [ ] S96.14.1 Composition audit verification  Owner: TBD  Est: 30m
-  - Grep all layers/*/**.go Forward() methods for tensor.Data(), .Float32s(),
-    .Data(). Verify zero hits in compute paths (data access for shape/metadata
-    is acceptable, data access for computation is not).
+  - Grep all layers Forward() methods for tensor.Data() compute access.
 
 ---
 
-### Track A: purego / dlopen (Quick Win, All Architectures)
-
-#### E87: CUDA Runtime dlopen Loader (O87, O88)
-
-Replace `internal/cuda/runtime.go` (CGo) with a pure Go implementation that
-loads libcudart.so via dlopen and calls CUDA runtime functions via dlsym
-function pointers. This is the foundation -- all other CUDA calls depend on the
-runtime (streams, malloc, memcpy, sync).
-
-Existing code to replace:
-- `internal/cuda/runtime.go` -- 8 CGo functions (Malloc, Free, Memcpy, etc.)
-
-Approach:
-- Create `internal/cuda/dlopen.go` (no build tag) with a CUDALib struct that
-  holds dlopen handle and dlsym function pointers for each CUDA runtime func.
-- Use `golang.org/x/sys/unix.Dlopen`, `unix.Dlsym`, `unix.Dlclose`.
-- On init, attempt to open libcudart.so. If not found, set a package-level
-  `Available() bool` to false. All GPU codepaths check this.
-- Each function (Malloc, Free, etc.) calls the dlsym pointer using
-  `syscall.Syscall` with the correct ABI.
-
-Decision rationale: docs/adr/025-purego-cuda-bindings.md.
-
-- [x] T87.1 Add golang.org/x/sys dependency  Owner: TBD  Est: 30m  Done: 2026 03 07
-  - golang.org/x/sys already present as indirect dep. Not needed for purego
-    approach (uses assembly trampolines + cgo_import_dynamic instead).
-  - Acceptance: `go build ./...` succeeds. Met.
-  - Dependencies: none.
-
-- [x] T87.2 Create dlopen loader for libcudart.so  Owner: TBD  Est: 3h  Done: 2026 03 07
-  - [Deviation: Architectural] Used purego-style assembly trampolines instead
-    of golang.org/x/sys/unix (which does not export Dlopen/Dlsym).
-  - Created 7 files in internal/cuda/: purego.go (CUDALib struct, Open(),
-    Available()), purego_darwin.go + .s (syscall.syscall6/9 via linkname),
-    purego_linux_arm64.go + .s (asmcgocall via linkname + custom AAPCS64
-    trampoline supporting 12 C args), purego_other.go (stubs).
-  - Zero CGo: calls bypass runtime.cgocall entirely.
-  - Commit: c39ca30.
-  - Acceptance: On CPU-only machine, Open() returns error, Available()=false.
-    DGX Spark testing pending.
-  - Dependencies: T87.1.
-
-- [x] S87.2.1 dlopen loader unit test  Owner: TBD  Est: 1h  Done: 2026 03 07
-  - 7 tests: dlopen failure, dlerror message, Open() graceful fail,
-    Available()=false, dlsym invalid handle, ccall signature, and
-    end-to-end ccall of getpid() via runtime-resolved function pointer.
-  - All pass with CGO_ENABLED=0 and -race on macOS.
+### Track A: Remaining purego Cleanup
 
 - [ ] T87.3 Replace runtime.go CGo functions with dlopen calls  Owner: TBD  Est: 3h
-  - Rewrite `internal/cuda/runtime.go` to remove `import "C"` and
-    `//go:build cuda`.
-  - Each function (Malloc, Free, Memcpy, etc.) calls the corresponding
-    function pointer from the package-level CUDALib instance.
-  - Package init: attempt Open(). If fails, set available=false.
-  - All existing callers (mempool.go, gpuapi/) continue to work unchanged.
-  - Acceptance: `go build ./...` compiles without `-tags cuda`. All
-    runtime functions work correctly on DGX Spark.
-  - Dependencies: T87.2.
-  - Risk: ABI mismatch between Go calling convention and CUDA C functions.
-    Test each function individually with known inputs.
+  - Rewrite `internal/cuda/runtime.go` to remove `import "C"`.
+  - Dependencies: T87.2 (done).
 
 - [ ] S87.3.1 Runtime function parity test  Owner: TBD  Est: 1.5h
-  - Test: Malloc + Memcpy(H2D) + Memcpy(D2H) round-trip preserves data.
-  - Test: StreamCreate + StreamSync works.
-  - Test: MallocManaged returns accessible pointer.
-  - Compare behavior with the old CGo implementation.
-
-- [x] T87.4 Run golangci-lint on internal/cuda/  Owner: TBD  Est: 15m  Done: 2026 03 07
-  - Dependencies: T87.3.
-
-#### E88: Kernel Function dlopen Wrappers (O87, O88)
-
-Replace the 7 remaining CGo kernel wrapper files with dlopen-based equivalents.
-Each file currently does `import "C"` with extern declarations for the kernel
-launcher functions, then wraps them in Go functions. The new approach loads the
-kernel launcher function pointers from libkernels.so via dlsym.
-
-Existing code to replace (7 files, all in internal/cuda/kernels/):
-- `elementwise.go` -- 20+ kernel launchers (Add, Sub, Mul, Div, Pow, etc.)
-- `transpose.go` -- Transpose kernel launcher
-- `rmsnorm.go` -- RMSNorm fused kernel launcher
-- `gather.go` -- Gather (embedding lookup) kernel launcher
-- `gemm_q4.go` -- Q4 dequant+GEMM kernel launcher
-- `gemm_quantized.go` -- Quantized GEMM kernel launcher
-- `flash_attention.go` -- Flash attention kernel launcher
-
-Approach:
-- Create `internal/cuda/kernels/dlopen.go` with a KernelLib struct that loads
-  libkernels.so and resolves all launcher function pointers.
-- Replace each CGo wrapper function with a dlsym-based call.
-- Remove `//go:build cuda` from all kernel .go files.
-
-- [x] T88.1 Create KernelLib dlopen loader  Owner: TBD  Est: 2h  Done: 2026 03 07
-  - Create `internal/cuda/kernels/dlopen.go` (no build tag).
-  - Load libkernels.so via dlopen.
-  - Resolve all launcher function pointers (launch_add, launch_sub, etc.).
-  - Acceptance: All ~30 function pointers resolved on DGX Spark.
-  - Dependencies: T87.2.
-
-- [x] T88.2 Replace elementwise.go CGo wrappers  Owner: TBD  Est: 3h  Done: 2026 03 07
-  - Rewrite all 20+ functions (Add, Sub, Mul, Div, Pow, Exp, Log, Sqrt,
-    etc.) to call dlsym function pointers instead of C functions.
-  - Remove `import "C"` and `//go:build cuda`.
-  - Acceptance: All elementwise kernel tests pass on DGX Spark.
-  - Dependencies: T88.1.
 
 - [ ] S88.2.1 Elementwise kernel parity test  Owner: TBD  Est: 1.5h
-  - Run existing elementwise_test.go tests.
-  - Verify output matches CGo version within 1e-7.
-
-- [x] T88.3 Replace remaining kernel CGo wrappers  Owner: TBD  Est: 3h  Done: 2026 03 07
-  - Rewrite transpose.go, rmsnorm.go, gather.go, gemm_q4.go,
-    gemm_quantized.go, flash_attention.go.
-  - Remove `import "C"` and `//go:build cuda` from each.
-  - Acceptance: All kernel tests pass. `go build ./...` compiles without
-    any build tags.
-  - Dependencies: T88.1.
 
 - [ ] S88.3.1 Full kernel test suite  Owner: TBD  Est: 2h
-  - Run all tests in internal/cuda/kernels/ on DGX Spark.
-  - Run full test suite: `go test ./... -count=1` (no -tags cuda needed).
-  - Verify flash_attention, gemm_q4, rmsnorm outputs match within tolerance.
-
-- [x] T88.4 Remove build tag from internal/cuda/mempool.go  Owner: TBD  Est: 30m  Done: 2026 03 07
-  - mempool.go may have `//go:build cuda`. Remove it.
-  - Ensure it compiles when CUDA is not available (guard with Available()).
-  - Dependencies: T88.3.
-
-- [x] T88.5 Run golangci-lint on internal/cuda/  Owner: TBD  Est: 15m  Done: 2026 03 07
-  - Dependencies: T88.4.
-
-#### E89: Runtime GPU Detection and Build Tag Removal (O88)
-
-Remove `//go:build cuda` from all files outside internal/cuda/. Replace
-compile-time GPU detection with runtime `cuda.Available()` checks. The goal:
-`go build ./...` always compiles, GPU is used when available.
-
-Existing code affected:
-- `internal/gpuapi/cuda_runtime.go` -- `//go:build cuda`
-- `internal/gpuapi/cuda_kernels.go` -- `//go:build cuda`
-- `compute/gpu_engine.go` -- `//go:build cuda`
-- `compute/gpu_kernels.go` -- `//go:build cuda`
-- Any other files with `//go:build cuda`
-
-- [x] T89.1 Remove build tags from gpuapi CUDA files  Owner: TBD  Est: 2h  Done: 2026 03 07
-  - Note: cuda_blas.go and cuda_dnn.go retain cuda tag (cublas/cudnn CGo dependency).
-  - Remove `//go:build cuda` from cuda_runtime.go and cuda_kernels.go.
-  - Guard initialization with `if !cuda.Available() { return }`.
-  - Acceptance: Files compile without build tags. GPU path activates only
-    when CUDA is present.
-  - Dependencies: E88.
 
 - [ ] T89.2 Remove build tags from compute/ GPU files  Owner: TBD  Est: 2h  BLOCKED
-  - BLOCKED: compute/ files reference gpuapi.NewCUDABlas/NewCUDADNN which
-    require cublas/cudnn CGo bindings. Cannot de-tag until cublas/cudnn get
-    purego loaders.
-  - Dependencies: T89.1, purego cublas/cudnn (not planned).
-
-- [x] T89.3 Update all remaining build-tagged files (partial)  Owner: TBD  Est: 1.5h  Done: 2026 03 07
-  - Note: Removed cuda tag from device/cuda_device.go and device/cuda_allocator.go.
-    Remaining files with cuda tag depend on cublas/cudnn/nccl/tensorrt CGo or are
-    behind compound tags (cuda || rocm || opencl). Cannot be de-tagged without
-    purego loaders for those libraries.
-  - Grep for `//go:build cuda` across the entire codebase.
-  - Remove each one, adding runtime guards as needed.
-  - Acceptance: Zero files with `//go:build cuda`. `go build ./...` works
-    on macOS (no CUDA) and DGX Spark (with CUDA).
-  - Dependencies: T89.2.
+  - BLOCKED: compute/ references cublas/cudnn CGo. Needs purego loaders.
 
 - [ ] S89.3.1 Cross-platform build verification  Owner: TBD  Est: 1h
-  - `go build ./...` on macOS (no CUDA) -- must compile and run CPU-only.
-  - `go build ./...` on DGX Spark (CUDA present) -- must compile and use GPU.
-  - `go test ./... -count=1` on macOS -- all tests pass (GPU tests skip).
-
-- [x] T89.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m  Done: 2026 03 07
-  - Dependencies: T89.3.
-
-#### E90: Track A Benchmark (O87, O88)
-
-Validate purego improvements on DGX Spark.
-
-- [x] T90.1 Benchmark purego inference  Owner: TBD  Est: 2h  Completed: 2026 03 07
-  - GPU (cuda tag): 9.77 tok/s. CPU (cuda tag): 6.74. purego CPU: 6.59.
-  - 42% improvement over Phase 30 baseline (6.86). purego within 2% of CGo CPU.
-  - Assembly trampoline fixes: LR corruption (02e8e44), asm syntax (f241600), build tags (9b71dbc).
-  - Dependencies: E89.
-
-- [x] S90.1.1 Track A benchmark report  Owner: TBD  Est: 30m  Completed: 2026 03 07
-  - GPU (cuda tag): 9.77 tok/s | CPU (cuda tag): 6.74 | purego CPU: 6.59 | F32 GPU: 12.78
-  - Binary size: 13M (both cuda and purego). macOS `go build ./...` passes.
-  - purego overhead vs CGo CPU: 2.2% (negligible).
-
-- [x] T90.2 Verify output correctness  Owner: TBD  Est: 1h  Completed: 2026 03 07
-  - GPU and CPU both produce 50 valid tokens, no NaN/Inf.
-  - Q4 output is garbled (known quantization quality issue, not inference bug).
-  - F32 GPU produces valid tokens at 12.78 tok/s.
-  - Dependencies: T90.1.
-
-- [x] T90.3 Run golangci-lint on all packages  Owner: TBD  Est: 15m  Completed: 2026 03 07
-  - 0 issues on macOS. DGX Spark build clean with cuda tag.
-  - Dependencies: T90.2.
 
 ---
 
-### Track B: Megakernel (Maximum Performance, All Architectures)
+### Track C: Tracing Compiler (Unblocks Megakernel)
 
-#### E91: Instruction-Tape-to-CUDA Code Generator (O89)
+Decision rationale: docs/adr/028-tracing-compiler.md.
 
-Build a code generator that reads a compiled ExecutionPlan's flat instruction
-list and emits a single .cu file containing a megakernel. Because Zerfoo is
-compositional (all complex layers decompose into primitive Engine ops), the
-generator does not need architecture-specific templates. It maps each OpName
-to a register-resident CUDA device function and chains them in instruction order.
+The tracing compiler resolves the fundamental blocker: graph.Compile() records
+composite node OpTypes but the megakernel emitter only knows primitives. The
+tracing compiler wraps the Engine with a proxy that records every primitive
+Engine call during Forward(), producing an instruction tape of primitive ops.
 
-This works for ANY model that compiles into an ExecutionPlan -- transformers,
-RNNs, CNNs, S4, HRM, or any future architecture.
+#### E97: EngineProxy and Tracer (O97)
 
-Decision rationale: docs/adr/026-megakernel-decode.md.
+##### T97.1 Create EngineProxy[T] implementing Engine[T]  Owner: TBD  Est: 4h
 
-Existing code:
-- `graph/compile.go` -- ExecutionPlan with []Instruction. Each Instruction has
-  OpName (string), InputIdx ([]int), OutputIdx (int). Slot shapes are known
-  from the warmup Forward() pass during Compile().
-- `internal/cuda/kernels/` -- Individual CUDA kernels (reference implementations
-  for each primitive op).
+Create `compute/engine_proxy.go`.
 
-The key insight: ExecutionPlan already IS the instruction tape. The code
-generator walks it and emits one CUDA device function call per instruction.
-No pattern matching for "transformer layers" or "attention blocks" is needed.
+```go
+type EngineProxy[T tensor.Numeric] struct {
+    real   Engine[T]
+    tracer *Tracer[T] // nil when not tracing
+}
+```
 
-Primitive op -> CUDA device function mapping:
-- Add, Sub, Mul, Div -> elementwise in registers
-- MatMul (Q4 GEMV) -> dequant + dot product from global memory
-- MatMul (F32 GEMV) -> dot product from global memory
-- RMSNorm -> shared memory reduction + register normalize
-- Softmax -> shared memory max/sum reduction + register exp/div
-- Exp, Log, Sqrt, Rsqrt, Tanh -> register unary
-- SiLU -> register (x * sigmoid(x))
-- Gather -> global memory read to registers
-- Concat, Split -> register reindexing
-- RoPE -> register rotation
-- MulScalar, AddScalar, etc. -> register scalar ops
+EngineProxy implements all ~25 Engine[T] methods. Each method:
+1. Delegates to `p.real.Method(ctx, args...)`
+2. If `p.tracer != nil`, calls `p.tracer.Record(opName, inputTensors, outputTensor)`
+3. Returns the real result
 
-- [x] T91.1 Export instruction metadata from ExecutionPlan  Owner: TBD  Est: 2h  Completed: 2026 03 07
-  - Added InstructionMeta, FrozenSlot types, Instructions(), SlotShapes(),
-    FrozenSlots(), InputSlots(), OutputSlot() methods.
-  - SlotShapes populated from warmup memo during Compile().
+Method-to-OpName mapping (must match codegen/optable.go emitter names):
 
-- [x] S91.1.1 Instruction metadata test  Owner: TBD  Est: 1h  Completed: 2026 03 07
-  - Compile Add(input, constant) graph. Verified OpName, InputIdx, OutputIdx,
-    slot shapes, frozen slots, input/output indices.
+| Engine Method | OpName | Category |
+|---------------|--------|----------|
+| Add | "Add" | binary |
+| Sub | "Sub" | binary |
+| Mul | "Mul" | binary |
+| Div | "Div" | binary |
+| Pow | "Pow" | binary |
+| MatMul | "MatMul" | binary |
+| Exp | "Exp" | unary |
+| Log | "Log" | unary |
+| Tanh | "Tanh" | unary |
+| Sqrt | "Sqrt" | unary |
+| Rsqrt | "Rsqrt" | unary |
+| MulScalar | "MulScalar" | scalar |
+| AddScalar | "AddScalar" | scalar |
+| DivScalar | "DivScalar" | scalar |
+| Softmax | "Softmax" | reduction |
+| ReduceSum | "ReduceSum" | reduction |
+| ReduceMean | "ReduceMean" | reduction |
+| Reshape | "Reshape" | shape |
+| Transpose | "Transpose" | shape |
+| Concat | "Concat" | shape |
+| Split | "Split" | shape |
+| Repeat | "Repeat" | shape |
+| Sum | "Sum" | reduction |
 
-- [x] T91.2 Create op-to-CUDA device function table  Owner: TBD  Est: 3h  Completed: 2026 03 07
-  - internal/codegen/optable.go with 26 ops: binary, unary, scalar, reduction,
-    memory, shape. Unsupported returns error.
+Methods NOT traced (side effects, not compute):
+- Ops() -- returns arithmetic, no compute
+- UnaryOp -- opaque closure, not emittable (see T97.6)
+- Zero, Zeros, Copy, Fill -- mutations, not in compute graph
+- RandomUniform -- non-deterministic
+- Gather -- special: uses int indices (see T97.7)
+- ScatterAdd -- gradient-only
+- OneHot -- not in inference path
+- TanhPrime -- gradient-only
 
-- [x] S91.2.1 Op emitter unit tests  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
-  - All 26 ops emit syntactically correct CUDA. Unsupported returns error.
+Acceptance:
+- All Engine[T] methods compile and delegate correctly.
+- In non-tracing mode (tracer == nil), zero overhead beyond interface dispatch.
+- Unit test: create EngineProxy wrapping CPUEngine, call Add/MatMul/Softmax,
+  verify results match CPUEngine directly.
+- Dependencies: none.
 
-- [x] T91.3 CUDA megakernel emitter  Owner: TBD  Est: 3h  Completed: 2026 03 07
-  - internal/codegen/emit.go: EmitMegakernel() walks instruction tape,
-    emits __global__ megakernel with slot registers, frozen params, ops.
+- [ ] S97.1.1 EngineProxy unit tests  Owner: TBD  Est: 1.5h
+  - Test each traced method records correct OpName.
+  - Test non-traced methods delegate without recording.
+  - Test tracing off (tracer == nil) produces no trace.
 
-- [x] S91.3.1 Emitted CUDA compilation test  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
-  - Simple Add+Mul graph emits valid code. Multi-op ordering verified.
+##### T97.2 Create Tracer[T] with tensor identity tracking  Owner: TBD  Est: 3h
 
-- [x] T91.4 Emit megakernel for full model  Owner: TBD  Est: 3h  Completed: 2026 03 07
-  - Simulated 19-instruction Gemma 3 tape: 3292 bytes of CUDA generated.
-  - All 11 real model op types have emitters.
+Create `compute/tracer.go`.
 
-- [x] S91.4.1 Full model emit test  Owner: TBD  Est: 2h  Completed: 2026 03 07
-  - Verified instruction count, frozen params, key device functions.
+```go
+type TracedOp struct {
+    OpName    string
+    InputIDs  []int // slot indices for inputs
+    OutputID  int   // slot index for output
+    ExtraArgs map[string]any // axis, scalar value, shape, etc.
+}
 
-- [x] T91.5 Run golangci-lint on graph/ and internal/codegen/  Owner: TBD  Est: 15m  Completed: 2026 03 07
-  - 0 issues.
+type Tracer[T tensor.Numeric] struct {
+    ops       []TracedOp
+    tensorMap map[uintptr]int // tensor pointer -> slot index
+    nextSlot  int
+    frozen    map[uintptr]bool // known frozen tensors (weights)
+    shapes    map[int][]int    // slot -> shape
+}
+```
 
-#### E92: Register-Resident Device Functions for Primitive Ops (O89)
+The Tracer tracks tensor identity by pointer (unsafe.Pointer of
+*tensor.TensorNumeric[T]). When a tensor first appears as input, it gets a
+slot index. When a tensor is produced as output, it gets a new slot index.
+Frozen tensors (model weights) are pre-registered so they get frozen slot
+indices.
 
-Implement CUDA `__device__` functions for each primitive op in the op table.
-These are the building blocks the emitter chains together. Each device function
-operates on data in registers or shared memory, never writing intermediates to
-global memory. They are architecture-agnostic -- the same device functions are
-used whether the model is a transformer, RNN, or anything else.
+Key methods:
+- `NewTracer[T](frozenTensors []*tensor.TensorNumeric[T]) *Tracer[T]`
+  Pre-registers frozen tensors with slot indices.
+- `Record(opName string, inputs []*tensor.TensorNumeric[T], output *tensor.TensorNumeric[T], extra map[string]any)`
+  Assigns slot IDs, appends TracedOp.
+- `slotFor(t *tensor.TensorNumeric[T]) int`
+  Returns existing slot or assigns new one.
+- `TracedOps() []TracedOp` -- returns recorded ops.
+- `SlotShapes() [][]int` -- returns shapes for each slot.
+- `FrozenSlots() []int` -- returns frozen slot indices.
 
-All device functions go in `internal/cuda/kernels/megakernel_ops.cu` (a header-
-style .cu file included by the generated megakernel).
+ExtraArgs captures method-specific parameters:
+- Softmax: `{"axis": 1}`
+- Transpose: `{"axes": [0,2,1,3]}`
+- Reshape: `{"shape": [1,8,1,256]}`
+- MulScalar: `{"scalar": 0.044715}`
+- Concat: `{"axis": -1}`
+- Split: `{"numSplits": 2, "axis": -1}`
+- Repeat: `{"axis": 1, "repetitions": 4}`
+- ReduceSum/ReduceMean: `{"axis": 2, "keepDims": false}`
 
-- [x] T92.1 Elementwise device functions  Owner: TBD  Est: 2h  Completed: 2026 03 07
-  - dev_add, dev_sub, dev_mul, dev_div, dev_pow + scalar variants.
-  - All __device__ __forceinline__ for register-resident operation.
+Acceptance:
+- Tracer correctly assigns unique slot indices to distinct tensors.
+- Same tensor pointer reused as input maps to same slot index.
+- Frozen tensors identified correctly.
+- ExtraArgs captured for all parameterized ops.
+- Dependencies: none.
 
-- [x] T92.2 Unary device functions  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
-  - dev_exp, dev_log, dev_sqrt, dev_rsqrt, dev_tanh, dev_neg, dev_abs, dev_silu.
+- [ ] S97.2.1 Tracer unit tests  Owner: TBD  Est: 1.5h
+  - Test tensor identity: same pointer = same slot.
+  - Test frozen tensor registration.
+  - Test ExtraArgs for Softmax, Transpose, Reshape, MulScalar.
 
-- [x] T92.3 RMSNorm device function  Owner: TBD  Est: 3h  Completed: 2026 03 07
-  - Shared memory reduction, eps parameter. Matches kernel_rmsnorm pattern.
+##### T97.3 Wire EngineProxy into graph construction  Owner: TBD  Est: 2h
 
-- [x] T92.4 Softmax device function  Owner: TBD  Est: 2.5h  Completed: 2026 03 07
-  - Three-phase: find max, compute exp+sum, normalize. Shared memory reductions.
+Modify `inference/arch_common.go` (and arch_llama.go if needed):
+- Instead of passing the raw engine to buildTransformerGraph(), wrap it in
+  an EngineProxy first.
+- Store the EngineProxy on the Graph so Compile can access it.
 
-- [x] T92.5 Q4 GEMV device function  Owner: TBD  Est: 4h  Completed: 2026 03 07
-  - dev_gemv_q4: reads Q4 blocks, dequantizes nibbles, dot product.
+Add to `graph/graph.go`:
+```go
+func (g *Graph[T]) SetEngineProxy(proxy *compute.EngineProxy[T])
+func (g *Graph[T]) EngineProxy() *compute.EngineProxy[T]
+```
 
-- [x] T92.6 F32 GEMV device function  Owner: TBD  Est: 2h  Completed: 2026 03 07
-  - dev_gemv_f32: simple row dot product.
+The EngineProxy is the same object that all layers received at construction
+time. When tracing is activated on it, ALL layers' engine calls go through
+the tracing path.
 
-- [x] T92.7 Gather device function  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
-  - dev_gather: reads one embedding row to registers.
+Acceptance:
+- Existing tests pass unchanged (EngineProxy in non-tracing mode is transparent).
+- Graph stores a reference to the EngineProxy.
+- All nodes in the Gemma 3 graph use the same EngineProxy instance.
+- Dependencies: T97.1.
 
-- [x] T92.8 Cooperative grid sync wrapper  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
-  - dev_grid_sync() via cooperative_groups. dev_transpose for 2D/ND.
+- [ ] S97.3.1 Graph EngineProxy integration test  Owner: TBD  Est: 1h
+  - Build a small graph with EngineProxy, run Forward(), verify output matches.
 
-- [x] S92.8.1 Grid sync + compilation test  Owner: TBD  Est: 1h  Completed: 2026 03 07
-  - Compiled with nvcc -arch=sm_121 on DGX Spark. Clean, no warnings.
+##### T97.4 Implement CompileTraced() in graph/compile.go  Owner: TBD  Est: 4h
 
-- [x] T92.9 Run golangci-lint on modified packages  Owner: TBD  Est: 15m  Completed: 2026 03 07
-  - No Go files modified in E92 (pure CUDA). Go lint clean.
+Add a new `CompileTraced()` method to `Graph[T]`:
 
-#### E93: Megakernel Integration and Compilation (O89, O90)
+```go
+func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) (*ExecutionPlan[T], error)
+```
 
-Wire the code generator and megakernel into the inference pipeline. At model
-load time, walk the ExecutionPlan instruction tape, emit a megakernel .cu,
-compile it (JIT or cached), and use it for decode tokens.
+Steps:
+1. Collect frozen tensors: iterate g.nodes, find constant/parameter nodes,
+   get their tensor values from g.memo (populated by prior Forward()).
+2. Create a Tracer, pre-register frozen tensors.
+3. Call `g.EngineProxy().StartTracing(tracer)`.
+4. Run Forward() on each node in topological order (same as current Compile
+   warmup pass). The EngineProxy records every engine call.
+5. Call `g.EngineProxy().StopTracing()`.
+6. Convert TracedOps to Instructions:
+   - Each TracedOp becomes an Instruction with OpName from the trace.
+   - InputIdx from TracedOp.InputIDs.
+   - OutputIdx from TracedOp.OutputID.
+   - Forward function: a closure that calls the real engine method with the
+     correct arguments (reconstructed from ExtraArgs).
+7. Build ExecutionPlan with traced instructions, slot shapes from tracer,
+   frozen slots from tracer, input/output slots from graph input/output
+   tensor identity.
 
-- [ ] T93.1 JIT compilation with nvrtc  Owner: TBD  Est: 3h
-  - Deferred: using cached nvcc (T93.2) instead. nvrtc can be added later
-    for faster iteration without nvcc installed.
+The existing Compile() method is preserved for backward compatibility. The
+generate/ decode loop calls CompileTraced() instead of Compile() when the
+EngineProxy is available.
 
-- [x] T93.2 Cached compilation with nvcc  Owner: TBD  Est: 2h  Completed: 2026 03 07
-  - CachedCompile() in internal/codegen/compile.go.
-  - SHA-256 hash for cache validation. Skip recompile on cache hit.
-  - Tested on DGX Spark: 1.16s first compile, instant cache hit.
+Acceptance:
+- CompileTraced() produces an ExecutionPlan where every instruction has a
+  primitive OpName (Add, MatMul, Softmax, etc.) -- no composite names.
+- The plan's Run() produces identical output to the non-traced plan's Run().
+- For a simple Add(input, constant) graph, CompileTraced produces the same
+  instructions as Compile (both see "Add").
+- For a graph with FFN node, CompileTraced produces ~7 instructions (MatMul,
+  MatMul, Concat, Split, Mul, Mul, MatMul) where Compile produces 1 ("FFN").
+- Dependencies: T97.2, T97.3.
 
-- [x] S93.2.1 Cache hit/miss test  Owner: TBD  Est: 1h  Completed: 2026 03 07
-  - First compile creates .so + hash. Second compile uses cache.
-  - Different source triggers recompilation.
+- [ ] S97.4.1 CompileTraced unit tests  Owner: TBD  Est: 2h
+  - Primitive node graph: CompileTraced matches Compile.
+  - FFN composite: CompileTraced produces primitive ops.
+  - GQA composite: CompileTraced produces ~20+ primitive ops.
+  - Output of plan.Run() matches for both compile paths.
 
-- [x] T93.3 Wire megakernel into decode loop  Owner: TBD  Est: 3h  Completed: 2026 03 07
-  - In `generate/stream.go`, after model load and plan compilation:
-    1. Call plan.Instructions() to get the instruction tape.
-    2. Check ops with CheckSupport(). If unsupported, fall back.
-    3. Emit megakernel .cu with EmitMegakernel().
-    4. Compile with CachedCompile().
-    5. dlopen the .so, resolve megakernel symbol.
-    6. On each decode token: launch megakernel instead of plan.Run().
-  - Dependencies: E91, E92, T93.2.
+##### T97.5 Handle Split (multi-output) and Concat (multi-input) in tracer  Owner: TBD  Est: 2h
 
-- [ ] S93.3.1 Megakernel decode correctness test  Owner: TBD  Est: 2h
-  - Generate 50 tokens with megakernel path.
-  - Compare output with ExecutionPlan.Run() path within tolerance.
+Split produces multiple output tensors. Concat takes multiple input tensors.
+These need special handling in the Tracer:
 
-- [x] T93.4 Fallback to ExecutionPlan on unsupported ops  Owner: TBD  Est: 1.5h  Completed: 2026 03 07
-  - CheckSupport() returns unsupported op names for warning/fallback.
-  - Dedup: each unsupported op listed once.
+- Split: Record one "Split" op with a single output slot. But Split returns
+  []TensorNumeric. The tracer must assign slot indices to each output tensor.
+  Options: (a) Record multiple ops ("SplitPart0", "SplitPart1"), or (b) record
+  one "Split" op and let the emitter handle multi-output.
+  Decision: Use approach (b). Add `OutputIDs []int` to TracedOp for multi-output
+  ops. The emitter generates code for each output slice.
 
-- [x] T93.5 Run golangci-lint on generate/ and internal/codegen/  Owner: TBD  Est: 15m  Completed: 2026 03 07
-  - Dependencies: T93.3.
+- Concat: Already handled naturally -- inputs are multiple tensors, each with
+  their own slot index. TracedOp.InputIDs has multiple entries.
+
+Acceptance:
+- Split traced with correct number of OutputIDs.
+- Concat traced with all input slot indices.
+- Emitter table updated for Split multi-output.
+- Dependencies: T97.2.
+
+- [ ] S97.5.1 Split/Concat tracing test  Owner: TBD  Est: 1h
+
+##### T97.6 Handle UnaryOp and FusedRoPE fallback  Owner: TBD  Est: 2h
+
+Two engine calls cannot be automatically traced to primitive ops:
+
+1. `UnaryOp(ctx, tensor, func(T) T)` -- the closure is opaque. The tracer
+   cannot determine what math the closure performs.
+2. `FusedRoPE()` (via FusedRMSNormer type assertion) -- a fused kernel that
+   bypasses the individual engine calls.
+
+Strategy:
+- When the tracer encounters UnaryOp, mark the trace as "incomplete". Set a
+  flag on the Tracer: `hasOpaqueOps = true`.
+- When the tracer encounters FusedRoPE/FusedRMSNormGPU, record it as
+  "FusedRMSNorm" (already in emitter table) or "FusedRoPE" (add to emitter).
+- CompileTraced() checks `tracer.HasOpaqueOps()`. If true, fall back to the
+  non-traced Compile() path (the megakernel will not fire, same as today).
+- Track 0 composition fixes (T96.1-T96.3, done) already eliminated the main
+  UnaryOp violations in the Gemma 3 path. The sigmoid in SwiGLU is the
+  remaining concern.
+
+For SwiGLU's sigmoid: check if SwiGLU/Sigmoid uses engine.UnaryOp or explicit
+engine calls. If it uses UnaryOp, refactor to use engine.Exp + engine.AddScalar
++ engine.Div (1 / (1 + exp(-x))). This is a focused composition fix.
+
+Acceptance:
+- UnaryOp calls set hasOpaqueOps flag.
+- CompileTraced falls back when opaque ops detected.
+- Gemma 3 model produces a clean trace (no opaque ops) after sigmoid fix.
+- Dependencies: T97.4.
+
+- [ ] S97.6.1 Opaque op fallback test  Owner: TBD  Est: 1h
+
+##### T97.7 Handle Gather with int indices  Owner: TBD  Est: 1.5h
+
+Engine.Gather has a different signature: it takes `*tensor.TensorNumeric[int]`
+for indices, not `*tensor.TensorNumeric[T]`. The tracer's tensor identity
+tracking uses `*tensor.TensorNumeric[T]` pointers.
+
+Strategy:
+- Record Gather as a special op with the params tensor (float) as a frozen
+  slot and the indices tensor tracked by its pointer cast to uintptr.
+- The Gather emitter already exists in optable.go.
+- At megakernel runtime, the input token IDs are passed as the indices.
+
+Acceptance:
+- Gather traced correctly with frozen params slot and input indices slot.
+- EmbeddingLookup node produces a traced Gather instruction.
+- Dependencies: T97.2.
+
+- [ ] S97.7.1 Gather tracing test  Owner: TBD  Est: 45m
+
+##### T97.8 Run golangci-lint on compute/, graph/  Owner: TBD  Est: 30m
+  - Dependencies: T97.1-T97.7.
+
+#### E98: GPU KV Cache for Megakernel Attention (O98)
+
+The GroupedQueryAttention node reads and writes the KV cache during Forward().
+The KV cache is currently Go-managed (CPU memory). For the megakernel to handle
+attention, the KV data must be on GPU.
+
+##### T98.1 TracingCacheProvider[T]  Owner: TBD  Est: 3h
+
+Create `generate/tracing_cache.go`:
+
+```go
+type TracingCacheProvider[T tensor.Numeric] struct {
+    real   CacheProvider[T]
+    tracer *compute.Tracer[T]
+}
+```
+
+Wraps the real CacheProvider. During tracing:
+- `Update(layerIdx, k, v)` records two ops: "KVCacheAppendK" and
+  "KVCacheAppendV" with the K/V tensor slots and layer index as ExtraArgs.
+- `Get(layerIdx)` records two ops: "KVCacheGetK" and "KVCacheGetV" with
+  output tensor slots.
+- `SeqLen()` records "KVCacheSeqLen" (returns a scalar).
+
+The tracer captures the full attention dataflow including cache operations.
+
+Acceptance:
+- KV cache operations appear in the trace as named ops.
+- The traced instruction tape for GQA includes KVCache* ops between the
+  Q/K/V projections and the attention score computation.
+- Dependencies: T97.2.
+
+- [ ] S98.1.1 TracingCacheProvider unit test  Owner: TBD  Est: 1h
+
+##### T98.2 GPU KV cache buffer management  Owner: TBD  Est: 4h
+
+Create `internal/codegen/kv_cache.go`:
+
+The megakernel needs persistent GPU memory for KV data that survives between
+kernel launches. For Gemma 3 2B (26 layers, 4 KV heads, 256 head_dim,
+max_seq_len=8192):
+
+- Per-layer K buffer: [max_seq_len, num_kv_heads * head_dim] float32
+  = 8192 * 1024 * 4 = 32MB per layer
+- Total KV: 26 layers * 2 (K+V) * 32MB = ~1.6GB
+- For shorter contexts (512 tokens): 26 * 2 * 2MB = ~104MB
+
+Implement:
+- `GPUKVCache` struct: allocates GPU buffers for K/V per layer.
+- `Append(layerIdx int, k, v []float32, seqPos int)`: copies new K/V to
+  the correct position in GPU buffer.
+- `Pointers(layerIdx int) (kPtr, vPtr unsafe.Pointer, seqLen int)`: returns
+  device pointers for the megakernel to read.
+- Memory allocated once at model load, reused across generations.
+
+Acceptance:
+- GPU buffers allocated and freed correctly.
+- Append writes to correct offset. Pointers return valid device addresses.
+- Memory budget configurable (default: 512 tokens, ~104MB).
+- Dependencies: none (uses internal/cuda for GPU memory).
+
+- [ ] S98.2.1 GPU KV cache allocation test  Owner: TBD  Est: 1h
+  - Test on DGX Spark: allocate, append, read back, verify data.
+
+##### T98.3 KV cache op emitters in codegen  Owner: TBD  Est: 3h
+
+Add emitters to `internal/codegen/optable.go` for the KV cache ops:
+
+- "KVCacheAppendK": `dev_kv_append(kv_k[layer], slot_k, seq_pos, head_dim);`
+- "KVCacheAppendV": `dev_kv_append(kv_v[layer], slot_v, seq_pos, head_dim);`
+- "KVCacheGetK": `float* slot_k = kv_k[layer];` (pointer alias, no copy)
+- "KVCacheGetV": `float* slot_v = kv_v[layer];`
+- "KVCacheSeqLen": `int seq_len = kv_seq_len;` (passed as kernel arg)
+
+Update `emit.go` EmitMegakernel() to:
+- Accept KV cache device pointers as kernel arguments.
+- Emit KV cache pointer declarations at kernel top.
+- Pass seq_pos and kv_seq_len as kernel arguments.
+
+Acceptance:
+- Emitted CUDA compiles with nvcc.
+- KV cache ops appear correctly in generated kernel.
+- Dependencies: T98.2.
+
+- [ ] S98.3.1 KV cache emitter test  Owner: TBD  Est: 1h
+
+##### T98.4 Run golangci-lint on generate/, internal/codegen/  Owner: TBD  Est: 30m
+  - Dependencies: T98.1-T98.3.
+
+#### E99: New Primitive Op Emitters (O89)
+
+The traced instruction tape may contain ops not yet in the emitter table.
+Add emitters for ops that appear in the Gemma 3 trace.
+
+##### T99.1 Add Slice emitter to optable.go  Owner: TBD  Est: 1.5h
+
+RoPE uses engine.Slice (or tensor slicing). The tracer records Slice ops.
+Add emitter:
+- "Slice": `dev_slice(slot_out, slot_in, start, end, axis, dim);`
+- Implement `dev_slice` in megakernel_ops.cu.
+
+Acceptance: Emitted code compiles. Slice op in trace gets emitted.
+Dependencies: none.
+
+- [ ] S99.1.1 Slice emitter test  Owner: TBD  Est: 45m
+
+##### T99.2 Add Repeat emitter to optable.go  Owner: TBD  Est: 1.5h
+
+GQA uses engine.Repeat for K/V head replication.
+- "Repeat": `dev_repeat(slot_out, slot_in, axis, repetitions, dims);`
+- Implement `dev_repeat` in megakernel_ops.cu.
+
+Acceptance: Emitted code compiles. Repeat op in trace gets emitted.
+Dependencies: none.
+
+- [ ] S99.2.1 Repeat emitter test  Owner: TBD  Est: 45m
+
+##### T99.3 Add ReduceSum and ReduceMean emitters  Owner: TBD  Est: 2h
+
+Used in normalization and attention layers.
+- "ReduceSum": `dev_reduce_sum(slot_out, slot_in, axis, dim);`
+- "ReduceMean": `dev_reduce_mean(slot_out, slot_in, axis, dim);`
+- Implement with shared memory reduction (similar to RMSNorm/Softmax).
+
+Acceptance: Emitted code compiles.
+Dependencies: none.
+
+- [ ] S99.3.1 Reduction emitter test  Owner: TBD  Est: 45m
+
+##### T99.4 Verify emitter coverage against real Gemma 3 trace  Owner: TBD  Est: 2h
+
+After implementing CompileTraced (T97.4), run it on the Gemma 3 Q4 model on
+DGX Spark. Print all unique OpNames in the traced instruction tape. Verify
+every op has an emitter in optable.go. Add any missing emitters.
+
+Acceptance:
+- CheckSupport() returns empty list for the traced Gemma 3 instruction tape.
+- All ops in the trace have emitters.
+- Dependencies: T97.4, T99.1-T99.3.
+
+- [ ] S99.4.1 Full trace coverage report  Owner: TBD  Est: 30m
+
+##### T99.5 Run golangci-lint on internal/codegen/  Owner: TBD  Est: 15m
+  - Dependencies: T99.1-T99.4.
+
+#### E100: Tracing Compiler Integration (O89, O90)
+
+Wire CompileTraced into the generate loop and verify the megakernel fires.
+
+##### T100.1 Update generate/ to use CompileTraced  Owner: TBD  Est: 2h
+
+In `generate/generator.go` and `generate/stream.go`, update the planOnce.Do
+block:
+
+```go
+gen.planOnce.Do(func() {
+    var compiled *graph.ExecutionPlan[T]
+    var cErr error
+    if proxy := gen.graph.EngineProxy(); proxy != nil {
+        compiled, cErr = gen.graph.CompileTraced(genCtx, tokenTensor)
+    } else {
+        compiled, cErr = gen.graph.Compile(genCtx, tokenTensor)
+    }
+    if cErr == nil {
+        gen.plan.Store(compiled)
+        go tryCompileMegakernel(compiled, nil)
+    }
+})
+```
+
+Also wire the TracingCacheProvider: when creating the cache for the decode
+context, wrap it with TracingCacheProvider if the graph has an EngineProxy.
+
+Acceptance:
+- CompileTraced is called when EngineProxy is available.
+- tryCompileMegakernel receives a plan with primitive ops.
+- Megakernel CheckSupport() passes (returns empty unsupported list).
+- Dependencies: E97, E98, E99.
+
+- [ ] S100.1.1 Integration test  Owner: TBD  Est: 1.5h
+  - Run bench_tps on DGX Spark. Verify "megakernel: compiled and loaded" log.
+
+##### T100.2 Update tryCompileMegakernel for GPU KV cache  Owner: TBD  Est: 2h
+
+The existing tryCompileMegakernel in `generate/megakernel.go` creates a
+MegakernelRunner. Update it to:
+
+1. Detect KVCache* ops in the traced instruction tape.
+2. Allocate GPUKVCache with the correct dimensions from slot shapes.
+3. Pass KV cache device pointers to the runner's Launch().
+4. On each Launch(), pass current seq_pos from the Go KV cache.
+
+Acceptance:
+- Megakernel launches with KV cache pointers.
+- KV cache positions increment correctly per token.
+- Dependencies: T98.2, T100.1.
+
+- [ ] S100.2.1 KV cache integration test  Owner: TBD  Est: 1.5h
+  - Generate 50 tokens with megakernel. Compare with plan.Run() output.
+
+##### T100.3 End-to-end megakernel correctness test  Owner: TBD  Est: 2h
+
+On DGX Spark:
+1. Load Gemma 3 2B Q4 model.
+2. Generate 50 tokens with prompt "The capital of France is".
+3. Compare output: megakernel path vs ExecutionPlan.Run() path.
+4. Verify no NaN/Inf. Verify output is coherent text.
+
+This is the previously blocked S93.3.1.
+
+Acceptance:
+- Both paths produce identical output (or within float32 tolerance).
+- No NaN or Inf in any intermediate.
+- Dependencies: T100.2.
+
+##### T100.4 Run golangci-lint on generate/, graph/  Owner: TBD  Est: 15m
+  - Dependencies: T100.1-T100.3.
+
+---
+
+### Track B: Megakernel Performance Tuning (Existing)
 
 #### E94: Megakernel Performance Tuning (O90)
 
-Optimize the megakernel for maximum throughput on DGX Spark GB10.
-
 - [ ] T94.1 Profile megakernel with nsys  Owner: TBD  Est: 2h
-  - Run megakernel decode with nsys profiler.
-  - Identify: memory bandwidth utilization, occupancy, register usage,
-    shared memory usage, stall reasons.
-  - Acceptance: Profile report with actionable bottleneck identification.
-  - Dependencies: E93.
+  - Identify bandwidth utilization, occupancy, register usage, stalls.
+  - Dependencies: E100.
 
 - [ ] T94.2 Optimize memory access patterns  Owner: TBD  Est: 3h
-  - Based on nsys profile, optimize:
-    - Coalesced weight reads (Q4 block layout alignment).
-    - Shared memory bank conflict avoidance.
-    - Warp-level reduction using __shfl_down_sync.
-    - Register spill reduction (adjust tiling).
-  - Acceptance: Memory bandwidth utilization >= 70% of theoretical.
+  - Coalesced weight reads, bank conflict avoidance, warp-level reduction.
   - Dependencies: T94.1.
 
 - [ ] T94.3 Tune thread block and grid dimensions  Owner: TBD  Est: 2h
-  - Experiment with block sizes (128, 256, 512) and grid dimensions.
-  - Use cooperative launch occupancy calculator.
-  - Acceptance: Optimal configuration documented and hardcoded in emitter.
+  - Experiment with block sizes (128, 256, 512).
   - Dependencies: T94.1.
 
 - [ ] T94.4 Run golangci-lint on modified packages  Owner: TBD  Est: 15m
@@ -762,38 +726,19 @@ Optimize the megakernel for maximum throughput on DGX Spark GB10.
 
 #### E95: End-to-End Benchmark (O90)
 
-Final validation after all optimizations.
-
 - [ ] T95.1 Profile GPU inference after all optimizations  Owner: TBD  Est: 2h
-  - Run `bench_tps -model ~/models/gemma3-q4 -device cuda -tokens 100`.
-  - 7 runs, report median and peak.
-  - Capture nsys profile.
-  - Acceptance: Profile shows single kernel launch per token, high bandwidth
-    utilization.
+  - bench_tps -device cuda -tokens 100, 7 runs, median and peak.
   - Dependencies: E94.
 
 - [ ] S95.1.1 GPU profile report  Owner: TBD  Est: 30m
-  - Document: tok/s (median + peak), kernel launch count, bandwidth
-    utilization %, memory traffic per token.
 
 - [ ] T95.2 Compare all configurations  Owner: TBD  Est: 1.5h
-  - Run bench_tps with:
-    - `-device cpu` (CPU baseline)
-    - `-device cuda` with ExecutionPlan.Run() (Track A purego baseline)
-    - `-device cuda` with megakernel (Track B)
-  - 7 runs each, report median.
-  - Compare with Phase 33 baselines and Ollama numbers.
-  - Acceptance: Megakernel tok/s >= 50 median. If not met, identify
-    remaining bottleneck and document what would close the gap.
+  - CPU, GPU+plan.Run(), GPU+megakernel. 7 runs each.
   - Dependencies: T95.1.
 
 - [ ] S95.2.1 Benchmark comparison report  Owner: TBD  Est: 30m
 
 - [ ] T95.3 Verify output correctness across all paths  Owner: TBD  Est: 1h
-  - Generate 50 tokens with same prompt on CPU, GPU (purego/plan.Run),
-    GPU (megakernel).
-  - Compare outputs. All should produce coherent text.
-  - Acceptance: No NaN or Inf. Coherent output on all paths.
   - Dependencies: T95.1.
 
 - [ ] S95.3.1 Output correctness report  Owner: TBD  Est: 30m
@@ -803,59 +748,580 @@ Final validation after all optimizations.
 
 ---
 
-## 4. Parallel Work
+### Track D: NEON SIMD CPU Acceleration (NEW)
 
-Phase 34 has three sequential tracks (0 then A then B), with internal parallelism.
+Decision rationale: docs/adr/029-neon-simd-cpu-acceleration.md.
+
+CPU inference is 6.86 tok/s. Profiling shows the hot path after matmul includes
+Pow (8.9%), binaryOp broadcasting overhead (10.4%), Softmax, RMSNorm, SiLU, and
+RoPE -- all running through generic Go per-element loops. llama.cpp vectorizes
+all of these with NEON SIMD. Track D adds NEON assembly for these ops, same-shape
+fast paths, and a tensor arena for buffer reuse.
+
+All assembly files follow the established pattern:
+- `internal/xblas/<name>_arm64.go` -- Go declarations with `//go:noescape`
+- `internal/xblas/<name>_arm64.s` -- ARM64 NEON plan9 assembly
+- `internal/xblas/<name>_generic.go` -- `//go:build !arm64` pure-Go fallback
+
+#### E101: Same-Shape Fast Paths and Pow Specialization (O102)
+
+These are pure Go changes in compute/cpu_engine.go. No assembly needed. Highest
+ROI because they eliminate unnecessary work rather than doing work faster.
+
+##### T101.1 Add same-shape fast path to binaryOp  Owner: TBD  Est: 2h  [x] 2026 03 07
+
+Current `binaryOp()` at `compute/cpu_engine.go:546` computes broadcast shapes
+and does per-element coordinate decoding (lines 576-594) even when both tensors
+have identical shapes (no broadcast). This coordinate-decode loop is 10.4% of
+CPU inference time.
+
+Add a fast path at the top of binaryOp():
+```go
+if slicesEqual(a.Shape(), b.Shape()) {
+    // Same shape: no broadcast needed. Direct element-wise loop.
+    aData := a.Data()
+    bData := b.Data()
+    rData := result.Data()
+    parallelFor(len(aData), func(start, end int) {
+        for i := start; i < end; i++ {
+            rData[i] = op(aData[i], bData[i])
+        }
+    })
+    return result, nil
+}
+```
+
+This fast path is taken for all same-shape binary ops (Add, Sub, Mul, Div, Pow)
+which is the common case in transformer inference (residual connections, attention
+scores, etc.).
+
+Acceptance:
+- binaryOp benchmark: >= 40% faster for same-shape [1, 2048] tensors.
+- All existing binary op tests pass unchanged.
+- Broadcasting still works for non-matching shapes.
+- Dependencies: none.
+
+- [x] S101.1.1 Same-shape fast path benchmark test  Owner: TBD  Est: 1h  2026 03 07
+  - BenchmarkBinaryOpSameShape vs BenchmarkBinaryOpBroadcast.
+  - Verify fast path taken for same-shape, slow path for broadcast.
+
+##### T101.2 Add Pow x^2 specialization  Owner: TBD  Est: 1.5h  [x] 2026 03 07
+
+Current `Pow()` at `compute/cpu_engine.go:1358` calls `e.ops.Pow(base, exponent)`
+which calls `math.Pow()` for every element. Profiling shows Pow is 8.9% of
+CPU inference time. In Gemma 3, Pow is called exclusively by RMSNorm with
+exponent=2.0 (squaring).
+
+Add specialization in Pow():
+```go
+func (e *CPUEngine[T]) Pow(ctx context.Context, base, exponent *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+    defer e.recordOp("Pow", time.Now())
+
+    // Specialization: if exponent is a scalar broadcast tensor with value 2.0,
+    // use x*x instead of math.Pow(x, 2).
+    if isScalarBroadcast(exponent) {
+        expVal := e.ops.ToFloat64(exponent.Data()[0])
+        if expVal == 2.0 {
+            return e.UnaryOp(ctx, base, func(x T) T { return e.ops.Mul(x, x) }, dst...)
+        }
+    }
+    return e.binaryOp(ctx, base, exponent, e.ops.Pow, dst...)
+}
+```
+
+`isScalarBroadcast()` checks if the tensor has exactly one unique value
+(shape is [1] or all elements are identical).
+
+Acceptance:
+- Pow with exponent=2.0 is >= 5x faster than math.Pow path.
+- Pow with other exponents still works via math.Pow.
+- RMSNorm end-to-end benchmark shows improvement.
+- All existing Pow tests pass.
+- Dependencies: none.
+
+- [x] S101.2.1 Pow specialization benchmark test  Owner: TBD  Est: 45m  2026 03 07
+  - BenchmarkPowSquare vs BenchmarkPowGeneric.
+
+##### T101.3 Add same-shape fast path to scalar ops  Owner: TBD  Est: 1h  [x] 2026 03 07
+
+Current `MulScalar()`, `AddScalar()`, `DivScalar()` at `cpu_engine.go:359-394`
+use `e.ops.Mul(aData[i], scalar)` per element. For float32 specialization,
+this can directly use `aData[i] * scalar` when T is float32 (the common
+inference type). But even without type specialization, the existing loop is
+already simple. The main optimization here is to dispatch to NEON in T101.7.
+
+For now, ensure the scalar ops use the same parallelFor pattern with the
+compute pool (they already do). This task is primarily to verify the scalar
+ops are ready for NEON dispatch in T101.7.
+
+Acceptance:
+- Scalar ops use parallelFor.
+- Benchmarks established as baselines for NEON comparison.
+- Dependencies: none.
+
+- [x] S101.3.1 Scalar op baseline benchmarks  Owner: TBD  Est: 30m  2026 03 07
+
+##### T101.4 Run golangci-lint on compute/  Owner: TBD  Est: 15m
+  - Dependencies: T101.1-T101.3.
+
+#### E102: NEON Assembly for Hot-Path Operations (O101)
+
+ARM64 NEON assembly for the operations that dominate non-matmul CPU time.
+All functions go in `internal/xblas/` following the existing pattern.
+
+##### T102.1 NEON vectorized Softmax  Owner: TBD  Est: 4h
+
+Create `internal/xblas/softmax_arm64.go` and `softmax_arm64.s`.
+
+```go
+// SoftmaxF32 computes softmax(x) in-place for a float32 vector of length n.
+// Uses 3-pass NEON: (1) find max via FMAXP, (2) exp(x-max) via polynomial
+// approximation + FMLA, (3) normalize by reciprocal sum.
+//go:noescape
+func SoftmaxF32(data *float32, n int)
+```
+
+NEON implementation:
+1. Pass 1 (max): Load 4 floats at a time, FMAX across lanes, FMAXP to reduce.
+2. Pass 2 (exp + sum): Subtract max, compute exp() using a degree-4 polynomial
+   approximation of exp() (sufficient for float32 precision):
+   `exp(x) ~ 1 + x + x^2/2 + x^3/6 + x^4/24` for x in [-max, 0].
+   For wider range, use the identity `exp(x) = 2^(x/ln2)` with integer part
+   extracted via FCVTZS and fractional part via polynomial.
+   Accumulate sum with FADD.
+3. Pass 3 (normalize): Compute 1/sum, FMUL each element.
+
+Also create `internal/xblas/softmax_generic.go`:
+```go
+//go:build !arm64
+func SoftmaxF32(data *float32, n int) { softmaxF32Scalar(data, n) }
+```
+
+Wire into CPUEngine.Softmax for the common case (float32, last-axis, contiguous).
+
+Acceptance:
+- SoftmaxF32 output matches math.Exp-based softmax within 1e-5 relative error.
+- Benchmark: >= 3x faster than current per-element softmax for n=2048.
+- Handles n not divisible by 4 (tail elements processed scalar).
+- Dependencies: none.
+
+- [ ] S102.1.1 NEON Softmax correctness + benchmark tests  Owner: TBD  Est: 1.5h
+  - Test various lengths: 1, 4, 7, 128, 2048.
+  - Compare output against reference math.Exp softmax.
+  - BenchmarkSoftmaxNEON vs BenchmarkSoftmaxScalar.
+
+##### T102.2 NEON vectorized RMSNorm  Owner: TBD  Est: 4h
+
+Create `internal/xblas/rmsnorm_arm64.go` and `rmsnorm_arm64.s`.
+
+```go
+// RMSNormF32 computes x * rsqrt(mean(x^2) + eps) * weight for one row.
+// x is input [D], weight is [D], out is [D], eps is epsilon.
+// Returns the scale factor rsqrt(mean(x^2) + eps).
+//go:noescape
+func RMSNormF32(out, x, weight *float32, D int, eps float32) float32
+```
+
+NEON implementation:
+1. Sum of squares: Load 4 x[i] at a time, FMUL x*x, FADD to accumulator.
+   Use dual accumulators V0/V1 to hide latency.
+2. Compute mean: FADDP to reduce, FDIV by D.
+3. Compute rsqrt: FADD eps, FRSQRTE + Newton-Raphson refinement (2 iterations
+   for float32 precision). ARM NEON has FRSQRTE instruction.
+4. Normalize: Load x[i] and weight[i], FMUL x * scale * weight, store to out.
+
+Also create generic fallback.
+
+Wire into `compute.FusedRMSNorm()` (currently at `compute/fused_rmsnorm.go`).
+Call `RMSNormF32()` per row instead of the per-element Go loop.
+
+Acceptance:
+- Output matches current FusedRMSNorm within 1e-5 relative error.
+- Benchmark: >= 3x faster for D=2048 (Gemma 3 hidden size).
+- Dependencies: none.
+
+- [ ] S102.2.1 NEON RMSNorm correctness + benchmark tests  Owner: TBD  Est: 1.5h
+
+##### T102.3 NEON vectorized SiLU (x * sigmoid(x))  Owner: TBD  Est: 3h
+
+Create `internal/xblas/silu_arm64.go` and `silu_arm64.s`.
+
+```go
+// SiLUF32 computes silu(x) = x / (1 + exp(-x)) for n float32 values.
+// Reads from x, writes to out (may alias x for in-place).
+//go:noescape
+func SiLUF32(out, x *float32, n int)
+
+// SiLUGateF32 computes silu(gate) * up for n float32 values.
+// This is the SwiGLU operation: result[i] = gate[i] * sigmoid(gate[i]) * up[i].
+//go:noescape
+func SiLUGateF32(out, gate, up *float32, n int)
+```
+
+NEON implementation:
+- exp(-x) via the same polynomial approximation as Softmax T102.1.
+  Factor out the exp polynomial into a shared macro or inline function
+  in the assembly.
+- sigmoid(x) = 1 / (1 + exp(-x)): FNEG, exp polynomial, FADD 1, FRECPE + NR.
+- silu(x) = x * sigmoid(x): FMUL.
+- SiLUGateF32 fuses the SwiGLU operation: silu(gate) * up in one pass.
+
+Wire into `compute.FusedSiLUGate()` (at `compute/fused_silugate.go`).
+Call `SiLUGateF32()` instead of per-element Go loop with `math.Exp`.
+
+Acceptance:
+- Output matches math.Exp-based SiLU within 1e-5 relative error.
+- Benchmark: >= 3x faster for n=2048.
+- SiLUGateF32 matches FusedSiLUGate output.
+- Dependencies: none.
+
+- [ ] S102.3.1 NEON SiLU/SiLUGate correctness + benchmark tests  Owner: TBD  Est: 1.5h
+
+##### T102.4 NEON vectorized RoPE  Owner: TBD  Est: 3h
+
+Create `internal/xblas/rope_arm64.go` and `rope_arm64.s`.
+
+```go
+// RoPEF32 applies rotary position embeddings to one position.
+// in is [head_dim], cos/sin are [half_dim], out is [head_dim].
+// rotaryDim must be even and <= head_dim.
+//go:noescape
+func RoPEF32(out, in, cos, sin *float32, halfDim, headDim int)
+```
+
+NEON implementation:
+1. Load 4 cos[i] and 4 sin[i].
+2. Load 4 in[i] (first half) and 4 in[i+halfDim] (second half).
+3. Compute: out[i] = in[i]*cos[i] - in[i+half]*sin[i]
+           out[i+half] = in[i+half]*cos[i] + in[i]*sin[i]
+   Using FMUL + FMLS (fused multiply-subtract) and FMLA (fused multiply-add).
+4. Copy pass-through dimensions (rotaryDim < headDim) with LDP/STP.
+
+Wire into `compute.FusedRoPE()` (at `compute/fused_rope.go`).
+Call `RoPEF32()` per (batch, seq) position instead of the per-element loop.
+
+Acceptance:
+- Output matches current FusedRoPE within 1e-6 relative error.
+- Benchmark: >= 2x faster for head_dim=256.
+- Handles non-aligned halfDim (tail scalar).
+- Dependencies: none.
+
+- [ ] S102.4.1 NEON RoPE correctness + benchmark tests  Owner: TBD  Est: 1.5h
+
+##### T102.5 NEON vectorized elementwise (Add, Mul, Sub for same-shape)  Owner: TBD  Est: 3h
+
+Create `internal/xblas/elementwise_arm64.go` and `elementwise_arm64.s`.
+
+```go
+// VaddF32 computes out[i] = a[i] + b[i] for n float32 values using NEON.
+//go:noescape
+func VaddF32(out, a, b *float32, n int)
+
+// VmulF32 computes out[i] = a[i] * b[i] for n float32 values using NEON.
+//go:noescape
+func VmulF32(out, a, b *float32, n int)
+
+// VsubF32 computes out[i] = a[i] - b[i] for n float32 values using NEON.
+//go:noescape
+func VsubF32(out, a, b *float32, n int)
+
+// VdivF32 computes out[i] = a[i] / b[i] for n float32 values using NEON.
+//go:noescape
+func VdivF32(out, a, b *float32, n int)
+```
+
+NEON implementation: Load 8 elements (2x V registers), FADD/FMUL/FSUB/FDIV,
+store. Same loop structure as existing vdotf32 with tail handling.
+
+Wire into the same-shape fast path from T101.1. When T is float32 and shapes
+match, dispatch to the NEON function instead of the per-element Go loop:
+```go
+if slicesEqual(a.Shape(), b.Shape()) {
+    // Type-assert to float32 for NEON dispatch
+    if af32, ok := any(a).(*tensor.TensorNumeric[float32]); ok {
+        xblas.VaddF32(&rData[0], &af32.Data()[0], &bf32.Data()[0], len(rData))
+        return result, nil
+    }
+    // Generic same-shape loop fallback
+    ...
+}
+```
+
+Acceptance:
+- Output matches Go loop within float32 precision.
+- Benchmark: >= 2x faster for n=2048.
+- Tail elements handled correctly.
+- Dependencies: T101.1 (same-shape fast path).
+
+- [ ] S102.5.1 NEON elementwise correctness + benchmark tests  Owner: TBD  Est: 1h
+
+##### T102.6 NEON vectorized scalar ops (MulScalar, AddScalar, DivScalar)  Owner: TBD  Est: 2h
+
+Create `internal/xblas/scalar_arm64.go` and `scalar_arm64.s`.
+
+```go
+// VmulScalarF32 computes out[i] = a[i] * scalar for n float32 values.
+//go:noescape
+func VmulScalarF32(out, a *float32, scalar float32, n int)
+
+// VaddScalarF32 computes out[i] = a[i] + scalar for n float32 values.
+//go:noescape
+func VaddScalarF32(out, a *float32, scalar float32, n int)
+
+// VdivScalarF32 computes out[i] = a[i] / scalar for n float32 values.
+//go:noescape
+func VdivScalarF32(out, a *float32, scalar float32, n int)
+```
+
+NEON implementation: VDUP scalar to all 4 lanes, then FMUL/FADD/FDIV with
+loaded data, same loop structure as VmulF32 but with broadcast scalar.
+
+Wire into CPUEngine.MulScalar/AddScalar/DivScalar via float32 type assertion.
+
+Acceptance:
+- Output matches Go loop.
+- Benchmark: >= 2x faster for n=2048.
+- Dependencies: none.
+
+- [ ] S102.6.1 NEON scalar ops correctness + benchmark tests  Owner: TBD  Est: 1h
+
+##### T102.7 Factor out shared NEON exp polynomial  Owner: TBD  Est: 1.5h  [x] 2026 03 07
+
+T102.1 (Softmax), T102.3 (SiLU) both need a vectorized exp() approximation.
+Factor the exp polynomial into a reusable assembly macro or a separate function:
+
+```go
+// VexpF32 computes out[i] = exp(x[i]) for n float32 values.
+// Uses range-reduced polynomial: exp(x) = 2^(int(x/ln2)) * poly(frac).
+//go:noescape
+func VexpF32(out, x *float32, n int)
+```
+
+The range-reduction approach:
+1. n = round(x / ln2) via FCVTNS (round to nearest int).
+2. r = x - n * ln2 (reduced range in [-ln2/2, ln2/2]).
+3. poly(r) = 1 + r + r^2/2 + r^3/6 + r^4/24 + r^5/120 (degree 5 for <1e-6 error).
+4. result = ldexp(poly(r), n) via integer add to float32 exponent bits.
+
+This function is used by:
+- SoftmaxF32 (exp(x-max) in pass 2)
+- SiLUF32 (exp(-x) for sigmoid)
+- Exp engine op (standalone)
+
+Acceptance:
+- VexpF32 output matches math.Exp within 1e-6 relative error for [-88, 88].
+- Handles -inf, +inf, NaN correctly.
+- Shared between Softmax and SiLU implementations.
+- Dependencies: none (but should be done before or alongside T102.1, T102.3).
+
+- [x] S102.7.1 VexpF32 correctness test  Owner: TBD  Est: 1h  2026 03 07
+  - Test edge cases: 0, -0, very negative (underflow), very positive (overflow), NaN.
+  - Test accuracy: 10000 random values in [-88, 88], max relative error < 1e-6.
+
+##### T102.8 Wire NEON functions into CPUEngine  Owner: TBD  Est: 2h
+
+Update `compute/cpu_engine.go` and `compute/fused_*.go` to dispatch to the
+new NEON functions when T is float32 on ARM64:
+
+1. `Softmax()`: For float32, last-axis, call `xblas.SoftmaxF32()` per row.
+2. `FusedRMSNorm()`: Call `xblas.RMSNormF32()` per row.
+3. `FusedSiLUGate()`: Call `xblas.SiLUGateF32()`.
+4. `FusedRoPE()`: Call `xblas.RoPEF32()` per position.
+5. `Exp()`: Call `xblas.VexpF32()` for float32.
+6. `binaryOp()` same-shape fast path: Call `xblas.VaddF32` etc.
+7. `MulScalar/AddScalar/DivScalar()`: Call `xblas.VmulScalarF32` etc.
+
+Use runtime type assertion `any(a).(*tensor.TensorNumeric[float32])` to detect
+float32 tensors. Non-float32 types fall through to the generic loop.
+
+Acceptance:
+- All existing tests pass (NEON path produces same results as Go path).
+- bench_tps CPU shows measurable improvement.
+- No regression for non-float32 types.
+- Dependencies: T102.1-T102.7, T101.1.
+
+- [ ] S102.8.1 End-to-end wiring integration test  Owner: TBD  Est: 1h
+  - Run full Gemma 3 inference on ARM64 (DGX Spark). Verify output unchanged.
+
+##### T102.9 Run golangci-lint on compute/, internal/xblas/  Owner: TBD  Est: 30m
+  - Dependencies: T102.1-T102.8.
+
+#### E103: Tensor Arena for Buffer Reuse (O103)
+
+A major source of CPU overhead is Go heap allocation of intermediate tensors.
+Each engine op creates a new tensor (slice header + backing array), which the
+GC must collect. A tensor arena pre-allocates a pool of buffers and reuses them.
+
+##### T103.1 Design and implement TensorArena  Owner: TBD  Est: 4h  [x] 2026 03 07
+
+Create `compute/arena.go`.
+
+```go
+type TensorArena struct {
+    mu      sync.Mutex
+    buffers map[int][]*[]float32 // size -> free list of backing arrays
+    stats   ArenaStats
+}
+
+type ArenaStats struct {
+    Hits   int64
+    Misses int64
+    Bytes  int64
+}
+
+func NewTensorArena() *TensorArena
+func (a *TensorArena) Get(size int) []float32    // reuse or allocate
+func (a *TensorArena) Put(buf []float32)          // return to pool
+func (a *TensorArena) Stats() ArenaStats
+func (a *TensorArena) Reset()                     // release all buffers
+```
+
+Strategy:
+- Bucket sizes by power-of-2 rounding (e.g., request 2048 elements gets a
+  2048-element buffer; request 2049 gets a 4096 buffer).
+- Per-bucket free list (stack). Get pops, Put pushes.
+- Arena.Reset() clears all free lists (called between generations).
+- Thread-safe via sync.Mutex (low contention since parallelFor uses shared pool).
+
+Acceptance:
+- Get returns buffers of correct minimum size.
+- Put + Get cycle reuses the same buffer.
+- No data corruption from buffer reuse (caller zeroes if needed).
+- Dependencies: none.
+
+- [x] S103.1.1 TensorArena unit tests  Owner: TBD  Est: 1.5h  2026 03 07
+  - Test Get/Put cycle, size bucketing, Reset.
+  - Test concurrent Get/Put from multiple goroutines.
+
+##### T103.2 Wire TensorArena into CPUEngine  Owner: TBD  Est: 3h
+
+Update `CPUEngine.getOrCreateDest()` to use the arena when a dst tensor is
+not provided:
+
+```go
+func (e *CPUEngine[T]) getOrCreateDest(shape []int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+    if len(dst) > 0 && dst[0] != nil {
+        return dst[0], nil
+    }
+    size := 1
+    for _, d := range shape {
+        size *= d
+    }
+    // Get buffer from arena
+    buf := e.arena.Get(size)
+    return tensor.NewFromBuffer(shape, buf[:size])
+}
+```
+
+Add `arena *TensorArena` field to CPUEngine. Initialize in `NewCPUEngine()`.
+Arena.Reset() called at the start of each Forward() pass (or per generation).
+
+For the `dst` pattern: when the engine is done with an intermediate tensor,
+the arena reclaims it. This requires a tensor finalizer or explicit release.
+Simplest approach: the ExecutionPlan.Run() loop can call arena.Put() for slot
+buffers that are no longer referenced (their last consumer has run).
+
+Acceptance:
+- Arena hit rate > 80% during decode (most tensors have repeating shapes).
+- No double-free or use-after-free (verified with race detector).
+- Memory usage stable during 100-token generation (no growth).
+- Dependencies: T103.1.
+
+- [ ] S103.2.1 Arena integration benchmarks  Owner: TBD  Est: 1.5h
+  - BenchmarkForwardWithArena vs BenchmarkForwardWithoutArena.
+  - Memory allocation profile comparison.
+
+##### T103.3 Run golangci-lint on compute/  Owner: TBD  Est: 15m
+  - Dependencies: T103.1-T103.2.
+
+#### E104: CPU Benchmark Validation (O104)
+
+##### T104.1 CPU ARM64 benchmark with all optimizations  Owner: TBD  Est: 2h
+
+On DGX Spark:
+1. Run `bench_tps -device cpu -tokens 100` with all Track D changes.
+2. 7 runs, report median and peak tok/s.
+3. Compare against 6.86 tok/s baseline.
+
+Acceptance:
+- Median >= 10 tok/s (46% improvement over 6.86).
+- No NaN/Inf. Output identical to pre-optimization.
+- Dependencies: E101, E102, E103.
+
+- [ ] S104.1.1 CPU benchmark report  Owner: TBD  Est: 30m
+  - Table: operation, before, after, speedup.
+
+##### T104.2 Per-operation profiling  Owner: TBD  Est: 1.5h
+
+Run CPU inference with operation timing enabled (CPUEngine.recordOp metrics).
+Compare per-op times before and after Track D:
+
+Expected improvements:
+- Pow: 8.9% -> ~2% (x*x specialization)
+- binaryOp: 10.4% -> ~4% (same-shape fast path + NEON)
+- Softmax: ~5% -> ~1.5% (NEON)
+- RMSNorm: ~4% -> ~1.5% (NEON)
+- SiLU/FFN: ~4% -> ~1.5% (NEON SiLUGate)
+- RoPE: ~3% -> ~1% (NEON)
+- Scalar ops: ~3% -> ~1% (NEON)
+- Allocations: ~8% -> ~3% (arena)
+
+Acceptance:
+- Per-op timing report generated.
+- Each optimized op shows >= 2x speedup.
+- Dependencies: T104.1.
+
+- [ ] S104.2.1 Per-operation profiling report  Owner: TBD  Est: 30m
+
+##### T104.3 Output correctness verification  Owner: TBD  Est: 1h
+
+Generate 100 tokens with "The capital of France is" on DGX Spark CPU.
+Compare token-by-token with pre-optimization output. Must be identical
+(all optimizations are mathematically equivalent, not approximations,
+except exp polynomial which is within 1e-6).
+
+Acceptance:
+- All 100 tokens match pre-optimization output.
+- No NaN or Inf.
+- Dependencies: T104.1.
+
+##### T104.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m
+  - Dependencies: T104.1-T104.3.
+
+---
+
+## 4. Parallel Work
 
 | Track | Epics | Description | Prerequisite |
 |-------|-------|-------------|-------------|
-| 0: composition | E96 | Fix 12 layers with inline math. All architectures. | none |
-| A: purego | E87, E88, E89, E90 | Replace CGo with dlopen. All architectures. | Track 0 Priority 1 (T96.1-T96.3) |
-| B: megakernel | E91, E92, E93, E94, E95 | Single-kernel decode from instruction tape. All architectures. | Track 0 + Track A complete |
+| 0 remaining | E96 P2-P3 | Fix 7 remaining composition violations | none |
+| A remaining | T87.3, S88/S89 | Remaining purego tests and cleanup | none |
+| C: tracing | E97, E98, E99, E100 | Tracing compiler + GPU KV cache + emitters + integration | none (builds on completed Track B infrastructure) |
+| D: NEON SIMD | E101, E102, E103, E104 | CPU SIMD acceleration + arena + benchmark | none |
+| B: tuning | E94, E95 | GPU performance tuning and benchmark | Track C complete |
 
-Track A can start after Track 0 Priority 1 is done (the Gemma 3 critical fixes).
-Track 0 Priority 2-3 can run in parallel with Track A.
-Track B depends on all of Track 0 and Track A.
-
-### Track 0 Internal Parallelism
+### Track C Internal Parallelism
 
 | Wave | Tasks | Notes |
 |------|-------|-------|
-| 0-1 | T96.1, T96.2, T96.3, T96.4, T96.5 | All independent: different files in different packages |
-| 0-2 | T96.6, T96.7, T96.9, T96.10, T96.11, T96.12 | All independent: different files |
-| 0-3 | T96.8 | MixtureOfExperts depends on T96.7 (MoEGate) |
-| 0-4 | T96.13, T96.14 | Quality gate after all fixes |
+| C1 | T97.1, T97.2, T98.2, T99.1, T99.2, T99.3 | All independent: EngineProxy, Tracer, GPU KV cache, new emitters |
+| C2 | T97.3, T97.5, T97.6, T97.7, T98.1, T98.3, T99.4 | After C1: wire proxy, handle edge cases, KV emitters, verify coverage |
+| C3 | T97.4, T97.8 | After C2: CompileTraced implementation + lint |
+| C4 | T98.4, T99.5, T100.1, T100.2 | After C3: integration wiring |
+| C5 | T100.3, T100.4 | After C4: end-to-end test |
 
-### Track A Internal Parallelism
-
-| Wave | Tasks | Notes |
-|------|-------|-------|
-| A1 | T87.1, T87.2 | Add x/sys dep, create dlopen loader |
-| A2 | T87.3, T88.1 | Replace runtime CGo, create kernel loader |
-| A3 | T88.2, T88.3 | Replace all kernel CGo wrappers (can split across files) |
-| A4 | T88.4, T89.1, T89.2, T89.3 | Remove build tags everywhere |
-| A5 | E90 | Benchmark and validate |
-
-### Track B Internal Parallelism
+### Track D Internal Parallelism
 
 | Wave | Tasks | Notes |
 |------|-------|-------|
-| B1 | T91.1, T92.1, T92.2, T92.3, T92.4, T92.5, T92.6, T92.7, T92.8 | Export metadata + all device functions (independent) |
-| B2 | T91.2, T91.3, T91.4, T93.1, T93.2 | Op table + emitter + full model emit + JIT/cache (after B1) |
-| B3 | T93.3, T93.4 | Wire into decode loop |
-| B4 | E94 | Performance tuning |
-| B5 | E95 | Final benchmark |
+| D1 | T101.1, T101.2, T101.3, T102.7, T103.1 | All independent: fast paths, exp polynomial, arena |
+| D2 | T102.1, T102.2, T102.3, T102.4, T102.5, T102.6 | After D1 (T102.7 needed for exp): all 6 NEON kernels in parallel |
+| D3 | T101.4, T102.8, T102.9, T103.2, T103.3 | After D2: wire everything into CPUEngine + arena + lint |
+| D4 | T104.1, T104.2, T104.3, T104.4 | After D3: benchmark and validate |
 
-### Execution Order
-
-Track A waves (A1-A5) execute first. After A5 completes, Track B waves
-(B1-B5) execute. Within each wave, tasks are parallelizable.
-
-Key sync points:
-- A5 -> B1: Track A must be validated before starting Track B.
-- B1 -> B2: Register ops and IR definition needed before builder/emitter.
-- B3 -> B4: Integration needed before tuning.
-- B4 -> B5: Tuning needed before final benchmark.
+Track C and Track D are fully independent and can run in parallel.
+Track 0 remaining and Track A remaining can run in parallel with both.
+Track B (E94, E95) starts only after Track C is complete.
 
 ---
 
@@ -863,17 +1329,15 @@ Key sync points:
 
 | Milestone | ID | Dependencies | Exit Criteria |
 |-----------|----|-------------|---------------|
-| M49: Composition clean | E96 | none | All 12 violated layers compose Engine primitives. Zero tensor.Data() in Forward() compute paths. grep verification passes. |
-| M50: dlopen runtime | E87 | M49 (P1) | libcudart.so loaded via dlopen. Malloc/Memcpy work without CGo. |
-| M51: All CGo eliminated | E88, E89 | M50 | Zero `import "C"` in codebase. `go build ./...` compiles anywhere. |
-| M52: purego validated | E90 | M51 | tok/s >= Phase 33 baseline on DGX Spark. No regression. |
-| M53: Code generator | E91 | M52 | Walks instruction tape, emits compilable .cu for any model. |
-| M54: Megakernel works | E92, E93 | M53 | Decode produces correct output via single kernel. |
-| M55: 50 tok/s | E94, E95 | M54 | bench_tps reports >= 50 tok/s median on DGX Spark GB10. |
+| M56: Tracing compiler works | E97 | none | CompileTraced produces primitive-op instruction tape for Gemma 3. All ops covered by emitters. |
+| M57: GPU KV cache works | E98 | none | KV data on GPU, append/read correct, megakernel_ops.cu KV functions compile. |
+| M58: Megakernel fires | E100 | M56, M57, E99 | bench_tps shows "megakernel: compiled and loaded". Output matches plan.Run(). |
+| M59: 50 tok/s GPU | E94, E95 | M58 | bench_tps >= 50 tok/s median on DGX Spark GB10. |
+| M60: 10 tok/s CPU ARM64 | E104 | E101, E102, E103 | bench_tps -device cpu >= 10 tok/s median on DGX Spark GB10. |
 
-Critical path: T96.1 -> T96.2 -> T96.14 -> T87.1 -> T87.2 -> T87.3 -> T88.1
-  -> T88.2 -> T89.1 -> T90.1 -> T91.1 -> T91.2 -> T91.3 -> T91.4 -> T93.3
-  -> T94.1 -> T95.1
+Critical path (GPU): T97.1 -> T97.3 -> T97.4 -> T100.1 -> T100.2 -> T100.3 -> T94.1 -> T95.1
+
+Critical path (CPU): T102.7 -> T102.1/T102.3 -> T102.8 -> T104.1
 
 ---
 
@@ -881,17 +1345,18 @@ Critical path: T96.1 -> T96.2 -> T96.14 -> T87.1 -> T87.2 -> T87.3 -> T88.1
 
 | ID | Risk | Impact | Likelihood | Mitigation |
 |----|------|--------|------------|------------|
-| R99 | Composition refactoring introduces numerical differences or performance regression | Incorrect output or slower CPU inference | Medium | Parity tests with 1e-5 tolerance for each refactored layer. Benchmark before/after on CPU. Accept small overhead from extra engine dispatch. |
-| R89 | dlopen ABI mismatch: Go calling convention does not match CUDA C ABI for some functions (varargs, struct returns) | Segfault or incorrect results | Medium | Test each function individually with known inputs. Use syscall.Syscall6 for functions with many args. Verify with address sanitizer. |
-| R90 | dlopen not available on all platforms (Windows, some embedded Linux) | Reduced portability | Low | Use golang.org/x/sys/unix which handles platform differences. Windows can use LoadLibrary via x/sys/windows. |
-| R91 | Performance regression from dlopen vs CGo (function pointer indirection) | Slower than CGo baseline | Low | dlopen function calls are typically faster than CGo (no goroutine stack switch). Benchmark to confirm. |
-| R92 | Megakernel register pressure: hidden_dim=2048 activation vectors do not fit in registers | Must use shared memory, slower | High | Tile the hidden dimension. Each thread handles a slice. Use shared memory for cross-thread reductions. Profile register usage with nvcc --ptxas-options=-v. |
-| R93 | Cooperative grid sync not supported or too slow on GB10 | Cannot synchronize between layers | Medium | GB10 supports cooperative launch (sm_121, CUDA 13.0). If grid sync is slow, consider multi-kernel approach with minimal global memory (just between layers). |
-| R94 | nvrtc JIT compilation too slow (>10s) for model load | Bad user experience on first load | Medium | Cache compiled PTX/cubin alongside model file. Only recompile when model hash changes. AOT compilation via nvcc as fallback. |
-| R95 | KV cache access pattern limits bandwidth utilization | Cannot reach theoretical max | High | KV cache reads are unavoidable for attention. For long contexts, KV cache may dominate. For short contexts (< 512), weight reads dominate and megakernel helps most. Document the crossover point. |
-| R96 | Code generator produces incorrect CUDA for edge cases (e.g., unusual tensor shapes, broadcasting) | Silent correctness bugs | Medium | Extensive parity testing: compare megakernel output with ExecutionPlan.Run() for every token. Add assertion checks inside generated kernel (debug mode). The instruction-tape approach reduces risk vs pattern-matching because it maps 1:1 from known primitive ops. |
-| R97 | DGX Spark GB10 thermal throttling causes high variance | Unreliable benchmark results | Medium | Run benchmarks after 5-minute cooldown. Use median of 7+ runs. Monitor GPU temperature via nvidia-smi. |
-| R98 | 50 tok/s target not achieved | Unknown bottleneck | Medium | If megakernel reaches 30+ tok/s, investigate with nsys. Common limiters: L2 cache thrashing, shared memory bank conflicts, warp divergence. Fall back to 20 tok/s target with fused kernels (revive archived E83-E85). |
+| R100 | Tracing captures wrong execution path: Forward() has conditional logic (e.g., KV cache presence check in GQA). The trace is only valid for the traced path (decode mode, seqLen=1, cache active). | Megakernel produces wrong output for different paths | Medium | Only use traced plan for decode (seqLen=1). Prefill continues to use non-traced Forward(). The generate loop already separates prefill from decode. |
+| R101 | Tensor identity via pointer is fragile: if the engine reuses a tensor buffer (pool allocation), the same pointer may represent different logical tensors. | Wrong slot wiring in traced tape | Medium | During tracing, disable tensor pooling (set pool to nil on EngineProxy). Each engine call allocates fresh tensors. This is only during one Compile() call, not runtime. |
+| R102 | GPU KV cache memory budget: 26 layers x 2 (K/V) x 8192 seq x 1024 dim x 4 bytes = 1.6GB for full context. DGX Spark unified memory is large but this is significant. | Out of memory for long contexts | Low | Default to 512-token budget (~104MB). Allow user-configurable max_seq_len for megakernel path. Fall back to plan.Run() for longer contexts. |
+| R103 | EngineProxy adds interface dispatch overhead to normal (non-tracing) inference. | Small performance regression on non-megakernel path | Low | Interface dispatch is ~1-2ns. With 650 engine calls per token at 7.78 tok/s, total overhead is ~1us. Negligible vs 128ms per token. |
+| R104 | UnaryOp in sigmoid (inside SwiGLU) blocks clean trace for Gemma 3. | Must refactor sigmoid before megakernel works | Medium | T97.6 addresses this. Refactor Sigmoid.Forward() to use engine.Exp + engine.AddScalar + engine.Div. Small, focused change. |
+| R105 | NEON exp polynomial approximation may have insufficient precision for some models. | Softmax/SiLU output differs enough to change generated tokens | Low | Degree-5 polynomial with range reduction achieves <1e-6 relative error. Verify with full 100-token generation comparison test (T104.3). |
+| R106 | Plan9 assembler lacks many NEON mnemonics; must use raw WORD encoding. | Assembly is harder to write and debug | High | Existing q4dot_arm64.s demonstrates the pattern. Comment each WORD with the mnemonic it represents. Use the same encoding patterns throughout. |
+| R107 | Tensor arena may cause use-after-free if buffer returned to pool while still referenced. | Data corruption, intermittent test failures | Medium | Run all tests with -race flag. Arena.Put() only called by ExecutionPlan.Run() for slots that have been consumed by all downstream ops. Never Put() a buffer that is still a function argument. |
+| R108 | float32 type assertion in CPUEngine NEON dispatch may not optimize with Go generics. | Dispatch overhead cancels NEON benefit for small tensors | Low | Only dispatch to NEON for tensors with >= 32 elements. Below that, the scalar loop is fast enough. Profile the type assertion overhead. |
+| R92 | Register pressure: hidden_dim=2048 does not fit in registers | Must use shared/global memory, slower | High | Tile the hidden dimension. Profile with nvcc --ptxas-options=-v. |
+| R95 | KV cache reads limit bandwidth utilization for long contexts | Cannot reach theoretical max | High | Focus on short contexts (< 512). Document crossover point. |
+| R98 | 50 tok/s target not achieved | Unknown bottleneck | Medium | If 30+ tok/s, profile with nsys. If < 30, fall back to fused kernels (archived E83-E85). |
 
 ---
 
@@ -906,7 +1371,7 @@ A task is done when:
 4. `golangci-lint run ./package/` reports 0 issues.
 5. `go vet ./package/` reports no issues.
 6. Tests pass with `-race` flag.
-7. `go build ./...` compiles on any machine (no build tags required after E89).
+7. `go build ./...` compiles on any machine.
 8. On DGX Spark: GPU path activates and produces correct results.
 9. Changes are committed in a small commit touching one directory only.
 
@@ -914,107 +1379,108 @@ A task is done when:
 
 - Never commit files from different directories in the same commit.
 - Make small, logical commits: one task or subtask per commit.
-- Use Conventional Commits: `feat(cuda): replace CGo with dlopen for runtime`.
+- Use Conventional Commits: `feat(graph): add CompileTraced tracing compiler`.
 - Always run linters and formatters before committing.
 
 ### DGX Spark Protocol
 
 - SSH: `ssh ndungu@192.168.86.250`
 - Go: `/usr/local/go/bin/go`
-- CUDA: `/usr/local/cuda/bin/nvcc`, `/usr/local/cuda/lib64/libcudart.so`
-- nvrtc: `/usr/local/cuda/lib64/libnvrtc.so`
-- GPU: NVIDIA GB10, sm_121, `make CUDA_ARCH=sm_121`
+- CUDA: `/usr/local/cuda/bin/nvcc`, sm_121
 - Model: `~/models/gemma3-q4/model.zmf`
 - Repo: `~/zerfoo/`
-
-### Benchmark Protocol
-
-- 7 runs minimum, report median and peak.
-- All GPU benchmarks on DGX Spark GB10.
-- Use `bench_tps -device cuda -tokens 100` for tok/s measurement.
-- Use `bench_tps -device cpu -tokens 100` for CPU comparison.
-- Capture nsys profile for kernel launch and bandwidth analysis.
-- 5-minute GPU cooldown between benchmark sessions.
 
 ### Quality Gate
 
 - `go test -race ./package/`
 - `golangci-lint run ./package/`
 - `go vet ./package/`
-- `go build ./...` (must compile without any build tags)
+- `go build ./...`
 
 ---
 
 ## 8. Progress Log
 
+### Change Summary -- 2026-03-07 (v7)
+
+Wave D1 complete (5 tasks in parallel via worktrees). All merged into
+feat/same-shape-fast-path. Tests pass, lint clean.
+
+**Completed tasks:**
+- T101.1: Same-shape fast path in binaryOp (7-8x speedup for same-shape ops). Commit f733d15.
+- T101.2: Pow x^2 specialization using x*x (13-15x speedup). Commit c28a529.
+- T101.3: Scalar op baseline benchmarks (MulScalar, AddScalar, DivScalar). Commit 3d8c3d7.
+- T102.7: NEON VexpF32 vectorized exp polynomial (max error 8.98e-08). Commit 5931298.
+- T103.1: TensorArena with power-of-2 bucketed pooling (6 tests + bench). Commit b4b5eb1.
+
+**Wave D2 unblocked:** T102.1 (Softmax), T102.2 (RMSNorm), T102.3 (SiLU),
+T102.4 (RoPE), T102.5 (elementwise), T102.6 (scalar ops) -- all 6 NEON kernels.
+
+### Change Summary -- 2026-03-07 (v6)
+
+Added Track D (NEON SIMD CPU Acceleration) with 4 new epics to close the CPU
+performance gap with llama.cpp.
+
+**New epics:**
+- E101: Same-Shape Fast Paths and Pow Specialization (T101.1-T101.4)
+- E102: NEON Assembly for Hot-Path Operations (T102.1-T102.9)
+- E103: Tensor Arena for Buffer Reuse (T103.1-T103.3)
+- E104: CPU Benchmark Validation (T104.1-T104.4)
+
+**New objectives:** O101 (NEON SIMD), O102 (fast paths), O103 (arena), O104 (10 tok/s CPU).
+**New milestone:** M60 (10 tok/s CPU ARM64).
+**New risks:** R105 (exp precision), R106 (plan9 asm), R107 (arena use-after-free), R108 (dispatch overhead).
+
+**ADRs created:**
+- docs/adr/029-neon-simd-cpu-acceleration.md: NEON SIMD strategy for CPU parity
+  with llama.cpp. Evaluates 3 approaches (CGo+intrinsics, plan9 assembly,
+  compiler autovectorization), selects plan9 assembly.
+
+**Key design decisions:**
+- All NEON assembly follows existing internal/xblas/ pattern with _arm64.s +
+  _arm64.go + _generic.go triple.
+- exp() approximation shared between Softmax and SiLU via VexpF32 (T102.7).
+- Same-shape fast path (T101.1) is pure Go, NEON dispatch (T102.5) layers on top.
+- Tensor arena uses power-of-2 bucketing with per-bucket free lists.
+- Track D is fully independent of Track C and can run in parallel.
+
+### Change Summary -- 2026-03-07 (v5)
+
+Added Track C (Tracing Compiler) to resolve megakernel blocker.
+
+**Root cause identified**: graph.Compile() records composite node OpTypes
+(GroupedQueryAttention, FFN, EmbeddingLookup, LMHead) instead of primitive
+Engine ops. The megakernel emitter only knows primitives, so CheckSupport()
+fails silently. The megakernel never fires on the real model.
+
+**Solution**: Tracing compiler (approach C). An EngineProxy wraps the Engine
+and records every primitive Engine method call during compilation. Forward()
+calls proceed normally through all composite layers, but the proxy captures
+every primitive call (MatMul, Softmax, etc.) as a separate instruction. This
+is the JAX/PyTorch FX pattern -- layers remain high-level abstractions, the
+compiler flattens automatically.
+
+New epics:
+- E97: EngineProxy and Tracer (T97.1-T97.8)
+- E98: GPU KV Cache for Megakernel Attention (T98.1-T98.4)
+- E99: New Primitive Op Emitters (T99.1-T99.5)
+- E100: Tracing Compiler Integration (T100.1-T100.4)
+
+New milestones: M56 (tracing works), M57 (GPU KV cache), M58 (megakernel fires),
+M59 (50 tok/s).
+
+ADRs created:
+- docs/adr/028-tracing-compiler.md: Tracing compiler for automatic primitive
+  op decomposition. Evaluates 3 approaches, selects approach C.
+
+Trimmed: Completed epics E90, E91, E92, and completed tasks from E96 P1,
+E87, E88, E89, E93 moved to docs/design.md section 15.16.
+
 ### Change Summary -- 2026-03-07 (v4)
 
-Added Track 0 (E96: Composition Fixes) as prerequisite before Tracks A and B.
-
-5-agent parallel audit scanned all 18 layer sub-packages and found 12 composition
-violations -- layers that do inline math instead of composing Engine primitives:
-
-Priority 1 (Gemma 3 path): MatMulNBits (T96.1), QKNorm (T96.2), Gelu (T96.3)
-Priority 2 (other models): BatchNorm (T96.4), LocalAttention mask (T96.5),
-  Conv2d (T96.6)
-Priority 3 (specialized): MoEGate (T96.7), MixtureOfExperts (T96.8),
-  Polynomial (T96.9), SpectralFingerprint (T96.10), S4 (T96.11),
-  SpectralFeature (T96.12)
-
-Layers confirmed COMPOSED (no issues): SwiGLU, FastGelu, Softmax, TokenEmbedding,
-  RotaryPositionalEmbedding, TransformerBlock, FFN, Dense, FiLM, Linear, Add,
-  Sub, Mul, Div, MatMul, Reshape, Concat, Split, GroupQueryAttention, SDPA,
-  AttentionHead, GlobalAttention, MultiHeadLatentAttention, LayerNorm, RMSNorm,
-  SimplifiedLayerNorm, SkipSimplifiedLayerNorm, SimpleRNN, HModule, LModule,
-  Transpose, ReduceSum, MatrixMultiplier, GradientComputer.
-
-ADRs created:
-- docs/adr/027-composition-prerequisite.md: Enforce layer composition before
-  megakernel code generation.
-
-New milestone M49 (Composition clean) added before M50.
-New risk R99 (composition refactoring regression) added.
-
-### Change Summary -- 2026-03-06 (v3)
-
-Revised Track B megakernel approach to be architecture-agnostic, leveraging
-Zerfoo's compositional design. Key change: instead of architecture-specific
-templates (transformer, RNN, etc.), the code generator walks the ExecutionPlan
-instruction tape directly and maps each primitive OpName to a CUDA device
-function. Any model that compiles into an ExecutionPlan gets a megakernel.
-
-Changes:
-- E91: Replaced architecture-specific IR (KernelIR, LayerIR) with instruction-
-  tape export (T91.1) + op-to-CUDA table (T91.2) + generic emitter (T91.3) +
-  full-model emit (T91.4).
-- E92: Renamed from "Megakernel CUDA Implementation" to "Register-Resident
-  Device Functions for Primitive Ops". Restructured as per-primitive-op device
-  functions instead of per-architecture-component functions. Added elementwise
-  (T92.1), unary (T92.2), F32 GEMV (T92.6), Gather (T92.7).
-- E93: Updated to reference instruction tape instead of IR builder.
-- ADR 026 revised to document composition-based approach.
-- Removed "Transformer-Specific" from Track B heading.
-- Updated non-goals: removed "megakernel templates for non-transformer
-  architectures" (no longer needed).
-
-### Change Summary -- 2026-03-06 (v2)
-
-Rewrote Phase 34 plan with two-track approach:
-- Track A: purego/dlopen (E87-E90) -- replaces CGo, benefits all architectures.
-- Track B: megakernel (E91-E95) -- single-kernel decode.
-
-Archived original Phase 34 epics E80-E86 (CUDA graph capture + individual fused
-kernels). These are subsumed by the megakernel approach but documented as fallback.
-
-ADRs created:
-- docs/adr/025-purego-cuda-bindings.md: Replace CGo with dlopen via x/sys/unix.
-- docs/adr/026-megakernel-decode.md: Single-kernel decode via code generation.
-
-### Change Summary -- 2026-03-06 (v1)
-
-Created Phase 34 plan. Trimmed Phase 33 completed epics (E75-E79) to
-docs/design.md section 15.15. Created ADR 024 for CUDA graph and fused kernel
-strategy.
+Added Track 0 (E96: Composition Fixes). 5-agent audit found 12 violations.
+Priority 1 (T96.1-T96.3) and Priority 2 partial (T96.4-T96.5) completed.
+ADR 027 created. Milestone M49 added. Risk R99 added.
 
 ---
 
@@ -1022,113 +1488,98 @@ strategy.
 
 ### For a New Contributor
 
-- **Architecture:** Read docs/design.md for interface contracts, package layout,
-  GPU architecture, and troubleshooting. Design decisions in docs/adr/ (001-026).
-- **Phases 1-33:** All documented in docs/design.md sections 15.1-15.15.
-- **Phase 34:** This plan is the source of truth. Two tracks: purego then megakernel.
-- **Quality:** See docs/QUALITY.md for test coverage report.
-- **How to build:**
-  - Currently: `go build -tags cuda ./...` (CGo, needs CUDA headers)
-  - After Track A: `go build ./...` (no tags, runtime GPU detection)
-  - On DGX Spark: `make CUDA_ARCH=sm_121` in internal/cuda/kernels/,
-    then `go build ./...`
+- **Architecture:** Read docs/design.md for full context. ADRs in docs/adr/.
+- **Phase 34 status:** Tracks 0/A/B infrastructure complete. Track C (tracing
+  compiler) and Track D (NEON SIMD) are the active work. See docs/design.md
+  section 15.16 for what was already delivered.
+- **Track C core problem:** The megakernel is fully built (emit, compile, load,
+  wire) but never fires because the instruction tape has composite ops. The
+  tracing compiler (E97) fixes this by recording primitive Engine calls.
+- **Track D core problem:** CPU inference is 6.86 tok/s, llama.cpp is ~100.
+  The gap is NEON SIMD for all non-matmul ops, broadcasting overhead, and GC
+  allocation pressure. E101 (fast paths), E102 (NEON assembly), E103 (arena).
+- **Key starting points:**
+  - Track C: `compute/engine.go` (Engine interface) -> `compute/engine_proxy.go`
+    (T97.1) -> `compute/tracer.go` (T97.2) -> `graph/compile.go` CompileTraced() (T97.4)
+  - Track D: `compute/cpu_engine.go:546` (binaryOp) -> T101.1 same-shape fast path.
+    `internal/xblas/q4dot_arm64.s` (existing NEON pattern) -> T102.x new kernels.
 - **Pre-commit hook:** Runs golangci-lint and tests. Rejects multi-directory commits.
 
-### Key Starting Points
+### Key File Map
 
-1. **Track A (purego):** Start with `internal/cuda/runtime.go`. This file has
-   8 CGo functions (Malloc, Free, Memcpy, etc.). Replace with dlopen/dlsym
-   from `golang.org/x/sys/unix`. Then do the same for the 7 kernel wrapper
-   files in `internal/cuda/kernels/`.
-
-2. **Track B (megakernel):** Start with `graph/compile.go`. Add exported
-   methods (Instructions(), SlotShapes(), FrozenSlots()) to expose the
-   instruction tape. Then build `internal/codegen/optable.go` (maps each
-   OpName to a CUDA device function emitter) and `internal/codegen/emit.go`
-   (walks the instruction tape and emits a complete .cu megakernel).
-
-### Architecture-Agnostic Design
-
-Both tracks are architecture-agnostic:
-
-- **purego (Track A):** Replaces the CGo calling convention for ALL CUDA
-  operations. Benefits transformers, RNNs, CNNs, S4, HRM, or any future
-  architecture that uses GPU.
-
-- **megakernel (Track B):** Walks the ExecutionPlan instruction tape, which
-  is a flat list of primitive ops (Add, MatMul, RMSNorm, Softmax, etc.).
-  Because Zerfoo is compositional (all complex layers decompose into these
-  primitives), ANY model that compiles into an ExecutionPlan gets a megakernel
-  automatically. No architecture-specific templates are needed.
-
-  The code generator maps OpName -> CUDA device function. To support a new
-  primitive op, add one entry to the op table in `internal/codegen/optable.go`.
-  If any op in a model's instruction tape lacks an emitter, the fallback path
-  (ExecutionPlan.Run()) is used for the entire model, with a warning log
-  listing which ops need emitters.
+| File | Purpose | Track C Change | Track D Change |
+|------|---------|---------------|---------------|
+| `compute/engine.go` | Engine[T] interface (~25 methods) | Reference for EngineProxy | Reference for NEON dispatch |
+| `compute/engine_proxy.go` | (new) EngineProxy[T] wrapping Engine | T97.1 | -- |
+| `compute/tracer.go` | (new) Tracer[T] records TracedOps | T97.2 | -- |
+| `compute/cpu_engine.go` | CPUEngine implementation | -- | T101.1 fast path, T102.8 NEON wiring |
+| `compute/fused_rmsnorm.go` | FusedRMSNorm | -- | T102.2 NEON dispatch |
+| `compute/fused_rope.go` | FusedRoPE | -- | T102.4 NEON dispatch |
+| `compute/fused_silugate.go` | FusedSiLUGate | -- | T102.3 NEON dispatch |
+| `compute/arena.go` | (new) TensorArena | -- | T103.1 |
+| `graph/compile.go` | Compile() + ExecutionPlan | Add CompileTraced() T97.4 | -- |
+| `graph/graph.go` | Graph[T] struct | Add EngineProxy accessors T97.3 | -- |
+| `generate/tracing_cache.go` | (new) TracingCacheProvider | T98.1 | -- |
+| `internal/codegen/kv_cache.go` | (new) GPUKVCache | T98.2 | -- |
+| `internal/codegen/optable.go` | Op emitter table (26 ops) | Add Slice, Repeat, Reduce T99 | -- |
+| `internal/codegen/emit.go` | EmitMegakernel() | Add KV cache kernel args T98.3 | -- |
+| `internal/xblas/softmax_arm64.s` | (new) NEON Softmax | -- | T102.1 |
+| `internal/xblas/rmsnorm_arm64.s` | (new) NEON RMSNorm | -- | T102.2 |
+| `internal/xblas/silu_arm64.s` | (new) NEON SiLU/SiLUGate | -- | T102.3 |
+| `internal/xblas/rope_arm64.s` | (new) NEON RoPE | -- | T102.4 |
+| `internal/xblas/elementwise_arm64.s` | (new) NEON Add/Mul/Sub/Div | -- | T102.5 |
+| `internal/xblas/scalar_arm64.s` | (new) NEON MulScalar/etc. | -- | T102.6 |
+| `internal/xblas/exp_arm64.s` | (new) NEON VexpF32 | -- | T102.7 |
+| `generate/generator.go` | Generate() decode loop | Use CompileTraced T100.1 | -- |
+| `generate/stream.go` | GenerateStream() decode loop | Use CompileTraced T100.1 | -- |
+| `generate/megakernel.go` | tryCompileMegakernel() | Wire GPU KV cache T100.2 | -- |
+| `inference/arch_common.go` | buildTransformerGraph() | Wrap engine with EngineProxy T97.3 | -- |
 
 ### Performance Baselines
 
-| Model | Quant | Device | tok/s | Source |
-|-------|-------|--------|-------|--------|
-| Gemma 3 2B | Q4_0 | CPU ARM64 | 6.86 | Phase 30 |
-| Gemma 3 2B | Q4_0 | GPU (cuda) | 10.32 peak / 7.78 median | Phase 33 |
-| Gemma 3 1B | Q4 | Ollama GB10 | 205 | Ollama benchmark |
-| Gemma 3 4B | Q4 | Ollama GB10 | 77.7 | Ollama benchmark |
-| Gemma 3 2B | Q4 | Ollama GB10 | ~100 (est.) | Interpolated |
-| Theoretical max | Q4_0 1.5GB | GB10 273GB/s | ~182 | Bandwidth / model size |
-
-### External References
-
-| Source | Key Insight |
-|--------|------------|
-| golang.org/x/sys/unix | Dlopen, Dlsym, Dlclose for loading shared libraries |
-| Stanford "No Bubbles" | Single-kernel transformer execution, cooperative launch |
-| NVIDIA nvrtc docs | Runtime CUDA compilation API |
-| NVIDIA cooperative groups | Grid-level synchronization for megakernels |
-| llama.cpp CUDA backend | Fused dequant+GEMV, SwiGLU, memory-bandwidth optimization |
-| DGX Spark specs | 273 GB/s LPDDR5x, ~182 tok/s theoretical for 1.5GB model |
+| Config | tok/s | Source |
+|--------|-------|--------|
+| CPU ARM64 | 6.86 | Phase 30 |
+| GPU (cuda) | 10.32 peak / 7.78 median | Phase 33 |
+| GPU (purego) | 6.59 CPU | Phase 34 Track A |
+| Ollama GB10 | ~100 (est.) | Interpolated |
+| Theoretical | ~182 | 273 GB/s / 1.5GB |
 
 ---
 
 ## 10. Appendix
 
-### Existing File Reference
+### NEON Exp Polynomial Reference
 
-| File | Purpose | Track A Change | Track B Change |
-|------|---------|---------------|---------------|
-| `internal/cuda/runtime.go` | CUDA runtime CGo bindings | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/elementwise.go` | 20+ kernel CGo wrappers | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/transpose.go` | Transpose kernel CGo | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/rmsnorm.go` | RMSNorm kernel CGo | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/gather.go` | Gather kernel CGo | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/gemm_q4.go` | Q4 GEMM kernel CGo | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/gemm_quantized.go` | Quantized GEMM kernel CGo | Replace CGo with dlopen | none |
-| `internal/cuda/kernels/flash_attention.go` | Flash attention kernel CGo | Replace CGo with dlopen | none |
-| `internal/cuda/mempool.go` | GPU memory pool | Remove build tag | none |
-| `internal/gpuapi/cuda_runtime.go` | CUDA gpuapi Runtime impl | Remove build tag | none |
-| `internal/gpuapi/cuda_kernels.go` | CUDA gpuapi KernelRunner impl | Remove build tag | none |
-| `compute/gpu_engine.go` | GPUEngine | Remove build tag | none |
-| `compute/gpu_kernels.go` | GPU kernel dispatch | Remove build tag | none |
-| `graph/compile.go` | ExecutionPlan | none | IR extraction source |
-| `generate/stream.go` | Token generation loop | none | Megakernel integration |
-| `internal/codegen/` | (new) Code generator | n/a | New package |
+The vectorized exp() (T102.7) uses range reduction with degree-5 polynomial:
 
-### Estimated Effort Summary
+```
+Input: x (float32)
+1. n = round(x * (1/ln2))        // FMUL + FCVTNS
+2. r = x - n * ln2               // FMSUB (fused)
+3. p = c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*c5))))  // Horner's method
+   c0=1.0, c1=1.0, c2=0.5, c3=1/6, c4=1/24, c5=1/120
+4. result = ldexp(p, n)           // add n to float32 exponent bits:
+                                  //   FCVTZS Vn.4S, Vn.4S (float->int)
+                                  //   SHL Vn.4S, Vn.4S, #23 (shift to exponent)
+                                  //   ADD Vp.4S, Vp.4S, Vn.4S (add exponent)
+```
 
-| Epic | Track | Area | Tasks | Estimated Hours |
-|------|-------|------|-------|----------------|
-| E96: Composition Fixes | 0 | layers/*, compute/ | 14 tasks + 9 subtests | ~28h |
-| E87: CUDA Runtime dlopen | A | internal/cuda/ | 4 tasks + 2 subtests | 8.25h |
-| E88: Kernel dlopen Wrappers | A | internal/cuda/kernels/ | 5 tasks + 2 subtests | 11.25h |
-| E89: Build Tag Removal | A | gpuapi/, compute/ | 4 tasks + 1 subtest | 6.75h |
-| E90: Track A Benchmark | A | DGX Spark | 3 tasks + 1 subtest | 3.75h |
-| **Track A Total** | **A** | **purego** | **16 tasks + 6 subtests** | **~30h** |
-| E91: Instruction-Tape Code Generator | B | graph/, internal/codegen/ | 5 tasks + 4 subtests | 15.75h |
-| E92: Register Device Functions | B | internal/cuda/kernels/ | 9 tasks + 4 subtests | 19.25h |
-| E93: Integration + Compilation | B | generate/, internal/ | 5 tasks + 3 subtests | 13.75h |
-| E94: Performance Tuning | B | DGX Spark | 4 tasks | 7.25h |
-| E95: End-to-End Benchmark | B | DGX Spark | 4 tasks + 3 subtests | 5.25h |
-| **Track B Total** | **B** | **megakernel** | **24 tasks + 13 subtests** | **~62h** |
-| **Track 0 Total** | **0** | **composition** | **14 tasks + 9 subtests** | **~28h** |
-| **Grand Total** | **0+A+B** | **all tracks** | **54 tasks + 28 subtests** | **~120h** |
+Max relative error: < 2e-7 for x in [-87.3, 88.7] (float32 range).
+
+### ARM64 NEON Instruction Encoding Cheat Sheet
+
+Common instructions requiring WORD encoding in Go plan9 assembly:
+
+| Instruction | Encoding | Description |
+|-------------|----------|-------------|
+| FMAXP Vd.4S, Vn.4S, Vm.4S | `6E20F400+...` | Pairwise max |
+| FADDP Vd.4S, Vn.4S, Vm.4S | `6E20D400+...` | Pairwise add |
+| FRSQRTE Vd.4S, Vn.4S | `6EA1D800+...` | Reciprocal sqrt estimate |
+| FRSQRTS Vd.4S, Vn.4S, Vm.4S | `0EA0FC00+...` | RSqrt Newton step |
+| FCVTNS Vd.4S, Vn.4S | `4E21A800+...` | Float to int nearest |
+| FRINTX Vd.4S, Vn.4S | `6E219800+...` | Round to integral |
+| FNEG Vd.4S, Vn.4S | `6EA0F800+...` | Negate |
+
+Note: All register operand fields must be encoded correctly in the immediate.
+Use `aarch64-linux-gnu-objdump -d` on a test .o to verify encodings.
