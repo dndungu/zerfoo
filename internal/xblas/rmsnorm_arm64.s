@@ -120,8 +120,9 @@ sumsq_reduce:
 	WORD	$0x5EB9FC9A      // FRSQRTS S26, S4, S25
 	FMULS	F26, F24, F24    // F24 = y2 = scale
 
-	// Store return value
-	FMOVS	F24, ret+36(FP)
+	// Store return value (use F0 intermediary for stack store)
+	FMOVS	F24, F0
+	FMOVS	F0, ret+36(FP)
 
 	// ---- Pass 2: Normalize ----
 	// Broadcast scale to V6.4S
