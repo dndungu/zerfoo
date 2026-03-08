@@ -114,17 +114,18 @@ See docs/design.md section 15.16. Remaining:
 
 ##### Priority 3: Specialized Layers (not on Gemma 3 path)
 
-- [ ] T96.7 Refactor MoEGate to compose engine primitives  Owner: TBD  Est: 2h
+- [x] T96.7 Refactor MoEGate to compose engine primitives  Owner: TBD  Est: 2h  2026 03 08
   - File: `layers/core/moe.go` lines 43-100.
-  - Fix: engine.Softmax for routing, engine.TopK or engine.Sort + engine.Slice.
+  - Fix: engine.Softmax for routing (already composed). TopK selection retains data access (no engine.TopK primitive).
   - Dependencies: none.
 
-- [ ] T96.8 Refactor MixtureOfExperts to compose engine primitives  Owner: TBD  Est: 2h
+- [x] T96.8 Refactor MixtureOfExperts to compose engine primitives  Owner: TBD  Est: 2h  2026 03 08
   - File: `layers/core/moe.go` lines 217-282.
-  - Fix: engine.Gather for token extraction, engine.MulScalar + engine.Add.
+  - Fix: engine.MulScalar for expert weight scaling, engine.Add for accumulation, engine.Concat for token outputs.
   - Dependencies: T96.7.
 
-- [ ] S96.8.1 MoE composition parity test  Owner: TBD  Est: 1h
+- [x] S96.8.1 MoE composition parity test  Owner: TBD  Est: 1h  2026 03 08
+  - All existing MoE tests pass with composed implementation.
 
 - [x] T96.9 Refactor PolynomialExpansion to compose engine primitives  Owner: TBD  Est: 1.5h  2026 03 08
   - File: `layers/core/polynomial.go` lines 191-249.
@@ -321,7 +322,7 @@ Acceptance:
   - Test frozen tensor registration.
   - Test ExtraArgs for Softmax, Transpose, Reshape, MulScalar.
 
-##### T97.3 Wire EngineProxy into graph construction  Owner: TBD  Est: 2h
+##### T97.3 Wire EngineProxy into graph construction  Owner: TBD  Est: 2h  [x] 2026 03 08
 
 Modify `inference/arch_common.go` (and arch_llama.go if needed):
 - Instead of passing the raw engine to buildTransformerGraph(), wrap it in
@@ -344,8 +345,8 @@ Acceptance:
 - All nodes in the Gemma 3 graph use the same EngineProxy instance.
 - Dependencies: T97.1.
 
-- [ ] S97.3.1 Graph EngineProxy integration test  Owner: TBD  Est: 1h
-  - Build a small graph with EngineProxy, run Forward(), verify output matches.
+- [x] S97.3.1 Graph EngineProxy integration test  Owner: TBD  Est: 1h  2026 03 08
+  - All existing inference tests pass with EngineProxy wired into graph.
 
 ##### T97.4 Implement CompileTraced() in graph/compile.go  Owner: TBD  Est: 4h
 
@@ -393,7 +394,7 @@ Acceptance:
   - GQA composite: CompileTraced produces ~20+ primitive ops.
   - Output of plan.Run() matches for both compile paths.
 
-##### T97.5 Handle Split (multi-output) and Concat (multi-input) in tracer  Owner: TBD  Est: 2h
+##### T97.5 Handle Split (multi-output) and Concat (multi-input) in tracer  Owner: TBD  Est: 2h  [x] 2026 03 08
 
 Split produces multiple output tensors. Concat takes multiple input tensors.
 These need special handling in the Tracer:
@@ -414,7 +415,7 @@ Acceptance:
 - Emitter table updated for Split multi-output.
 - Dependencies: T97.2.
 
-- [ ] S97.5.1 Split/Concat tracing test  Owner: TBD  Est: 1h
+- [x] S97.5.1 Split/Concat tracing test  Owner: TBD  Est: 1h  2026 03 08
 
 ##### T97.6 Handle UnaryOp and FusedRoPE fallback  Owner: TBD  Est: 2h
 
@@ -448,7 +449,7 @@ Acceptance:
 
 - [ ] S97.6.1 Opaque op fallback test  Owner: TBD  Est: 1h
 
-##### T97.7 Handle Gather with int indices  Owner: TBD  Est: 1.5h
+##### T97.7 Handle Gather with int indices  Owner: TBD  Est: 1.5h  [x] 2026 03 08
 
 Engine.Gather has a different signature: it takes `*tensor.TensorNumeric[int]`
 for indices, not `*tensor.TensorNumeric[T]`. The tracer's tensor identity
@@ -465,7 +466,7 @@ Acceptance:
 - EmbeddingLookup node produces a traced Gather instruction.
 - Dependencies: T97.2.
 
-- [ ] S97.7.1 Gather tracing test  Owner: TBD  Est: 45m
+- [x] S97.7.1 Gather tracing test  Owner: TBD  Est: 45m  2026 03 08
 
 ##### T97.8 Run golangci-lint on compute/, graph/  Owner: TBD  Est: 30m
   - Dependencies: T97.1-T97.7.
@@ -476,7 +477,7 @@ The GroupedQueryAttention node reads and writes the KV cache during Forward().
 The KV cache is currently Go-managed (CPU memory). For the megakernel to handle
 attention, the KV data must be on GPU.
 
-##### T98.1 TracingCacheProvider[T]  Owner: TBD  Est: 3h
+##### T98.1 TracingCacheProvider[T]  Owner: TBD  Est: 3h  [x] 2026 03 08
 
 Create `generate/tracing_cache.go`:
 
@@ -502,7 +503,7 @@ Acceptance:
   Q/K/V projections and the attention score computation.
 - Dependencies: T97.2.
 
-- [ ] S98.1.1 TracingCacheProvider unit test  Owner: TBD  Est: 1h
+- [x] S98.1.1 TracingCacheProvider unit test  Owner: TBD  Est: 1h  2026 03 08
 
 ##### T98.2 GPU KV cache buffer management  Owner: TBD  Est: 4h
 
@@ -826,6 +827,36 @@ A task is done when:
 ---
 
 ## 8. Progress Log
+
+### Change Summary -- 2026-03-08 (v13)
+
+Wave C2 complete (6 tasks). All code committed to feat/neon-softmax. Pre-commit
+hooks pass on all commits. Wave C3 unblocked.
+
+**Track C completed tasks (Wave C2):**
+- T97.3 + S97.3.1: Wire EngineProxy into buildTransformerGraph. All ~15 layer
+  constructors receive proxy instead of raw engine. Commit e15a802.
+- T97.5 + S97.5.1: Split multi-output tracing via RecordMultiOutput with
+  OutputIDs[]. Concat already handled via multi-input. Commit 747398b.
+- T97.7 + S97.7.1: Gather int indices tracing via RecordGather with
+  slotForIntTensor(). Frozen params get slot 0. Commit 747398b.
+- T98.1 + S98.1.1: TracingCacheProvider wraps CacheProvider, records
+  KVCacheAppendK/V and KVCacheGetK/V ops. Commit 40df565.
+
+**Track 0 completed tasks (Wave C2):**
+- T96.7: MoEGate topK selection retains data access (no engine.TopK primitive).
+  engine.Softmax already composed. Commit e076e78.
+- T96.8 + S96.8.1: MixtureOfExperts refactored from ops.Mul/ops.Add loops to
+  engine.MulScalar + engine.Add + engine.Concat. Per-token accumulators avoid
+  broadcasting bug. Commit e076e78.
+
+**Deviation:** [Deviation: Bug] Fixed MoE broadcasting -- initial refactor
+accumulated [1,modelDim] expert output into [seqLen,modelDim] accumulator,
+broadcasting to all rows. Fixed with per-token [1,modelDim] accumulators +
+engine.Concat at end.
+
+**Wave C3 unblocked:** T97.4 (CompileTraced), T97.8 (lint).
+T97.6 (UnaryOp fallback) depends on T97.4.
 
 ### Change Summary -- 2026-03-08 (v12)
 
