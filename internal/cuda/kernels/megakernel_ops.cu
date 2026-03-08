@@ -226,6 +226,91 @@ __device__ void dev_grid_sync() {
     cooperative_groups::this_grid().sync();
 }
 
+// ============================================================
+// T99.1: Slice device function
+// ============================================================
+
+// dev_slice copies a contiguous slice along the last axis.
+// Copies elements [start, end) from in to out.
+// dim is the size of the last axis in the input tensor.
+__device__ void dev_slice(float* out, const float* in,
+                           int start, int end, int axis, int dim) {
+    int len = end - start;
+    for (int i = threadIdx.x; i < len; i += blockDim.x) {
+        out[i] = in[start + i];
+    }
+    __syncthreads();
+}
+
+// ============================================================
+// T99.2: Repeat device function
+// ============================================================
+
+// dev_repeat replicates input along an axis (GQA K/V head replication).
+// For last-axis repeat: out[r*dim + i] = in[i] for r in [0, reps).
+__device__ void dev_repeat(float* out, const float* in,
+                            int axis, int reps, int dim) {
+    int total = dim * reps;
+    for (int i = threadIdx.x; i < total; i += blockDim.x) {
+        out[i] = in[i % dim];
+    }
+    __syncthreads();
+}
+
+// ============================================================
+// T99.3: ReduceSum and ReduceMean device functions
+// ============================================================
+
+// dev_reduce_sum computes sum reduction along the specified axis.
+// Uses shared memory for parallel reduction.
+__device__ void dev_reduce_sum(float* out, const float* in, int axis, int dim) {
+    extern __shared__ float smem[];
+
+    float local_sum = 0.0f;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+        local_sum += in[i];
+    }
+    smem[threadIdx.x] = local_sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < (unsigned)s) {
+            smem[threadIdx.x] += smem[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out[0] = smem[0];
+    }
+    __syncthreads();
+}
+
+// dev_reduce_mean computes mean reduction along the specified axis.
+// Uses shared memory for parallel reduction.
+__device__ void dev_reduce_mean(float* out, const float* in, int axis, int dim) {
+    extern __shared__ float smem[];
+
+    float local_sum = 0.0f;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+        local_sum += in[i];
+    }
+    smem[threadIdx.x] = local_sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < (unsigned)s) {
+            smem[threadIdx.x] += smem[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        out[0] = smem[0] / (float)dim;
+    }
+    __syncthreads();
+}
+
 // dev_transpose reorders elements according to a permutation.
 // For the megakernel, most transposes are logical (just reindex).
 // This is a physical copy for cases where data layout must change.
