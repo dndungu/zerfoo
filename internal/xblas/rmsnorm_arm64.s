@@ -72,12 +72,16 @@ sumsq_tail4:
 	SUB	$4, R4, R4
 
 sumsq_tail1:
+	// Scalar tail uses F0 as accumulator to avoid zeroing V4 upper lanes.
+	// Writing to S4 (scalar FADDS) would zero lanes 1-3 of V4, destroying
+	// NEON-accumulated values. Instead accumulate separately and add later.
+	FMOVS	ZR, F0
 	CBZ	R4, sumsq_reduce
 
 sumsq_scalar:
-	FMOVS	(R1), F0
-	FMULS	F0, F0, F1
-	FADDS	F1, F4, F4  // Accumulate into S4 (lane 0 of V4)
+	FMOVS	(R1), F1
+	FMULS	F1, F1, F2
+	FADDS	F2, F0, F0  // Accumulate into F0 (separate from V4)
 	ADD	$4, R1, R1
 	SUB	$1, R4, R4
 	CBNZ	R4, sumsq_scalar
@@ -92,6 +96,9 @@ sumsq_reduce:
 	WORD	$0x6E24D484
 	// FADDP S4, V4.2S
 	WORD	$0x7E30D884
+
+	// Add scalar tail sum
+	FADDS	F0, F4, F4
 
 	// S4 now holds sum of squares.
 	// Compute mean = sumSq / D
