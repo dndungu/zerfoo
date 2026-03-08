@@ -11,7 +11,8 @@ import (
 
 // mockTracer records trace events for testing.
 type mockTracer[T tensor.Numeric] struct {
-	events []traceEvent[T]
+	events  []traceEvent[T]
+	opaque  bool
 }
 
 type traceEvent[T tensor.Numeric] struct {
@@ -33,6 +34,10 @@ func (m *mockTracer[T]) RecordMultiOutput(opName string, inputs []*tensor.Tensor
 
 func (m *mockTracer[T]) RecordGather(params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T], extra map[string]any) {
 	m.events = append(m.events, traceEvent[T]{opName: "Gather", inputs: []*tensor.TensorNumeric[T]{params}, output: output, extra: extra})
+}
+
+func (m *mockTracer[T]) MarkOpaque() {
+	m.opaque = true
 }
 
 func newTestProxy() (*EngineProxy[int], *mockTracer[int]) {
@@ -331,13 +336,20 @@ func TestEngineProxy_NonTracedMethods(t *testing.T) {
 
 	t.Run("UnaryOp", func(t *testing.T) {
 		tracer.events = nil
+		tracer.opaque = false
 		a, _ := tensor.New[int]([]int{2}, []int{1, 2})
 		_, err := proxy.UnaryOp(ctx, a, func(v int) int { return v * 2 })
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(tracer.events) != 0 {
-			t.Errorf("UnaryOp should not be traced, got %d events", len(tracer.events))
+		if len(tracer.events) != 1 {
+			t.Errorf("UnaryOp should record 1 trace event, got %d", len(tracer.events))
+		}
+		if len(tracer.events) == 1 && tracer.events[0].opName != "UnaryOp" {
+			t.Errorf("expected opName UnaryOp, got %s", tracer.events[0].opName)
+		}
+		if !tracer.opaque {
+			t.Error("expected MarkOpaque to be called for UnaryOp")
 		}
 	})
 

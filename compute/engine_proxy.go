@@ -54,7 +54,14 @@ func (p *EngineProxy[T]) Ops() numeric.Arithmetic[T] {
 }
 
 func (p *EngineProxy[T]) UnaryOp(ctx context.Context, a *tensor.TensorNumeric[T], op func(T) T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	return p.real.UnaryOp(ctx, a, op, dst...)
+	result, err := p.real.UnaryOp(ctx, a, op, dst...)
+	if err == nil && p.tracer != nil {
+		p.tracer.Record("UnaryOp", []*tensor.TensorNumeric[T]{a}, result, nil)
+		if marker, ok := p.tracer.(interface{ MarkOpaque() }); ok {
+			marker.MarkOpaque()
+		}
+	}
+	return result, err
 }
 
 func (p *EngineProxy[T]) Zero(ctx context.Context, a *tensor.TensorNumeric[T]) error {
