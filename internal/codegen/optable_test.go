@@ -19,6 +19,8 @@ func TestEmitterRegistered(t *testing.T) {
 		{"Neg", 1}, {"Abs", 1}, {"Silu", 1},
 		{"AddScalar", 1}, {"MulScalar", 1}, {"SubScalar", 1}, {"DivScalar", 1}, {"PowScalar", 1},
 		{"RMSNorm", 2}, {"Softmax", 1},
+		{"ReduceSum", 1}, {"ReduceMean", 1},
+		{"Slice", 1}, {"Repeat", 1},
 		{"MatMul", 2}, {"MatMulNBits", 2},
 		{"Gather", 2}, {"Concat", 1}, {"Reshape", 1}, {"Transpose", 1},
 	}
@@ -62,6 +64,10 @@ func TestEmitterOutputFormat(t *testing.T) {
 		{"MulScalar", 1, "slot_"},
 		{"RMSNorm", 2, "dev_rmsnorm"},
 		{"Softmax", 1, "dev_softmax"},
+		{"ReduceSum", 1, "dev_reduce_sum"},
+		{"ReduceMean", 1, "dev_reduce_mean"},
+		{"Slice", 1, "dev_slice"},
+		{"Repeat", 1, "dev_repeat"},
 		{"MatMul", 2, "dev_gemv"},
 		{"Gather", 2, "dev_gather"},
 	}
