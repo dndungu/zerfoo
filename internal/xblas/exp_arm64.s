@@ -3,7 +3,10 @@
 // func VexpF32(out, x *float32, n int)
 //
 // Computes out[i] = exp(x[i]) using NEON with range-reduced degree-5 polynomial.
+// Input is clamped to [-87, 88] to avoid ldexp overflow/underflow.
+//
 // Algorithm:
+//   0. Clamp x to [-87, 88]
 //   1. n_int = round(x / ln2)
 //   2. r = x - n_int * ln2
 //   3. poly = c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*c5))))  (Horner)
@@ -15,16 +18,13 @@
 //   V2  = float(n_int)
 //   V3  = r (reduced argument)
 //   V4,V5 = Horner temporaries
-//   V16 = 1/ln2 (constant)
-//   V17 = ln2 (constant)
-//   V18 = c0 = 1.0
-//   V19 = c1 = 1.0
-//   V20 = c2 = 0.5
-//   V21 = c3 = 1/6
-//   V22 = c4 = 1/24
-//   V23 = c5 = 1/120
+//   V16 = 1/ln2, V17 = ln2
+//   V18 = c0 = 1.0, V19 = c1 = 1.0
+//   V20 = c2 = 0.5, V21 = c3 = 1/6
+//   V22 = c4 = 1/24, V23 = c5 = 1/120
+//   V24 = clamp_min = -87.0, V25 = clamp_max = 88.0
 //
-// Scalar tail uses F24,F25 (avoids callee-saved V8-V15).
+// Scalar tail uses F26,F27 (avoids callee-saved V8-V15).
 //
 // Layout: out=0(FP), x=8(FP), n=16(FP)
 TEXT ·VexpF32(SB), NOSPLIT, $0-24
@@ -51,12 +51,24 @@ TEXT ·VexpF32(SB), NOSPLIT, $0-24
 	MOVW	$0x3C088889, R3        // c5 = 1/120
 	VDUP	R3, V23.S4
 
+	// Clamp constants
+	MOVW	$0xC2AE0000, R3        // -87.0f
+	VDUP	R3, V24.S4
+	MOVW	$0x42B00000, R3        // 88.0f
+	VDUP	R3, V25.S4
+
 	CMP	$4, R2
 	BLT	exp_tail
 
 exp_loop4:
 	// Load 4 input values.
 	VLD1.P	16(R1), [V0.S4]
+
+	// Clamp to [-87, 88]
+	// FMAX V0.4S, V0.4S, V24.4S (clamp from below)
+	WORD	$0x4E38F400
+	// FMIN V0.4S, V0.4S, V25.4S (clamp from above)
+	WORD	$0x4EB9F400
 
 	// Step 1: n_int = round(x * (1/ln2))
 	// FMUL V1.4S, V0.4S, V16.4S
@@ -111,8 +123,16 @@ exp_tail:
 
 exp_scalar:
 	// Process one element at a time using scalar float ops.
-	// Uses F24,F25 instead of F10,F11 to avoid callee-saved V8-V15.
+	// Uses F26,F27 instead of F10,F11 to avoid callee-saved V8-V15.
 	FMOVS	(R1), F0
+
+	// Clamp to [-87, 88]
+	MOVW	$0xC2AE0000, R3        // -87.0f
+	FMOVS	R3, F6
+	FMAXS	F6, F0, F0
+	MOVW	$0x42B00000, R3        // 88.0f
+	FMOVS	R3, F6
+	FMINS	F6, F0, F0
 
 	// n = round(x / ln2)
 	MOVW	$0x3FB8AA3B, R3
@@ -131,38 +151,38 @@ exp_scalar:
 
 	// Horner: poly = c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*c5))))
 	MOVW	$0x3C088889, R4
-	FMOVS	R4, F24                // c5
+	FMOVS	R4, F26                // c5
 	MOVW	$0x3D2AAAAB, R4
-	FMOVS	R4, F25                // c4
-	FMULS	F3, F24, F24           // r*c5
-	FADDS	F24, F25, F24          // c4 + r*c5
+	FMOVS	R4, F27                // c4
+	FMULS	F3, F26, F26           // r*c5
+	FADDS	F26, F27, F26          // c4 + r*c5
 
 	MOVW	$0x3E2AAAAB, R4
-	FMOVS	R4, F25                // c3
-	FMULS	F3, F24, F24
-	FADDS	F24, F25, F24
+	FMOVS	R4, F27                // c3
+	FMULS	F3, F26, F26
+	FADDS	F26, F27, F26
 
 	MOVW	$0x3F000000, R4
-	FMOVS	R4, F25                // c2
-	FMULS	F3, F24, F24
-	FADDS	F24, F25, F24
+	FMOVS	R4, F27                // c2
+	FMULS	F3, F26, F26
+	FADDS	F26, F27, F26
 
 	MOVW	$0x3F800000, R4
-	FMOVS	R4, F25                // c1
-	FMULS	F3, F24, F24
-	FADDS	F24, F25, F24
+	FMOVS	R4, F27                // c1
+	FMULS	F3, F26, F26
+	FADDS	F26, F27, F26
 
-	FMOVS	R4, F25                // c0 (same as c1 = 1.0)
-	FMULS	F3, F24, F24
-	FADDS	F24, F25, F24          // poly
+	FMOVS	R4, F27                // c0 (same as c1 = 1.0)
+	FMULS	F3, F26, F26
+	FADDS	F26, F27, F26          // poly
 
 	// ldexp: add n<<23 to poly's float32 bits
 	LSL	$23, R3, R5
-	FMOVS	F24, R4
+	FMOVS	F26, R4
 	ADD	R5, R4, R4
-	FMOVS	R4, F24
+	FMOVS	R4, F26
 
-	FMOVS	F24, (R0)
+	FMOVS	F26, (R0)
 
 	ADD	$4, R0, R0
 	ADD	$4, R1, R1

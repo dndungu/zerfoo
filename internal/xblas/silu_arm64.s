@@ -50,6 +50,12 @@ TEXT ·SiLUF32(SB), NOSPLIT, $0-24
 	MOVW	$0x3C088889, R3        // c5 = 1/120
 	VDUP	R3, V23.S4
 
+	// Clamp constants for -x input to exp
+	MOVW	$0xC2AE0000, R3        // -87.0f
+	VDUP	R3, V28.S4
+	MOVW	$0x42AE0000, R3        // 87.0f
+	VDUP	R3, V29.S4
+
 	CMP	$4, R2
 	BLT	silu_tail
 
@@ -60,6 +66,12 @@ silu_loop4:
 	// Negate: V1 = -x
 	// FNEG V1.4S, V0.4S
 	WORD	$0x6EA0F801
+
+	// Clamp -x to [-87, 87] for safe exp
+	// FMAX V1.4S, V1.4S, V28.4S (clamp from below)
+	WORD	$0x4E3CF421
+	// FMIN V1.4S, V1.4S, V29.4S (clamp from above)
+	WORD	$0x4EBDF421
 
 	// === exp(-x) using V1 as input ===
 
@@ -146,6 +158,14 @@ silu_scalar:
 
 	// Negate: F1 = -x
 	FNEGS	F0, F1
+
+	// Clamp -x to [-87, 87]
+	MOVW	$0xC2AE0000, R3        // -87.0f
+	FMOVS	R3, F6
+	FMAXS	F6, F1, F1
+	MOVW	$0x42AE0000, R3        // 87.0f
+	FMOVS	R3, F6
+	FMINS	F6, F1, F1
 
 	// exp(-x) scalar
 	MOVW	$0x3FB8AA3B, R3
@@ -242,6 +262,12 @@ TEXT ·SiLUGateF32(SB), NOSPLIT, $0-32
 	MOVW	$0x3C088889, R3
 	VDUP	R3, V23.S4
 
+	// Clamp constants for -gate input to exp
+	MOVW	$0xC2AE0000, R3
+	VDUP	R3, V28.S4
+	MOVW	$0x42AE0000, R3
+	VDUP	R3, V29.S4
+
 	CMP	$4, R2
 	BLT	silugate_tail
 
@@ -253,6 +279,10 @@ silugate_loop4:
 
 	// Negate: V1 = -gate
 	WORD	$0x6EA0F801
+
+	// Clamp -gate to [-87, 87]
+	WORD	$0x4E3CF421
+	WORD	$0x4EBDF421
 
 	// === exp(-gate) ===
 
@@ -327,6 +357,14 @@ silugate_scalar:
 
 	// exp(-gate) scalar
 	FNEGS	F0, F1
+
+	// Clamp -gate to [-87, 87]
+	MOVW	$0xC2AE0000, R3
+	FMOVS	R3, F6
+	FMAXS	F6, F1, F1
+	MOVW	$0x42AE0000, R3
+	FMOVS	R3, F6
+	FMINS	F6, F1, F1
 
 	MOVW	$0x3FB8AA3B, R3
 	FMOVS	R3, F6

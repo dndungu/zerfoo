@@ -75,6 +75,10 @@ max_reduce:
 	// Broadcast max into V24.S4 for vector subtract
 	WORD	$0x4E0407F8     // DUP V24.4S, V31.S[0]
 
+	// Clamp constant: min = -87.0f for exp input
+	MOVW	$0xC2AE0000, R3
+	VDUP	R3, V26.S4
+
 	// V29 = sum accumulator (zero)
 	VEOR	V29.B16, V29.B16, V29.B16
 
@@ -91,6 +95,10 @@ exp_loop4:
 	// V0 = x[i] - max
 	// FSUB V0.4S, V0.4S, V24.4S
 	WORD	$0x4EB8D400
+
+	// Clamp (x-max) to min -87 for safe exp
+	// FMAX V0.4S, V0.4S, V26.4S
+	WORD	$0x4E3AF400
 
 	// --- Inline exp polynomial (same as VexpF32) ---
 	// Step 1: n_int = round((x-max) * (1/ln2))
@@ -148,6 +156,11 @@ exp_tail:
 exp_scalar:
 	FMOVS	(R4), F0
 	FSUBS	F31, F0, F0           // x - max
+
+	// Clamp (x-max) to min -87
+	MOVW	$0xC2AE0000, R3
+	FMOVS	R3, F6
+	FMAXS	F6, F0, F0
 
 	// Scalar exp using F24,F25 (avoids callee-saved V8-V15)
 	MOVW	$0x3FB8AA3B, R3
