@@ -53,6 +53,10 @@ type SpectralFingerprint[T tensor.Numeric] struct {
 	window      int
 	topK        int
 	outputShape []int
+
+	// Precomputed Fourier basis matrices of shape [window, topK].
+	cosBasis *tensor.TensorNumeric[T]
+	sinBasis *tensor.TensorNumeric[T]
 }
 
 // NewSpectralFingerprint creates a new SpectralFingerprint layer.
@@ -65,11 +69,39 @@ func NewSpectralFingerprint[T tensor.Numeric](engine compute.Engine[T], ops nume
 		return nil, fmt.Errorf("topK must be > 0, got %d", topK)
 	}
 
+	// Precompute Fourier basis matrices [window, topK].
+	// Column k-1 corresponds to DFT bin k (1-indexed).
+	cosData := make([]T, window*topK)
+	sinData := make([]T, window*topK)
+	for k := 1; k <= topK; k++ {
+		col := k - 1
+		if k >= window {
+			// Bins beyond window-1 are zero (already zero-initialized).
+			continue
+		}
+		for n := range window {
+			angle := -2 * math.Pi * float64(k) * float64(n) / float64(window)
+			cosData[n*topK+col] = ops.FromFloat64(math.Cos(angle))
+			sinData[n*topK+col] = ops.FromFloat64(math.Sin(angle))
+		}
+	}
+
+	cosBasis, err := tensor.New([]int{window, topK}, cosData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cos basis: %w", err)
+	}
+	sinBasis, err := tensor.New([]int{window, topK}, sinData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sin basis: %w", err)
+	}
+
 	return &SpectralFingerprint[T]{
-		engine: engine,
-		ops:    ops,
-		window: window,
-		topK:   topK,
+		engine:   engine,
+		ops:      ops,
+		window:   window,
+		topK:     topK,
+		cosBasis: cosBasis,
+		sinBasis: sinBasis,
 	}, nil
 }
 
@@ -93,7 +125,7 @@ func (s *SpectralFingerprint[T]) Attributes() map[string]interface{} {
 // Forward computes spectral magnitudes for bins 1..topK for each row in the batch.
 // Input must be [batch, window]. If input window dimension is larger than the configured
 // window, only the last `window` elements are used. If smaller, an error is returned.
-func (s *SpectralFingerprint[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+func (s *SpectralFingerprint[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("SpectralFingerprint expects exactly 1 input, got %d", len(inputs))
 	}
@@ -106,52 +138,58 @@ func (s *SpectralFingerprint[T]) Forward(_ context.Context, inputs ...*tensor.Te
 	}
 
 	batch := shape[0]
-
 	w := shape[1]
 	if w < s.window {
 		return nil, fmt.Errorf("input window (%d) smaller than configured window (%d)", w, s.window)
 	}
 
-	// We evaluate over the last s.window points of each row
-	start := w - s.window
-	outShape := []int{batch, s.topK}
-	outData := make([]T, batch*s.topK)
-	inData := in.Data()
-
-	// Compute DFT magnitudes in type T using ops
-	for b := range batch {
-		rowStart := b*w + start
-		// For k = 1..topK
-		for k := 1; k <= s.topK; k++ {
-			var re, im T
-			// If k >= s.window, magnitude is zero
-			if k >= s.window {
-				outData[b*s.topK+(k-1)] = s.ops.FromFloat64(0)
-				continue
-			}
-
-			for n := range s.window {
-				angle := -2 * math.Pi * float64(k) * float64(n) / float64(s.window)
-				c := s.ops.FromFloat64(math.Cos(angle))
-				sn := s.ops.FromFloat64(math.Sin(angle))
-				x := inData[rowStart+n]
-				re = s.ops.Add(re, s.ops.Mul(x, c))
-				im = s.ops.Add(im, s.ops.Mul(x, sn))
-			}
-
-			re2 := s.ops.Mul(re, re)
-			im2 := s.ops.Mul(im, im)
-			mag := s.ops.Sqrt(s.ops.Add(re2, im2))
-			outData[b*s.topK+(k-1)] = mag
+	// If input is wider than configured window, slice to the last s.window columns.
+	x := in
+	if w > s.window {
+		start := w - s.window
+		inData := in.Data()
+		sliceData := make([]T, batch*s.window)
+		for b := range batch {
+			copy(sliceData[b*s.window:], inData[b*w+start:b*w+start+s.window])
+		}
+		var err error
+		x, err = tensor.New([]int{batch, s.window}, sliceData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to slice input window: %w", err)
 		}
 	}
 
-	out, err := tensor.New[T](outShape, outData)
+	// re = x @ cosBasis  [batch, topK]
+	re, err := s.engine.MatMul(ctx, x, s.cosBasis)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to compute real DFT: %w", err)
 	}
 
-	s.outputShape = outShape
+	// im = x @ sinBasis  [batch, topK]
+	im, err := s.engine.MatMul(ctx, x, s.sinBasis)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute imaginary DFT: %w", err)
+	}
+
+	// mag = sqrt(re^2 + im^2)
+	re2, err := s.engine.Mul(ctx, re, re)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute re^2: %w", err)
+	}
+	im2, err := s.engine.Mul(ctx, im, im)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute im^2: %w", err)
+	}
+	sum, err := s.engine.Add(ctx, re2, im2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute re^2 + im^2: %w", err)
+	}
+	out, err := s.engine.Sqrt(ctx, sum)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute sqrt: %w", err)
+	}
+
+	s.outputShape = out.Shape()
 
 	return out, nil
 }

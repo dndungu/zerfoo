@@ -103,4 +103,92 @@ func TestSpectralFingerprint_BuilderRegistry(t *testing.T) {
 	testutils.AssertTrue(t, n.OpType() == "SpectralFingerprint", "op type mismatch")
 }
 
+// TestSpectralFingerprint_Parity verifies engine.MatMul-based Forward produces
+// outputs within 1e-5 of hand-computed DFT magnitudes.
+func TestSpectralFingerprint_Parity(t *testing.T) {
+	ops := numeric.Float32Ops{}
+	eng := compute.NewCPUEngine[float32](ops)
+	const eps float32 = 1e-5
+
+	tests := []struct {
+		name   string
+		window int
+		topK   int
+		input  []float32 // flat [batch, window]
+		batch  int
+	}{
+		{
+			name:   "pure_cos_k1",
+			window: 8,
+			topK:   3,
+			batch:  1,
+			input: func() []float32 {
+				d := make([]float32, 8)
+				for n := range 8 {
+					d[n] = float32(math.Cos(2 * math.Pi * float64(n) / 8))
+				}
+				return d
+			}(),
+		},
+		{
+			name:   "constant_signal",
+			window: 8,
+			topK:   3,
+			batch:  1,
+			input:  []float32{1, 1, 1, 1, 1, 1, 1, 1},
+		},
+		{
+			name:   "batch2_mixed",
+			window: 4,
+			topK:   2,
+			batch:  2,
+			input:  []float32{1, 0, -1, 0, 0, 0, 0, 0},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			layer, err := core.NewSpectralFingerprint[float32](eng, ops, tc.window, tc.topK)
+			if err != nil {
+				t.Fatalf("create layer: %v", err)
+			}
+
+			in, err := tensor.New([]int{tc.batch, tc.window}, tc.input)
+			if err != nil {
+				t.Fatalf("create input: %v", err)
+			}
+
+			out, err := layer.Forward(context.Background(), in)
+			if err != nil {
+				t.Fatalf("forward: %v", err)
+			}
+
+			outData := out.Data()
+
+			// Compute reference DFT magnitudes.
+			idx := 0
+			for b := range tc.batch {
+				for k := 1; k <= tc.topK; k++ {
+					var ref float32
+					if k < tc.window {
+						var re, im float64
+						for n := range tc.window {
+							angle := -2 * math.Pi * float64(k) * float64(n) / float64(tc.window)
+							x := float64(tc.input[b*tc.window+n])
+							re += x * math.Cos(angle)
+							im += x * math.Sin(angle)
+						}
+						ref = float32(math.Sqrt(re*re + im*im))
+					}
+					got := outData[idx]
+					if !approxEqual(got, ref, eps) {
+						t.Errorf("batch %d bin %d: got %v want %v", b, k, got, ref)
+					}
+					idx++
+				}
+			}
+		})
+	}
+}
+
 // Statically assert that the type implements the graph.Node interface.
