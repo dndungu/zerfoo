@@ -861,7 +861,7 @@ Acceptance:
 
 - [x] S101.3.1 Scalar op baseline benchmarks  Owner: TBD  Est: 30m  2026 03 07
 
-##### T101.4 Run golangci-lint on compute/  Owner: TBD  Est: 15m
+##### T101.4 Run golangci-lint on compute/  Owner: TBD  Est: 15m  [x] 2026 03 07
   - Dependencies: T101.1-T101.3.
 
 #### E102: NEON Assembly for Hot-Path Operations (O101)
@@ -1118,7 +1118,7 @@ Acceptance:
   - Test edge cases: 0, -0, very negative (underflow), very positive (overflow), NaN.
   - Test accuracy: 10000 random values in [-88, 88], max relative error < 1e-6.
 
-##### T102.8 Wire NEON functions into CPUEngine  Owner: TBD  Est: 2h
+##### T102.8 Wire NEON functions into CPUEngine  Owner: TBD  Est: 2h  [x] 2026 03 07
 
 Update `compute/cpu_engine.go` and `compute/fused_*.go` to dispatch to the
 new NEON functions when T is float32 on ARM64:
@@ -1140,10 +1140,10 @@ Acceptance:
 - No regression for non-float32 types.
 - Dependencies: T102.1-T102.7, T101.1.
 
-- [ ] S102.8.1 End-to-end wiring integration test  Owner: TBD  Est: 1h
+- [x] S102.8.1 End-to-end wiring integration test  Owner: TBD  Est: 1h  [x] 2026 03 07
   - Run full Gemma 3 inference on ARM64 (DGX Spark). Verify output unchanged.
 
-##### T102.9 Run golangci-lint on compute/, internal/xblas/  Owner: TBD  Est: 30m
+##### T102.9 Run golangci-lint on compute/, internal/xblas/  Owner: TBD  Est: 30m  [x] 2026 03 07
   - Dependencies: T102.1-T102.8.
 
 #### E103: Tensor Arena for Buffer Reuse (O103)
@@ -1193,7 +1193,7 @@ Acceptance:
   - Test Get/Put cycle, size bucketing, Reset.
   - Test concurrent Get/Put from multiple goroutines.
 
-##### T103.2 Wire TensorArena into CPUEngine  Owner: TBD  Est: 3h
+##### T103.2 Wire TensorArena into CPUEngine  Owner: TBD  Est: 3h  [x] 2026 03 07
 
 Update `CPUEngine.getOrCreateDest()` to use the arena when a dst tensor is
 not provided:
@@ -1227,11 +1227,11 @@ Acceptance:
 - Memory usage stable during 100-token generation (no growth).
 - Dependencies: T103.1.
 
-- [ ] S103.2.1 Arena integration benchmarks  Owner: TBD  Est: 1.5h
+- [x] S103.2.1 Arena integration benchmarks  Owner: TBD  Est: 1.5h  [x] 2026 03 07
   - BenchmarkForwardWithArena vs BenchmarkForwardWithoutArena.
   - Memory allocation profile comparison.
 
-##### T103.3 Run golangci-lint on compute/  Owner: TBD  Est: 15m
+##### T103.3 Run golangci-lint on compute/  Owner: TBD  Est: 15m  [x] 2026 03 07
   - Dependencies: T103.1-T103.2.
 
 #### E104: CPU Benchmark Validation (O104)
@@ -1400,6 +1400,23 @@ A task is done when:
 ---
 
 ## 8. Progress Log
+
+### Change Summary -- 2026-03-07 (v9)
+
+Wave D3 complete (sequential). NEON wired into CPUEngine, TensorArena integrated.
+
+**Completed tasks:**
+- T101.4: golangci-lint compute/ -- 0 issues.
+- T102.8: Wire NEON into CPUEngine (Softmax, Exp, Add/Sub/Mul/Div, scalars, fused ops). Commits 7ac9a35, 0afe430.
+- T102.9: golangci-lint compute/ + internal/xblas/ -- 0 issues.
+- T103.1: TensorArena (re-implemented, original commit was empty). Commit dc97cd7.
+- T103.2: Wire TensorArena into CPUEngine getOrCreateDest. Commit e3775a8.
+- T103.3: golangci-lint compute/ -- 0 issues.
+
+**Deviation:** T103.1 was marked complete in Wave D1 but the commit was empty (no files).
+Re-implemented as part of Wave D3 with proper tests and committed.
+
+**Wave D4 unblocked:** T104.1-T104.4 (benchmark validation on DGX Spark).
 
 ### Change Summary -- 2026-03-07 (v8)
 
