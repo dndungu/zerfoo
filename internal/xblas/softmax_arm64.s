@@ -72,7 +72,7 @@ max_reduce:
 	VDUP	R3, V23.S4
 
 	// Broadcast max into V24.S4 for vector subtract
-	VDUP	F31, V24.S4
+	WORD	$0x4E0407F8     // DUP V24.4S, V31.S[0] -- broadcast max
 
 	// V29 = sum accumulator (zero)
 	VEOR	V29.B16, V29.B16, V29.B16
@@ -219,7 +219,7 @@ exp_reduce:
 	MOVW	$0x3F800000, R3
 	FMOVS	R3, F0
 	FDIVS	F28, F0, F27           // F27 = 1/sum
-	VDUP	F27, V25.S4            // V25 = 1/sum broadcast
+	WORD	$0x4E040779     // DUP V25.4S, V27.S[0] -- broadcast 1/sum
 
 	MOVD	R0, R4
 	MOVD	R1, R5
