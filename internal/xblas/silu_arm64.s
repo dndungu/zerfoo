@@ -13,9 +13,9 @@
 //   V4  = r (reduced argument)
 //   V5,V6 = Horner temporaries
 //   V7  = exp(-x) result
-//   V8  = 1 + exp(-x)
-//   V9  = sigmoid = reciprocal of V8
-//   V10 = Newton-Raphson temp
+//   V24 = 1 + exp(-x)         (avoids callee-saved V8-V15)
+//   V25 = sigmoid = reciprocal (avoids callee-saved V8-V15)
+//   V26 = Newton-Raphson temp  (avoids callee-saved V8-V15)
 //   V16 = 1/ln2
 //   V17 = ln2
 //   V18 = c0 = 1.0
@@ -58,7 +58,7 @@ silu_loop4:
 	VLD1.P	16(R1), [V0.S4]
 
 	// Negate: V1 = -x
-	// FNEG V1.4S, V0.4S = 0x6EA0F801
+	// FNEG V1.4S, V0.4S
 	WORD	$0x6EA0F801
 
 	// === exp(-x) using V1 as input ===
@@ -106,27 +106,30 @@ silu_loop4:
 
 	// === sigmoid = 1 / (1 + exp(-x)) ===
 
-	// FADD V8.4S, V18.4S, V7.4S  (1.0 + exp(-x))
-	// encoding: 0x4E27D648
-	WORD	$0x4E27D648
+	// FADD V24.4S, V18.4S, V7.4S  (1.0 + exp(-x))
+	// Q=1, sz=0, Rm=V7=00111, Rn=V18=10010, Rd=V24=11000
+	WORD	$0x4E27D658
 
-	// FRECPE V9.4S, V8.4S  (approximate 1/V8)
-	// encoding: 0x4EA1D909
-	WORD	$0x4EA1D909
+	// FRECPE V25.4S, V24.4S  (approximate 1/V24)
+	// Q=1, sz=0, Rn=V24=11000, Rd=V25=11001
+	WORD	$0x4EA1DB19
 
-	// Newton-Raphson step 1: V10 = FRECPS(V8, V9), V9 = V9 * V10
-	// FRECPS V10.4S, V8.4S, V9.4S = 0x4E29FD0A
-	WORD	$0x4E29FD0A
-	// FMUL V9.4S, V9.4S, V10.4S
-	WORD	$0x6E2ADC29
+	// Newton-Raphson step 1: V26 = FRECPS(V24, V25), V25 = V25 * V26
+	// FRECPS V26.4S, V24.4S, V25.4S
+	// Q=1, sz=0, Rm=V25=11001, Rn=V24=11000, Rd=V26=11010
+	WORD	$0x4E39FF1A
+	// FMUL V25.4S, V25.4S, V26.4S
+	// Rm=V26=11010, Rn=V25=11001, Rd=V25=11001
+	WORD	$0x6E3ADF39
 
-	// Newton-Raphson step 2: V10 = FRECPS(V8, V9), V9 = V9 * V10
-	WORD	$0x4E29FD0A
-	WORD	$0x6E2ADC29
+	// Newton-Raphson step 2: V26 = FRECPS(V24, V25), V25 = V25 * V26
+	WORD	$0x4E39FF1A
+	WORD	$0x6E3ADF39
 
 	// === silu = x * sigmoid ===
-	// FMUL V0.4S, V0.4S, V9.4S
-	WORD	$0x6E29DC00
+	// FMUL V0.4S, V0.4S, V25.4S
+	// Rm=V25=11001, Rn=V0=00000, Rd=V0=00000
+	WORD	$0x6E39DC00
 
 	// Store 4 results.
 	VST1.P	[V0.S4], 16(R0)
@@ -158,47 +161,47 @@ silu_scalar:
 	FMULS	F3, F7, F3
 	FSUBS	F3, F1, F4		// r = -x - n*ln2
 
-	// Horner
+	// Horner (uses F24, F25 instead of F10, F11 to avoid callee-saved)
 	MOVW	$0x3C088889, R4
-	FMOVS	R4, F10			// c5
+	FMOVS	R4, F24			// c5
 	MOVW	$0x3D2AAAAB, R4
-	FMOVS	R4, F11			// c4
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25			// c4
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3E2AAAAB, R4
-	FMOVS	R4, F11			// c3
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25			// c3
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F000000, R4
-	FMOVS	R4, F11			// c2
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25			// c2
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F800000, R4
-	FMOVS	R4, F11			// c1
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25			// c1
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
-	FMOVS	R4, F11			// c0 = 1.0
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10		// poly
+	FMOVS	R4, F25			// c0 = 1.0
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24		// poly
 
 	// ldexp
 	LSL	$23, R3, R5
-	FMOVS	F10, R4
+	FMOVS	F24, R4
 	ADD	R5, R4, R4
-	FMOVS	R4, F10			// exp(-x)
+	FMOVS	R4, F24			// exp(-x)
 
 	// sigmoid = 1 / (1 + exp(-x))
 	MOVW	$0x3F800000, R4
-	FMOVS	R4, F12			// 1.0
-	FADDS	F10, F12, F11		// F11 = 1 + exp(-x)
-	FDIVS	F11, F12, F11		// F11 = 1.0 / (1 + exp(-x))
+	FMOVS	R4, F26			// 1.0
+	FADDS	F24, F26, F25		// F25 = 1 + exp(-x)
+	FDIVS	F25, F26, F25		// F25 = 1.0 / (1 + exp(-x))
 
 	// silu = x * sigmoid
-	FMULS	F0, F11, F0
+	FMULS	F0, F25, F0
 	FMOVS	F0, (R0)
 
 	ADD	$4, R0, R0
@@ -246,7 +249,7 @@ silugate_loop4:
 	// Load 4 gate values.
 	VLD1.P	16(R1), [V0.S4]
 	// Load 4 up values.
-	VLD1.P	16(R6), [V11.S4]
+	VLD1.P	16(R6), [V27.S4]
 
 	// Negate: V1 = -gate
 	WORD	$0x6EA0F801
@@ -286,26 +289,27 @@ silugate_loop4:
 	WORD	$0x4EA284A7		// V7 = exp(-gate)
 
 	// sigmoid = 1 / (1 + exp(-gate))
-	// FADD V8.4S, V18.4S, V7.4S
-	WORD	$0x4E27D648
-	// FRECPE V9.4S, V8.4S
-	WORD	$0x4EA1D909
-	// FRECPS V10.4S, V8.4S, V9.4S
-	WORD	$0x4E29FD0A
-	// FMUL V9.4S, V9.4S, V10.4S
-	WORD	$0x6E2ADC29
-	// FRECPS V10.4S, V8.4S, V9.4S
-	WORD	$0x4E29FD0A
-	// FMUL V9.4S, V9.4S, V10.4S
-	WORD	$0x6E2ADC29
+	// FADD V24.4S, V18.4S, V7.4S
+	WORD	$0x4E27D658
+	// FRECPE V25.4S, V24.4S
+	WORD	$0x4EA1DB19
+	// FRECPS V26.4S, V24.4S, V25.4S
+	WORD	$0x4E39FF1A
+	// FMUL V25.4S, V25.4S, V26.4S
+	WORD	$0x6E3ADF39
+	// FRECPS V26.4S, V24.4S, V25.4S
+	WORD	$0x4E39FF1A
+	// FMUL V25.4S, V25.4S, V26.4S
+	WORD	$0x6E3ADF39
 
 	// silu(gate) = gate * sigmoid
-	// FMUL V0.4S, V0.4S, V9.4S
-	WORD	$0x6E29DC00
+	// FMUL V0.4S, V0.4S, V25.4S
+	WORD	$0x6E39DC00
 
 	// result = silu(gate) * up
-	// FMUL V0.4S, V0.4S, V11.4S
-	WORD	$0x6E2BDC00
+	// FMUL V0.4S, V0.4S, V27.4S
+	// Rm=V27=11011, Rn=V0=00000, Rd=V0=00000
+	WORD	$0x6E3BDC00
 
 	// Store 4 results.
 	VST1.P	[V0.S4], 16(R0)
@@ -319,7 +323,7 @@ silugate_tail:
 
 silugate_scalar:
 	FMOVS	(R1), F0		// gate
-	FMOVS	(R6), F12		// up
+	FMOVS	(R6), F26		// up (was F12, now F26 to avoid V8-V15)
 
 	// exp(-gate) scalar
 	FNEGS	F0, F1
@@ -337,49 +341,49 @@ silugate_scalar:
 	FMULS	F3, F7, F3
 	FSUBS	F3, F1, F4
 
-	// Horner
+	// Horner (uses F24, F25 to avoid callee-saved)
 	MOVW	$0x3C088889, R4
-	FMOVS	R4, F10
+	FMOVS	R4, F24
 	MOVW	$0x3D2AAAAB, R4
-	FMOVS	R4, F11
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3E2AAAAB, R4
-	FMOVS	R4, F11
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F000000, R4
-	FMOVS	R4, F11
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F800000, R4
-	FMOVS	R4, F11
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
-	FMOVS	R4, F11
-	FMULS	F4, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25
+	FMULS	F4, F24, F24
+	FADDS	F24, F25, F24
 
 	// ldexp
 	LSL	$23, R3, R5
-	FMOVS	F10, R4
+	FMOVS	F24, R4
 	ADD	R5, R4, R4
-	FMOVS	R4, F10			// exp(-gate)
+	FMOVS	R4, F24			// exp(-gate)
 
 	// sigmoid = 1 / (1 + exp(-gate))
 	MOVW	$0x3F800000, R4
-	FMOVS	R4, F13
-	FADDS	F10, F13, F11		// 1 + exp(-gate)
-	FDIVS	F11, F13, F11		// 1.0 / (1 + exp(-gate))
+	FMOVS	R4, F27
+	FADDS	F24, F27, F25		// 1 + exp(-gate)
+	FDIVS	F25, F27, F25		// 1.0 / (1 + exp(-gate))
 
 	// silu = gate * sigmoid
-	FMULS	F0, F11, F0
+	FMULS	F0, F25, F0
 	// result = silu * up
-	FMULS	F0, F12, F0
+	FMULS	F0, F26, F0
 
 	FMOVS	F0, (R0)
 

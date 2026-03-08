@@ -16,7 +16,8 @@
 //   V4,V5 = sum-of-squares accumulators
 //   V6 = broadcast scale (normalize pass)
 //   V0,V1,V2,V3 = temporaries
-//   F8 = scalar scale result
+//   F24 = scalar scale result (avoids callee-saved V8-V15)
+//   F25,F26 = Newton-Raphson temporaries
 //
 // Layout: out=0(FP), x=8(FP), weight=16(FP), D=24(FP), eps=32(FP), ret=36(FP)
 TEXT ·RMSNormF32(SB), NOSPLIT, $0-40
@@ -43,7 +44,6 @@ sumsq_loop8:
 	VLD1.P	16(R1), [V0.S4]
 	VLD1.P	16(R1), [V1.S4]
 
-	// V0 = x*x
 	// FMUL V2.4S, V0.4S, V0.4S
 	WORD	$0x6E20DC02
 	// FMUL V3.4S, V1.4S, V1.4S
@@ -90,8 +90,7 @@ sumsq_reduce:
 	// Horizontal reduce V4 to scalar
 	// FADDP V4.4S, V4.4S, V4.4S
 	WORD	$0x6E24D484
-	// FADDP S4, V4.2S  -- pairwise add remaining 2 lanes
-	// Encoding: FADDP (scalar) = 0x7E30D800 | (Rn<<5) | Rd
+	// FADDP S4, V4.2S
 	WORD	$0x7E30D884
 
 	// S4 now holds sum of squares.
@@ -104,27 +103,30 @@ sumsq_reduce:
 	FADDS	F1, F4, F4      // F4 = mean + eps
 
 	// Compute rsqrt(F4) via FRSQRTE + 2 Newton-Raphson iterations
-	// y0 = FRSQRTE(F4)
+	// y0 = FRSQRTE(S24, S4)
 	// FRSQRTE Sd, Sn: 0x7EA1D800 | (Rn<<5) | Rd
-	WORD	$0x7EA1D888  // FRSQRTE S8, S4
+	// Rn=V4=00100, Rd=V24=11000
+	WORD	$0x7EA1D898  // FRSQRTE S24, S4
 
 	// Newton step 1: y1 = y0 * FRSQRTS(F4, y0*y0)
-	FMULS	F8, F8, F9      // F9 = y0*y0
-	// FRSQRTS S10, S4, S9: 0x5EA0FC00 | (Rm<<16) | (Rn<<5) | Rd
-	WORD	$0x5EA9FC8A      // FRSQRTS S10, S4, S9
-	FMULS	F10, F8, F8     // F8 = y1
+	FMULS	F24, F24, F25    // F25 = y0*y0
+	// FRSQRTS S26, S4, S25: 0x5EA0FC00 | (Rm<<16) | (Rn<<5) | Rd
+	// Rm=V25=11001, Rn=V4=00100, Rd=V26=11010
+	WORD	$0x5EB9FC9A      // FRSQRTS S26, S4, S25
+	FMULS	F26, F24, F24    // F24 = y1
 
 	// Newton step 2: y2 = y1 * FRSQRTS(F4, y1*y1)
-	FMULS	F8, F8, F9      // F9 = y1*y1
-	WORD	$0x5EA9FC8A      // FRSQRTS S10, S4, S9
-	FMULS	F10, F8, F8     // F8 = y2 = scale
+	FMULS	F24, F24, F25    // F25 = y1*y1
+	WORD	$0x5EB9FC9A      // FRSQRTS S26, S4, S25
+	FMULS	F26, F24, F24    // F24 = y2 = scale
 
 	// Store return value
-	FMOVS	F8, ret+36(FP)
+	FMOVS	F24, ret+36(FP)
 
 	// ---- Pass 2: Normalize ----
 	// Broadcast scale to V6.4S
-	WORD	$0x4E040506     // DUP V6.4S, V8.S[0] -- broadcast scale
+	// DUP V6.4S, V24.S[0]: imm5=00100, Rn=V24=11000, Rd=V6=00110
+	WORD	$0x4E040706
 
 	// Restore x pointer
 	MOVD	R5, R1
@@ -158,7 +160,7 @@ norm_tail1:
 norm_scalar:
 	FMOVS	(R1), F0
 	FMOVS	(R2), F1
-	FMULS	F8, F0, F0     // x * scale
+	FMULS	F24, F0, F0    // x * scale
 	FMULS	F1, F0, F0     // * weight
 	FMOVS	F0, (R0)
 
@@ -169,4 +171,6 @@ norm_scalar:
 	CBNZ	R4, norm_scalar
 
 done:
+	// Go ABIInternal returns float32 in F0
+	FMOVS	F24, F0
 	RET

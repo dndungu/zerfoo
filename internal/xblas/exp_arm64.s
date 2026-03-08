@@ -24,6 +24,8 @@
 //   V22 = c4 = 1/24
 //   V23 = c5 = 1/120
 //
+// Scalar tail uses F24,F25 (avoids callee-saved V8-V15).
+//
 // Layout: out=0(FP), x=8(FP), n=16(FP)
 TEXT ·VexpF32(SB), NOSPLIT, $0-24
 	MOVD	out+0(FP), R0
@@ -109,16 +111,16 @@ exp_tail:
 
 exp_scalar:
 	// Process one element at a time using scalar float ops.
+	// Uses F24,F25 instead of F10,F11 to avoid callee-saved V8-V15.
 	FMOVS	(R1), F0
 
 	// n = round(x / ln2)
-	// Load 1/ln2 scalar constant
 	MOVW	$0x3FB8AA3B, R3
 	FMOVS	R3, F6
 	FMULS	F0, F6, F1
-	// FCVTNS W3, S1  (scalar float to signed int, round nearest)
+	// FCVTNS W3, S1
 	WORD	$0x1E240023
-	// SCVTF S2, W3  (int back to float)
+	// SCVTF S2, W3
 	WORD	$0x1E220062
 
 	// r = x - n*ln2
@@ -129,38 +131,38 @@ exp_scalar:
 
 	// Horner: poly = c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*c5))))
 	MOVW	$0x3C088889, R4
-	FMOVS	R4, F10                // c5
+	FMOVS	R4, F24                // c5
 	MOVW	$0x3D2AAAAB, R4
-	FMOVS	R4, F11                // c4
-	FMULS	F3, F10, F10           // r*c5
-	FADDS	F10, F11, F10          // c4 + r*c5
+	FMOVS	R4, F25                // c4
+	FMULS	F3, F24, F24           // r*c5
+	FADDS	F24, F25, F24          // c4 + r*c5
 
 	MOVW	$0x3E2AAAAB, R4
-	FMOVS	R4, F11                // c3
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25                // c3
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F000000, R4
-	FMOVS	R4, F11                // c2
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25                // c2
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F800000, R4
-	FMOVS	R4, F11                // c1
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R4, F25                // c1
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
-	FMOVS	R4, F11                // c0 (same as c1 = 1.0)
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10          // poly
+	FMOVS	R4, F25                // c0 (same as c1 = 1.0)
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24          // poly
 
 	// ldexp: add n<<23 to poly's float32 bits
 	LSL	$23, R3, R5
-	FMOVS	F10, R4
+	FMOVS	F24, R4
 	ADD	R5, R4, R4
-	FMOVS	R4, F10
+	FMOVS	R4, F24
 
-	FMOVS	F10, (R0)
+	FMOVS	F24, (R0)
 
 	ADD	$4, R0, R0
 	ADD	$4, R1, R1

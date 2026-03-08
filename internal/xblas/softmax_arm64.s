@@ -8,6 +8,7 @@
 //   Pass 3: x[i] *= 1/sum
 //
 // Uses the same degree-5 Horner exp polynomial as VexpF32.
+// All registers avoid callee-saved V8-V15.
 //
 // Layout: data=0(FP), n=8(FP)
 TEXT ·SoftmaxF32(SB), NOSPLIT, $0-16
@@ -48,7 +49,7 @@ max_scalar:
 
 max_reduce:
 	// Reduce V30.4S to scalar max in F31
-	// FMAXV S0, V30.4S  (reduce 4 lanes to scalar max)
+	// FMAXV S0, V30.4S
 	WORD	$0x6E30F800
 	FMAXS	F0, F31, F31
 	// Now F31 = global max
@@ -72,7 +73,7 @@ max_reduce:
 	VDUP	R3, V23.S4
 
 	// Broadcast max into V24.S4 for vector subtract
-	WORD	$0x4E0407F8     // DUP V24.4S, V31.S[0] -- broadcast max
+	WORD	$0x4E0407F8     // DUP V24.4S, V31.S[0]
 
 	// V29 = sum accumulator (zero)
 	VEOR	V29.B16, V29.B16, V29.B16
@@ -148,7 +149,7 @@ exp_scalar:
 	FMOVS	(R4), F0
 	FSUBS	F31, F0, F0           // x - max
 
-	// Scalar exp (same as VexpF32 scalar path)
+	// Scalar exp using F24,F25 (avoids callee-saved V8-V15)
 	MOVW	$0x3FB8AA3B, R3
 	FMOVS	R3, F6
 	FMULS	F0, F6, F1            // x * (1/ln2)
@@ -164,40 +165,40 @@ exp_scalar:
 
 	// Horner
 	MOVW	$0x3C088889, R6
-	FMOVS	R6, F10                // c5
+	FMOVS	R6, F24                // c5
 	MOVW	$0x3D2AAAAB, R6
-	FMOVS	R6, F11                // c4
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R6, F25                // c4
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3E2AAAAB, R6
-	FMOVS	R6, F11                // c3
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R6, F25                // c3
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F000000, R6
-	FMOVS	R6, F11                // c2
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R6, F25                // c2
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
 	MOVW	$0x3F800000, R6
-	FMOVS	R6, F11                // c1
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R6, F25                // c1
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
-	FMOVS	R6, F11                // c0
-	FMULS	F3, F10, F10
-	FADDS	F10, F11, F10
+	FMOVS	R6, F25                // c0
+	FMULS	F3, F24, F24
+	FADDS	F24, F25, F24
 
 	// ldexp
 	LSL	$23, R3, R7
-	FMOVS	F10, R6
+	FMOVS	F24, R6
 	ADD	R7, R6, R6
-	FMOVS	R6, F10
+	FMOVS	R6, F24
 
 	// Store and accumulate
-	FMOVS	F10, (R4)
-	FADDS	F10, F28, F28
+	FMOVS	F24, (R4)
+	FADDS	F24, F28, F28
 
 	ADD	$4, R4, R4
 	SUB	$1, R5, R5
@@ -205,11 +206,9 @@ exp_scalar:
 
 exp_reduce:
 	// Reduce V29.4S sum to scalar, add to F28
-	// FADDP V29.4S, V29.4S, V29.4S -> V29.4S (pairwise add)
+	// FADDP V29.4S, V29.4S, V29.4S
 	WORD	$0x6E3DD7BD
-	// Now V29.S[0]+V29.S[1] in V29.S[0], V29.S[2]+V29.S[3] in V29.S[1]
-	// One more pairwise add to get final sum in S29
-	// FADDP S29, V29.2S (scalar pairwise)
+	// FADDP S29, V29.2S
 	WORD	$0x7E30DBBD
 	// Add scalar tail sum
 	FADDS	F29, F28, F28
@@ -219,7 +218,7 @@ exp_reduce:
 	MOVW	$0x3F800000, R3
 	FMOVS	R3, F0
 	FDIVS	F28, F0, F27           // F27 = 1/sum
-	WORD	$0x4E040779     // DUP V25.4S, V27.S[0] -- broadcast 1/sum
+	WORD	$0x4E040779     // DUP V25.4S, V27.S[0]
 
 	MOVD	R0, R4
 	MOVD	R1, R5
