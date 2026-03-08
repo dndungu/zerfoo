@@ -139,29 +139,29 @@ See docs/design.md section 15.16. Remaining:
   - Fix: engine.MatMul with precomputed Fourier basis matrix.
   - Dependencies: none.
 
-- [ ] T96.11 Refactor S4 layer to compose engine primitives  Owner: TBD  Est: 3h
+- [x] T96.11 Refactor S4 layer to compose engine primitives  Owner: TBD  Est: 3h  2026 03 07
   - File: `layers/sequence/s4.go` lines 184-222.
   - Fix: Per-step engine.Exp, engine.Mul, engine.Add for scan.
   - Dependencies: none.
 
-- [ ] S96.11.1 S4 composition parity test  Owner: TBD  Est: 1h
+- [x] S96.11.1 S4 composition parity test  Owner: TBD  Est: 1h  2026 03 07
 
-- [ ] T96.12 Refactor SpectralFeature to remove Gonum FFT  Owner: TBD  Est: 2h
+- [x] T96.12 Refactor SpectralFeature to remove Gonum FFT  Owner: TBD  Est: 2h  2026 03 07
   - File: `layers/features/spectral.go` lines 57-77.
   - Fix: engine.MatMul with precomputed Fourier basis.
   - Dependencies: none.
 
-- [ ] S96.12.1 SpectralFeature composition parity test  Owner: TBD  Est: 45m
+- [x] S96.12.1 SpectralFeature composition parity test  Owner: TBD  Est: 45m  2026 03 07
 
 ##### Quality Gate
 
-- [ ] T96.13 Run golangci-lint on all modified layer packages  Owner: TBD  Est: 30m
+- [x] T96.13 Run golangci-lint on all modified layer packages  Owner: TBD  Est: 30m  2026 03 07
   - Dependencies: T96.6-T96.12.
 
-- [ ] T96.14 Run full test suite and verify no regressions  Owner: TBD  Est: 1h
+- [x] T96.14 Run full test suite and verify no regressions  Owner: TBD  Est: 1h  2026 03 07
   - Dependencies: T96.13.
 
-- [ ] S96.14.1 Composition audit verification  Owner: TBD  Est: 30m
+- [x] S96.14.1 Composition audit verification  Owner: TBD  Est: 30m  2026 03 07
   - Grep all layers Forward() methods for tensor.Data() compute access.
 
 ---
@@ -828,20 +828,29 @@ A task is done when:
 
 ## 8. Progress Log
 
-### Change Summary -- 2026-03-07 (v15)
+### Change Summary -- 2026-03-07 (v16)
 
-Wave C4 complete (T97.6 + S97.6.1). UnaryOp opaque fallback and Sigmoid
-composition refactor done.
+Track 0 composition complete. All layer packages refactored to use engine
+primitives (no raw tensor.Data() access). Quality gates pass.
 
-**Track C completed tasks (Wave C4):**
+**Track 0 completed tasks:**
+- T96.11 + S96.11.1: S4 layer refactored from raw data loops to engine.Exp,
+  engine.Mul, engine.Add, engine.MulScalar per scan step. Commit 784fcae.
+- T96.12 + S96.12.1: SpectralFingerprint refactored from gonum FFT to
+  precomputed DFT cosine/sine basis + engine.MatMul + engine.Sqrt. N/2 bin
+  limit matches gonum behavior. Commit 50c8f1b.
+- T96.13: golangci-lint clean on all layers/. 0 issues.
+- T96.14 + S96.14.1: Full test suite passes. No tensor.Data() in refactored
+  layer Forward methods.
+
+**Track C completed (Wave C4):**
 - T97.6 + S97.6.1: EngineProxy marks UnaryOp as opaque via MarkOpaque().
   CompileTraced returns error when opaque ops detected. Sigmoid refactored
   from BaseActivation/UnaryOp to composed engine.Exp + engine.AddScalar +
-  engine.Div. SwiGLU backward updated from UnaryOp to MulScalar + AddScalar.
-  Commits e553706, 0908d73, 19762fc.
+  engine.Div. Commits e553706, 0908d73, 19762fc.
 
-**Next:** T96.11 (S4 composition), T96.12 (SpectralFeature composition),
-then T96.13-T96.14 quality gates.
+**Remaining:** T99.4, T98.2, T98.3 (require DGX Spark). T100.1-T100.2
+(integration, blocked on E98/E99). Track A (E87-E89, GPU toolchain).
 
 ### Change Summary -- 2026-03-08 (v14)
 
