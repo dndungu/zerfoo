@@ -30,6 +30,7 @@ type CPUEngine[T tensor.Numeric] struct {
 	collector  metrics.Collector
 	memTracker *MemoryTracker
 	pool       *workerpool.Pool
+	arena      *TensorArena // float32 buffer pool; nil for non-float32 engines
 }
 
 // Default histogram buckets for operation duration (seconds).
@@ -397,13 +398,19 @@ func NewCPUEngine[T tensor.Numeric](ops numeric.Arithmetic[T]) *CPUEngine[T] {
 	pool := workerpool.New(n)
 	computePool = pool
 	xblas.InitPool(n)
-	return &CPUEngine[T]{
+	e := &CPUEngine[T]{
 		ops:        ops,
 		logger:     log.Nop(),
 		collector:  metrics.Nop(),
 		memTracker: NewMemoryTracker(0),
 		pool:       pool,
 	}
+	// Enable arena for float32 engines.
+	var zero T
+	if _, ok := any(zero).(float32); ok {
+		e.arena = &TensorArena{}
+	}
+	return e
 }
 
 
@@ -476,6 +483,20 @@ func (e *CPUEngine[T]) getOrCreateDest(shape []int, dst ...*tensor.TensorNumeric
 	bytes := e.tensorBytes(shape)
 	if err := e.memTracker.Alloc(bytes); err != nil {
 		return nil, fmt.Errorf("tensor allocation (%v): %w", shape, err)
+	}
+	// Use arena for float32 engines to reduce GC pressure.
+	if e.arena != nil {
+		size := 1
+		for _, d := range shape {
+			size *= d
+		}
+		buf := e.arena.Get(size)
+		out, err := tensor.New(shape, any(buf).([]T))
+		if err != nil {
+			e.memTracker.Free(bytes)
+			return nil, err
+		}
+		return out, nil
 	}
 	out, err := tensor.New[T](shape, nil)
 	if err != nil {
