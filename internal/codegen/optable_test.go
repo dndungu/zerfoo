@@ -23,6 +23,9 @@ func TestEmitterRegistered(t *testing.T) {
 		{"Slice", 1}, {"Repeat", 1},
 		{"MatMul", 2}, {"MatMulNBits", 2},
 		{"Gather", 2}, {"Concat", 1}, {"Reshape", 1}, {"Transpose", 1},
+		{"KVCacheAppendK", 2}, {"KVCacheAppendV", 2},
+		{"KVCacheGetK", 1}, {"KVCacheGetV", 1},
+		{"KVCacheSeqLen", 0},
 	}
 	for _, op := range gemmaOps {
 		inputIdx := make([]int, op.numInputs)
@@ -70,6 +73,11 @@ func TestEmitterOutputFormat(t *testing.T) {
 		{"Repeat", 1, "dev_repeat"},
 		{"MatMul", 2, "dev_gemv"},
 		{"Gather", 2, "dev_gather"},
+		{"KVCacheAppendK", 2, "dev_kv_append"},
+		{"KVCacheAppendV", 2, "dev_kv_append"},
+		{"KVCacheGetK", 1, "kv_k["},
+		{"KVCacheGetV", 1, "kv_v["},
+		{"KVCacheSeqLen", 0, "kv_seq_len"},
 	}
 	for _, tc := range tests {
 		meta := graph.InstructionMeta{
@@ -89,5 +97,120 @@ func TestEmitterOutputFormat(t *testing.T) {
 		if !strings.Contains(code, tc.wantSub) {
 			t.Errorf("op %q: output %q missing %q", tc.op, code, tc.wantSub)
 		}
+	}
+}
+
+func TestKVCacheAppendEmitters(t *testing.T) {
+	tests := []struct {
+		name    string
+		op      string
+		layer   int
+		wantArr string
+	}{
+		{"append_k_layer0", "KVCacheAppendK", 0, "kv_k[0]"},
+		{"append_k_layer5", "KVCacheAppendK", 5, "kv_k[5]"},
+		{"append_v_layer0", "KVCacheAppendV", 0, "kv_v[0]"},
+		{"append_v_layer3", "KVCacheAppendV", 3, "kv_v[3]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := graph.InstructionMeta{
+				OpName:    tc.op,
+				InputIdx:  []int{2, tc.layer}, // slot 2 is data, InputIdx[1] = layer
+				OutputIdx: 5,
+			}
+			inputs := []SlotInfo{{Shape: []int{8, 128}}} // head_dim = 128
+			code, err := Emit(meta, inputs)
+			if err != nil {
+				t.Fatalf("Emit: %v", err)
+			}
+			if !strings.Contains(code, tc.wantArr) {
+				t.Errorf("want %q in %q", tc.wantArr, code)
+			}
+			if !strings.Contains(code, "dev_kv_append") {
+				t.Errorf("want dev_kv_append in %q", code)
+			}
+			if !strings.Contains(code, "seq_pos") {
+				t.Errorf("want seq_pos in %q", code)
+			}
+			if !strings.Contains(code, "128") {
+				t.Errorf("want head_dim 128 in %q", code)
+			}
+		})
+	}
+}
+
+func TestKVCacheGetEmitters(t *testing.T) {
+	tests := []struct {
+		name    string
+		op      string
+		layer   int
+		wantArr string
+	}{
+		{"get_k_layer0", "KVCacheGetK", 0, "kv_k[0]"},
+		{"get_k_layer7", "KVCacheGetK", 7, "kv_k[7]"},
+		{"get_v_layer0", "KVCacheGetV", 0, "kv_v[0]"},
+		{"get_v_layer2", "KVCacheGetV", 2, "kv_v[2]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := graph.InstructionMeta{
+				OpName:    tc.op,
+				InputIdx:  []int{tc.layer},
+				OutputIdx: 8,
+			}
+			code, err := Emit(meta, nil)
+			if err != nil {
+				t.Fatalf("Emit: %v", err)
+			}
+			if !strings.Contains(code, tc.wantArr) {
+				t.Errorf("want %q in %q", tc.wantArr, code)
+			}
+			if !strings.Contains(code, "float* slot_8") {
+				t.Errorf("want pointer alias slot_8 in %q", code)
+			}
+		})
+	}
+}
+
+func TestKVCacheSeqLenEmitter(t *testing.T) {
+	meta := graph.InstructionMeta{
+		OpName:    "KVCacheSeqLen",
+		InputIdx:  nil,
+		OutputIdx: 3,
+	}
+	code, err := Emit(meta, nil)
+	if err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if !strings.Contains(code, "kv_seq_len") {
+		t.Errorf("want kv_seq_len in %q", code)
+	}
+	if !strings.Contains(code, "seq_len_3") {
+		t.Errorf("want seq_len_3 in %q", code)
+	}
+}
+
+func TestKVCacheAppendInsufficientInputs(t *testing.T) {
+	meta := graph.InstructionMeta{
+		OpName:    "KVCacheAppendK",
+		InputIdx:  []int{0}, // only 1 input, need 2
+		OutputIdx: 1,
+	}
+	_, err := Emit(meta, nil)
+	if err == nil {
+		t.Fatal("expected error for insufficient inputs")
+	}
+}
+
+func TestKVCacheGetInsufficientInputs(t *testing.T) {
+	meta := graph.InstructionMeta{
+		OpName:    "KVCacheGetK",
+		InputIdx:  nil, // no inputs
+		OutputIdx: 1,
+	}
+	_, err := Emit(meta, nil)
+	if err == nil {
+		t.Fatal("expected error for insufficient inputs")
 	}
 }

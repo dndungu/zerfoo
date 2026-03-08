@@ -49,6 +49,7 @@ var emitters = map[string]OpEmitter{
 	"Softmax":    softmaxOp,
 	"ReduceSum":  reduceOp("dev_reduce_sum"),
 	"ReduceMean": reduceOp("dev_reduce_mean"),
+	"Sum":        reduceOp("dev_reduce_sum"),
 
 	// Memory ops
 	"MatMul":      gemvOp,
@@ -63,6 +64,13 @@ var emitters = map[string]OpEmitter{
 	"Concat":    reshapeOp, // reindex in registers
 	"Reshape":   reshapeOp, // no-op in flat memory
 	"Transpose": transposeOp,
+
+	// KV cache ops
+	"KVCacheAppendK": kvCacheAppendOp("kv_k"),
+	"KVCacheAppendV": kvCacheAppendOp("kv_v"),
+	"KVCacheGetK":    kvCacheGetOp("kv_k"),
+	"KVCacheGetV":    kvCacheGetOp("kv_v"),
+	"KVCacheSeqLen":  kvCacheSeqLenOp,
 }
 
 // Emit generates CUDA code for a single instruction. Returns an error
@@ -198,4 +206,42 @@ func reduceOp(fn string) OpEmitter {
 		return fmt.Sprintf("  %s(slot_%d, slot_%d, axis_%d, %d);",
 			fn, meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, dim), nil
 	}
+}
+
+// kvCacheAppendOp emits a dev_kv_append call that writes new K or V data
+// into the layer's KV cache at the current sequence position.
+// InputIdx[0] = source data slot, InputIdx[1] = layer index (encoded),
+// OutputIdx = destination slot alias.
+func kvCacheAppendOp(arrayName string) OpEmitter {
+	return func(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+		if len(meta.InputIdx) < 2 {
+			return "", fmt.Errorf("KVCacheAppend requires 2 inputs (data slot, layer)")
+		}
+		layer := meta.InputIdx[1]
+		headDim := 0
+		if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
+			headDim = inputs[0].Shape[len(inputs[0].Shape)-1]
+		}
+		return fmt.Sprintf("  dev_kv_append(%s[%d], slot_%d, seq_pos, %d);",
+			arrayName, layer, meta.InputIdx[0], headDim), nil
+	}
+}
+
+// kvCacheGetOp emits a pointer alias that points into the layer's KV cache.
+// InputIdx[0] = layer index (encoded), OutputIdx = destination slot.
+func kvCacheGetOp(arrayName string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		if len(meta.InputIdx) < 1 {
+			return "", fmt.Errorf("KVCacheGet requires 1 input (layer)")
+		}
+		layer := meta.InputIdx[0]
+		return fmt.Sprintf("  float* slot_%d = %s[%d];",
+			meta.OutputIdx, arrayName, layer), nil
+	}
+}
+
+// kvCacheSeqLenOp emits an integer assignment from the kv_seq_len kernel arg.
+func kvCacheSeqLenOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  int seq_len_%d = kv_seq_len;",
+		meta.OutputIdx), nil
 }

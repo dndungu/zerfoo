@@ -118,6 +118,94 @@ func TestEmitMegakernelMultiOp(t *testing.T) {
 	}
 }
 
+func TestEmitMegakernelKVCache(t *testing.T) {
+	// Graph: input -> KVCacheAppendK(layer=0) -> KVCacheGetK(layer=0) -> output
+	instructions := []graph.InstructionMeta{
+		{OpName: "KVCacheAppendK", InputIdx: []int{0, 0}, OutputIdx: 1},
+		{OpName: "KVCacheGetK", InputIdx: []int{0}, OutputIdx: 2},
+		{OpName: "KVCacheSeqLen", InputIdx: nil, OutputIdx: 3},
+	}
+	slotShapes := [][]int{
+		{8, 128}, // input K data
+		{8, 128}, // append output
+		{8, 128}, // get output
+		{1},      // seq_len
+	}
+	cfg := MegakernelConfig{
+		Instructions: instructions,
+		SlotShapes:   slotShapes,
+		InputSlots:   []int{0},
+		OutputSlot:   2,
+		NumKVLayers:  26,
+	}
+
+	code, err := EmitMegakernel(cfg)
+	if err != nil {
+		t.Fatalf("EmitMegakernel: %v", err)
+	}
+
+	// KV cache kernel args should be present.
+	checks := []string{
+		"float** __restrict__ kv_k",
+		"float** __restrict__ kv_v",
+		"int seq_pos",
+		"int kv_seq_len",
+		"dev_kv_append",
+		"kv_k[0]",
+		"kv_seq_len",
+		"seq_len_3",
+	}
+	for _, want := range checks {
+		if !strings.Contains(code, want) {
+			t.Errorf("generated code missing %q", want)
+		}
+	}
+
+	// Launch wrapper should also pass KV args.
+	if !strings.Contains(code, "float** kv_k") {
+		t.Error("launch wrapper missing kv_k parameter")
+	}
+	if !strings.Contains(code, "float** kv_v") {
+		t.Error("launch wrapper missing kv_v parameter")
+	}
+	if !strings.Contains(code, "kv_k, kv_v, seq_pos, kv_seq_len") {
+		t.Error("launch wrapper kernel call missing KV args")
+	}
+}
+
+func TestEmitMegakernelNoKVCache(t *testing.T) {
+	// When NumKVLayers is 0, no KV cache args should appear.
+	instructions := []graph.InstructionMeta{
+		{OpName: "Add", InputIdx: []int{0, 1}, OutputIdx: 2},
+	}
+	cfg := MegakernelConfig{
+		Instructions: instructions,
+		SlotShapes:   [][]int{{1, 4}, {1, 4}, {1, 4}},
+		FrozenSlots:  []FrozenSlotMeta{{SlotIdx: 1}},
+		InputSlots:   []int{0},
+		OutputSlot:   2,
+		NumKVLayers:  0,
+	}
+
+	code, err := EmitMegakernel(cfg)
+	if err != nil {
+		t.Fatalf("EmitMegakernel: %v", err)
+	}
+
+	if strings.Contains(code, "kv_k") {
+		t.Error("NumKVLayers=0 should not emit kv_k")
+	}
+	if strings.Contains(code, "kv_v") {
+		t.Error("NumKVLayers=0 should not emit kv_v")
+	}
+	if strings.Contains(code, "seq_pos") {
+		t.Error("NumKVLayers=0 should not emit seq_pos")
+	}
+	if strings.Contains(code, "kv_seq_len") {
+		t.Error("NumKVLayers=0 should not emit kv_seq_len")
+	}
+}
+
 func TestComputeWorkspaceLayout(t *testing.T) {
 	cfg := MegakernelConfig{
 		Instructions: []graph.InstructionMeta{

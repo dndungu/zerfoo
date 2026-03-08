@@ -20,6 +20,7 @@ type MegakernelConfig struct {
 	FrozenSlots  []FrozenSlotMeta
 	InputSlots   []int
 	OutputSlot   int
+	NumKVLayers  int // number of KV cache layers (0 = no KV cache)
 }
 
 // WorkspaceLayout describes the memory layout for megakernel slot buffers.
@@ -151,6 +152,12 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 	b.WriteString("    float* __restrict__ workspace,\n")
 	b.WriteString("    const float* const* __restrict__ frozen,\n")
 	b.WriteString("    int pos,\n")
+	if cfg.NumKVLayers > 0 {
+		b.WriteString("    float** __restrict__ kv_k,\n")
+		b.WriteString("    float** __restrict__ kv_v,\n")
+		b.WriteString("    int seq_pos,\n")
+		b.WriteString("    int kv_seq_len,\n")
+	}
 	b.WriteString("    int num_elements\n")
 	b.WriteString(") {\n")
 	b.WriteString("  int tid = blockIdx.x * blockDim.x + threadIdx.x;\n")
@@ -194,10 +201,20 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 	b.WriteString("    float* workspace,\n")
 	b.WriteString("    const float* const* frozen,\n")
 	b.WriteString("    int pos,\n")
+	if cfg.NumKVLayers > 0 {
+		b.WriteString("    float** kv_k,\n")
+		b.WriteString("    float** kv_v,\n")
+		b.WriteString("    int seq_pos,\n")
+		b.WriteString("    int kv_seq_len,\n")
+	}
 	b.WriteString("    int num_elements\n")
 	b.WriteString(") {\n")
 	b.WriteString("  int grid = (num_elements + 255) / 256;\n")
-	b.WriteString("  megakernel<<<grid, 256>>>(workspace, frozen, pos, num_elements);\n")
+	if cfg.NumKVLayers > 0 {
+		b.WriteString("  megakernel<<<grid, 256>>>(workspace, frozen, pos, kv_k, kv_v, seq_pos, kv_seq_len, num_elements);\n")
+	} else {
+		b.WriteString("  megakernel<<<grid, 256>>>(workspace, frozen, pos, num_elements);\n")
+	}
 	b.WriteString("  return (int)cudaDeviceSynchronize();\n")
 	b.WriteString("}\n")
 
