@@ -25,6 +25,11 @@ func NewEngineProxy[T tensor.Numeric](real Engine[T]) *EngineProxy[T] {
 	return &EngineProxy[T]{real: real}
 }
 
+// Real returns the underlying engine.
+func (p *EngineProxy[T]) Real() Engine[T] {
+	return p.real
+}
+
 // StartTracing enables tracing with the given recorder.
 func (p *EngineProxy[T]) StartTracing(tracer TraceRecorder[T]) {
 	p.tracer = tracer
@@ -185,7 +190,7 @@ func (p *EngineProxy[T]) Rsqrt(ctx context.Context, a *tensor.TensorNumeric[T], 
 func (p *EngineProxy[T]) MulScalar(ctx context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.MulScalar(ctx, a, scalar, dst...)
 	if err == nil {
-		p.record("MulScalar", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("MulScalar", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"scalar": scalar})
 	}
 	return result, err
 }
@@ -193,7 +198,7 @@ func (p *EngineProxy[T]) MulScalar(ctx context.Context, a *tensor.TensorNumeric[
 func (p *EngineProxy[T]) AddScalar(ctx context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.AddScalar(ctx, a, scalar, dst...)
 	if err == nil {
-		p.record("AddScalar", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("AddScalar", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"scalar": scalar})
 	}
 	return result, err
 }
@@ -201,7 +206,7 @@ func (p *EngineProxy[T]) AddScalar(ctx context.Context, a *tensor.TensorNumeric[
 func (p *EngineProxy[T]) DivScalar(ctx context.Context, a *tensor.TensorNumeric[T], scalar T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.DivScalar(ctx, a, scalar, dst...)
 	if err == nil {
-		p.record("DivScalar", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("DivScalar", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"scalar": scalar})
 	}
 	return result, err
 }
@@ -209,7 +214,7 @@ func (p *EngineProxy[T]) DivScalar(ctx context.Context, a *tensor.TensorNumeric[
 func (p *EngineProxy[T]) Softmax(ctx context.Context, a *tensor.TensorNumeric[T], axis int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Softmax(ctx, a, axis, dst...)
 	if err == nil {
-		p.record("Softmax", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("Softmax", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"axis": axis})
 	}
 	return result, err
 }
@@ -217,7 +222,7 @@ func (p *EngineProxy[T]) Softmax(ctx context.Context, a *tensor.TensorNumeric[T]
 func (p *EngineProxy[T]) ReduceSum(ctx context.Context, a *tensor.TensorNumeric[T], axis int, keepDims bool, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.ReduceSum(ctx, a, axis, keepDims, dst...)
 	if err == nil {
-		p.record("ReduceSum", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("ReduceSum", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"axis": axis, "keepDims": keepDims})
 	}
 	return result, err
 }
@@ -225,7 +230,7 @@ func (p *EngineProxy[T]) ReduceSum(ctx context.Context, a *tensor.TensorNumeric[
 func (p *EngineProxy[T]) ReduceMean(ctx context.Context, a *tensor.TensorNumeric[T], axis int, keepDims bool, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.ReduceMean(ctx, a, axis, keepDims, dst...)
 	if err == nil {
-		p.record("ReduceMean", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("ReduceMean", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"axis": axis, "keepDims": keepDims})
 	}
 	return result, err
 }
@@ -233,7 +238,7 @@ func (p *EngineProxy[T]) ReduceMean(ctx context.Context, a *tensor.TensorNumeric
 func (p *EngineProxy[T]) Reshape(ctx context.Context, a *tensor.TensorNumeric[T], shape []int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Reshape(ctx, a, shape, dst...)
 	if err == nil {
-		p.record("Reshape", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("Reshape", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"shape": shape})
 	}
 	return result, err
 }
@@ -241,7 +246,7 @@ func (p *EngineProxy[T]) Reshape(ctx context.Context, a *tensor.TensorNumeric[T]
 func (p *EngineProxy[T]) Transpose(ctx context.Context, a *tensor.TensorNumeric[T], axes []int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Transpose(ctx, a, axes, dst...)
 	if err == nil {
-		p.record("Transpose", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("Transpose", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"axes": axes})
 	}
 	return result, err
 }
@@ -249,7 +254,7 @@ func (p *EngineProxy[T]) Transpose(ctx context.Context, a *tensor.TensorNumeric[
 func (p *EngineProxy[T]) Concat(ctx context.Context, tensors []*tensor.TensorNumeric[T], axis int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Concat(ctx, tensors, axis, dst...)
 	if err == nil {
-		p.record("Concat", tensors, result, nil)
+		p.record("Concat", tensors, result, map[string]any{"axis": axis})
 	}
 	return result, err
 }
@@ -268,7 +273,7 @@ func (p *EngineProxy[T]) Split(ctx context.Context, a *tensor.TensorNumeric[T], 
 func (p *EngineProxy[T]) Repeat(ctx context.Context, a *tensor.TensorNumeric[T], axis int, repetitions int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Repeat(ctx, a, axis, repetitions, dst...)
 	if err == nil {
-		p.record("Repeat", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("Repeat", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"axis": axis, "repetitions": repetitions})
 	}
 	return result, err
 }
@@ -276,7 +281,7 @@ func (p *EngineProxy[T]) Repeat(ctx context.Context, a *tensor.TensorNumeric[T],
 func (p *EngineProxy[T]) Sum(ctx context.Context, a *tensor.TensorNumeric[T], axis int, keepDims bool, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Sum(ctx, a, axis, keepDims, dst...)
 	if err == nil {
-		p.record("Sum", []*tensor.TensorNumeric[T]{a}, result, nil)
+		p.record("Sum", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"axis": axis, "keepDims": keepDims})
 	}
 	return result, err
 }

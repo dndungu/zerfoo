@@ -84,6 +84,18 @@ func (t *Tracer[T]) TracedOps() []TracedOp {
 	return t.ops
 }
 
+// SlotFor returns the existing slot for a tensor or assigns a new one.
+// This is the exported version of slotFor.
+func (t *Tracer[T]) SlotFor(tn *tensor.TensorNumeric[T]) int {
+	return t.slotFor(tn)
+}
+
+// NextSlot returns the next slot index that would be assigned.
+// This indicates the total number of slots allocated.
+func (t *Tracer[T]) NextSlot() int {
+	return t.nextSlot
+}
+
 // SlotShapes returns the shape for each slot index.
 func (t *Tracer[T]) SlotShapes() map[int][]int {
 	return t.shapes
