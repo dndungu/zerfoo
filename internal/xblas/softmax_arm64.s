@@ -210,7 +210,7 @@ exp_reduce:
 	// Now V29.S[0]+V29.S[1] in V29.S[0], V29.S[2]+V29.S[3] in V29.S[1]
 	// One more pairwise add to get final sum in S29
 	// FADDP S29, V29.2S (scalar pairwise)
-	WORD	$0x7E30D7BD
+	WORD	$0x7E30DBBD
 	// Add scalar tail sum
 	FADDS	F29, F28, F28
 	// F28 = total sum
