@@ -13,6 +13,25 @@ import (
 	"github.com/zerfoo/zerfoo/types"
 )
 
+// topKIndices returns the indices of the k largest elements in data.
+// This is pure integer routing logic with no tensor compute.
+func topKIndices[T tensor.Numeric](data []T, k int, ops numeric.Arithmetic[T]) []int {
+	n := len(data)
+	if k > n {
+		k = n
+	}
+	idxs := make([]int, n)
+	for i := range idxs {
+		idxs[i] = i
+	}
+	sort.Slice(idxs, func(a, b int) bool {
+		return ops.GreaterThan(data[idxs[a]], data[idxs[b]])
+	})
+	out := make([]int, k)
+	copy(out, idxs[:k])
+	return out
+}
+
 // MoEGate computes sparse top-k expert routing for Mixture of Experts.
 //
 // Forward expects exactly two inputs:
@@ -38,12 +57,12 @@ func NewMoEGate[T tensor.Numeric](engine compute.Engine[T], ops numeric.Arithmet
 	return &MoEGate[T]{engine: engine, ops: ops, topK: topK}
 }
 
-// route returns (expertIndices [seqLen][topK], expertWeights [seqLen][topK]).
+// route returns (expertIndices [seqLen][topK], normalizedWeights [seqLen, topK] tensor).
 // It is called by both Forward and MixtureOfExperts.
 func (g *MoEGate[T]) route(
 	ctx context.Context,
 	hiddenStates, gateWeight *tensor.TensorNumeric[T],
-) ([][]int, [][]T, error) {
+) ([][]int, *tensor.TensorNumeric[T], error) {
 	gwT, err := g.engine.Transpose(ctx, gateWeight, []int{1, 0})
 	if err != nil {
 		return nil, nil, fmt.Errorf("MoEGate: transpose gateWeight: %w", err)
@@ -65,38 +84,35 @@ func (g *MoEGate[T]) route(
 		topK = numExperts
 	}
 
+	// Select top-k indices per row (integer routing, no tensor compute).
 	indices := make([][]int, seqLen)
-	weights := make([][]T, seqLen)
-
+	topVals := make([]T, seqLen*topK)
 	for t := 0; t < seqLen; t++ {
 		rowData := probData[t*numExperts : (t+1)*numExperts]
-
-		idxs := make([]int, numExperts)
-		for i := range idxs {
-			idxs[i] = i
-		}
-		sort.Slice(idxs, func(a, b int) bool {
-			return g.ops.GreaterThan(rowData[idxs[a]], rowData[idxs[b]])
-		})
-
-		topIdxs := make([]int, topK)
-		copy(topIdxs, idxs[:topK])
-
-		topWeights := make([]T, topK)
-		rowSum := g.ops.FromFloat64(0)
-		for k, idx := range topIdxs {
-			topWeights[k] = rowData[idx]
-			rowSum = g.ops.Add(rowSum, topWeights[k])
-		}
-		for k := range topWeights {
-			topWeights[k] = g.ops.Div(topWeights[k], rowSum)
-		}
-
+		topIdxs := topKIndices(rowData, topK, g.ops)
 		indices[t] = topIdxs
-		weights[t] = topWeights
+		for k, idx := range topIdxs {
+			topVals[t*topK+k] = rowData[idx]
+		}
 	}
 
-	return indices, weights, nil
+	// Build [seqLen, topK] tensor of selected weights.
+	topWeights, err := tensor.New[T]([]int{seqLen, topK}, topVals)
+	if err != nil {
+		return nil, nil, fmt.Errorf("MoEGate: create top weights tensor: %w", err)
+	}
+
+	// Normalize via engine: sum along axis 1, then divide.
+	rowSums, err := g.engine.Sum(ctx, topWeights, 1, true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("MoEGate: sum top weights: %w", err)
+	}
+	normalized, err := g.engine.Div(ctx, topWeights, rowSums)
+	if err != nil {
+		return nil, nil, fmt.Errorf("MoEGate: normalize top weights: %w", err)
+	}
+
+	return indices, normalized, nil
 }
 
 // Forward returns normalized expert weights shaped [seqLen, topK].
@@ -105,26 +121,13 @@ func (g *MoEGate[T]) Forward(ctx context.Context, inputs ...*tensor.TensorNumeri
 		return nil, fmt.Errorf("MoEGate requires exactly 2 inputs (hiddenStates, gateWeight), got %d", len(inputs))
 	}
 
-	indices, weights, err := g.route(ctx, inputs[0], inputs[1])
+	_, weights, err := g.route(ctx, inputs[0], inputs[1])
 	if err != nil {
 		return nil, err
 	}
 
-	seqLen := len(indices)
-	topK := g.topK
-	outData := make([]T, seqLen*topK)
-	for t := 0; t < seqLen; t++ {
-		for k := 0; k < topK; k++ {
-			outData[t*topK+k] = weights[t][k]
-		}
-	}
-
-	out, err := tensor.New[T]([]int{seqLen, topK}, outData)
-	if err != nil {
-		return nil, fmt.Errorf("MoEGate: create output tensor: %w", err)
-	}
-	g.outputShape = out.Shape()
-	return out, nil
+	g.outputShape = weights.Shape()
+	return weights, nil
 }
 
 // Backward returns nil (inference-only).
@@ -228,20 +231,30 @@ func (m *MixtureOfExperts[T]) Forward(ctx context.Context, inputs ...*tensor.Ten
 		return nil, fmt.Errorf("MixtureOfExperts: hiddenStates must be 2D [seqLen, modelDim], got shape %v", hsShape)
 	}
 	seqLen, modelDim := hsShape[0], hsShape[1]
-	hsData := hiddenStates.Data()
 
 	indices, weights, err := m.gate.route(ctx, hiddenStates, gateWeight)
 	if err != nil {
 		return nil, fmt.Errorf("MixtureOfExperts: gate routing: %w", err)
 	}
+	weightData := weights.Data()
 
-	outData := make([]T, seqLen*modelDim)
+	// Initialize accumulator to zeros [seqLen, modelDim].
+	zeroData := make([]T, seqLen*modelDim)
+	out, err := tensor.New[T]([]int{seqLen, modelDim}, zeroData)
+	if err != nil {
+		return nil, fmt.Errorf("MixtureOfExperts: create output tensor: %w", err)
+	}
+
+	topK := m.topK
+	if topK > len(indices[0]) {
+		topK = len(indices[0])
+	}
+
 	for t := 0; t < seqLen; t++ {
-		tokenSlice := make([]T, modelDim)
-		copy(tokenSlice, hsData[t*modelDim:(t+1)*modelDim])
-		token, terr := tensor.New[T]([]int{1, modelDim}, tokenSlice)
+		// Extract token [1, modelDim] via tensor Slice.
+		token, terr := hiddenStates.Slice([2]int{t, t + 1}, [2]int{0, modelDim})
 		if terr != nil {
-			return nil, fmt.Errorf("MixtureOfExperts: create token tensor: %w", terr)
+			return nil, fmt.Errorf("MixtureOfExperts: slice token %d: %w", t, terr)
 		}
 
 		// Shared expert: runs on every token.
@@ -250,13 +263,19 @@ func (m *MixtureOfExperts[T]) Forward(ctx context.Context, inputs ...*tensor.Ten
 			if serr != nil {
 				return nil, fmt.Errorf("MixtureOfExperts: shared expert forward: %w", serr)
 			}
-			sharedData := sharedOut.Data()
-			for d := 0; d < modelDim && d < len(sharedData); d++ {
-				outData[t*modelDim+d] = m.ops.Add(outData[t*modelDim+d], sharedData[d])
+			// Accumulate: out[t:t+1, :] += sharedOut
+			outRow, rerr := out.Slice([2]int{t, t + 1}, [2]int{0, modelDim})
+			if rerr != nil {
+				return nil, fmt.Errorf("MixtureOfExperts: slice output row: %w", rerr)
 			}
+			sumRow, aerr := m.engine.Add(ctx, outRow, sharedOut)
+			if aerr != nil {
+				return nil, fmt.Errorf("MixtureOfExperts: add shared expert: %w", aerr)
+			}
+			copy(out.Data()[t*modelDim:(t+1)*modelDim], sumRow.Data())
 		}
 
-		for k := 0; k < m.topK; k++ {
+		for k := 0; k < topK; k++ {
 			expertIdx := indices[t][k]
 			if expertIdx >= len(m.experts) {
 				return nil, fmt.Errorf("MixtureOfExperts: expert index %d out of range (have %d experts)", expertIdx, len(m.experts))
@@ -265,18 +284,25 @@ func (m *MixtureOfExperts[T]) Forward(ctx context.Context, inputs ...*tensor.Ten
 			if eerr != nil {
 				return nil, fmt.Errorf("MixtureOfExperts: expert %d forward: %w", expertIdx, eerr)
 			}
-			expertData := expertOut.Data()
-			w := weights[t][k]
-			for d := 0; d < modelDim && d < len(expertData); d++ {
-				outData[t*modelDim+d] = m.ops.Add(outData[t*modelDim+d], m.ops.Mul(w, expertData[d]))
+			// Scale expert output by weight via engine.MulScalar.
+			w := weightData[t*topK+k]
+			scaled, serr := m.engine.MulScalar(ctx, expertOut, w)
+			if serr != nil {
+				return nil, fmt.Errorf("MixtureOfExperts: scale expert %d: %w", expertIdx, serr)
 			}
+			// Accumulate: out[t:t+1, :] += scaled
+			outRow, rerr := out.Slice([2]int{t, t + 1}, [2]int{0, modelDim})
+			if rerr != nil {
+				return nil, fmt.Errorf("MixtureOfExperts: slice output row: %w", rerr)
+			}
+			sumRow, aerr := m.engine.Add(ctx, outRow, scaled)
+			if aerr != nil {
+				return nil, fmt.Errorf("MixtureOfExperts: add expert %d: %w", expertIdx, aerr)
+			}
+			copy(out.Data()[t*modelDim:(t+1)*modelDim], sumRow.Data())
 		}
 	}
 
-	out, err := tensor.New[T]([]int{seqLen, modelDim}, outData)
-	if err != nil {
-		return nil, fmt.Errorf("MixtureOfExperts: create output tensor: %w", err)
-	}
 	m.outputShape = out.Shape()
 	return out, nil
 }

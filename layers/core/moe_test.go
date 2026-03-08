@@ -479,3 +479,161 @@ func TestMixtureOfExperts_SharedExpert_Attributes(t *testing.T) {
 		t.Error("expected has_shared_expert=true when SharedExpert is set")
 	}
 }
+
+// --- Parity tests (S96.8.1) ---
+
+func TestMoEGate_ParityRouting(t *testing.T) {
+	tests := []struct {
+		name       string
+		seqLen     int
+		modelDim   int
+		numExperts int
+		topK       int
+		hsData     []float32
+		gwData     []float32
+	}{
+		{
+			name:       "2 tokens, 3 experts, topK=2",
+			seqLen:     2,
+			modelDim:   3,
+			numExperts: 3,
+			topK:       2,
+			hsData:     []float32{1, 0, 0, 0, 1, 0},
+			gwData:     []float32{1, 0, 0, 0, 1, 0, 0, 0, 1},
+		},
+		{
+			name:       "1 token, 4 experts, topK=1",
+			seqLen:     1,
+			modelDim:   2,
+			numExperts: 4,
+			topK:       1,
+			hsData:     []float32{0.5, 0.8},
+			gwData:     []float32{1, 0, 0, 1, 0.5, 0.5, -1, 0},
+		},
+		{
+			name:       "3 tokens, 2 experts, topK=2",
+			seqLen:     3,
+			modelDim:   2,
+			numExperts: 2,
+			topK:       2,
+			hsData:     []float32{1, 2, 3, 4, 5, 6},
+			gwData:     []float32{0.1, 0.9, 0.8, 0.2},
+		},
+		{
+			name:       "topK exceeds num_experts",
+			seqLen:     1,
+			modelDim:   2,
+			numExperts: 2,
+			topK:       5,
+			hsData:     []float32{1, 0},
+			gwData:     []float32{1, 0, 0, 1},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := makeFloat32Engine()
+			ops := numeric.Float32Ops{}
+			gate := NewMoEGate[float32](eng, ops, tc.topK)
+
+			hs, err := tensor.New[float32]([]int{tc.seqLen, tc.modelDim}, tc.hsData)
+			if err != nil {
+				t.Fatalf("create hs: %v", err)
+			}
+			gw, err := tensor.New[float32]([]int{tc.numExperts, tc.modelDim}, tc.gwData)
+			if err != nil {
+				t.Fatalf("create gw: %v", err)
+			}
+
+			out, err := gate.Forward(context.Background(), hs, gw)
+			if err != nil {
+				t.Fatalf("Forward: %v", err)
+			}
+
+			effectiveK := tc.topK
+			if effectiveK > tc.numExperts {
+				effectiveK = tc.numExperts
+			}
+			if out.Shape()[0] != tc.seqLen || out.Shape()[1] != effectiveK {
+				t.Fatalf("shape = %v, want [%d %d]", out.Shape(), tc.seqLen, effectiveK)
+			}
+
+			data := out.Data()
+			for row := 0; row < tc.seqLen; row++ {
+				sum := float64(0)
+				for k := 0; k < effectiveK; k++ {
+					v := float64(data[row*effectiveK+k])
+					if v < 0 || v > 1 {
+						t.Errorf("row %d, k %d: weight %f out of [0,1]", row, k, v)
+					}
+					sum += v
+				}
+				if math.Abs(sum-1.0) > 1e-5 {
+					t.Errorf("row %d: weights sum = %f, want 1.0", row, sum)
+				}
+			}
+		})
+	}
+}
+
+func TestMixtureOfExperts_ParityWeightedCombination(t *testing.T) {
+	tests := []struct {
+		name     string
+		topK     int
+		experts  []graph.Node[float32]
+		hsData   []float32
+		gwData   []float32
+		wantData []float32
+	}{
+		{
+			name:     "topK=1, identity expert",
+			topK:     1,
+			experts:  []graph.Node[float32]{&identityExpert{}, &scale2Expert{}},
+			hsData:   []float32{1, 0, 0, 1},
+			gwData:   []float32{1, 0, 0, 1},
+			wantData: []float32{1, 0, 0, 2},
+		},
+		{
+			name:     "topK=2, both experts, 2 tokens",
+			topK:     2,
+			experts:  []graph.Node[float32]{&identityExpert{}, &scale2Expert{}},
+			hsData:   []float32{1, 0, 0, 1},
+			gwData:   []float32{1, 0, 0, 1},
+			wantData: nil, // just check shape and no error
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := makeFloat32Engine()
+			ops := numeric.Float32Ops{}
+			gate := NewMoEGate[float32](eng, ops, tc.topK)
+			moe := NewMixtureOfExperts[float32](eng, ops, gate, tc.experts, len(tc.experts), tc.topK)
+
+			hs, err := tensor.New[float32]([]int{2, 2}, tc.hsData)
+			if err != nil {
+				t.Fatalf("create hs: %v", err)
+			}
+			gw, err := tensor.New[float32]([]int{len(tc.experts), 2}, tc.gwData)
+			if err != nil {
+				t.Fatalf("create gw: %v", err)
+			}
+
+			out, err := moe.Forward(context.Background(), hs, gw)
+			if err != nil {
+				t.Fatalf("Forward: %v", err)
+			}
+
+			if out.Shape()[0] != 2 || out.Shape()[1] != 2 {
+				t.Fatalf("shape = %v, want [2 2]", out.Shape())
+			}
+
+			if tc.wantData != nil {
+				data := out.Data()
+				for i, want := range tc.wantData {
+					if math.Abs(float64(data[i])-float64(want)) > 1e-5 {
+						t.Errorf("data[%d] = %f, want %f", i, data[i], want)
+					}
+				}
+			}
+		})
+	}
+}
