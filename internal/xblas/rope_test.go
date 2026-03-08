@@ -2,7 +2,7 @@ package xblas
 
 import (
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -61,7 +61,7 @@ func TestRoPEF32_Identity(t *testing.T) {
 }
 
 func TestRoPEF32_Range(t *testing.T) {
-	rng := rand.New(rand.NewSource(42))
+	rng := rand.New(rand.NewPCG(42, 0))
 	halfDim := 128
 	headDim := 256
 	in := make([]float32, headDim)
@@ -89,7 +89,7 @@ func TestRoPEF32_Range(t *testing.T) {
 }
 
 func TestRoPEF32_Lengths(t *testing.T) {
-	rng := rand.New(rand.NewSource(99))
+	rng := rand.New(rand.NewPCG(99, 0))
 	for _, halfDim := range []int{2, 4, 7, 64, 128} {
 		headDim := halfDim * 2
 		in := make([]float32, headDim)
@@ -153,7 +153,7 @@ func BenchmarkRoPEF32(b *testing.B) {
 	out := make([]float32, headDim)
 	cos := make([]float32, halfDim)
 	sin := make([]float32, halfDim)
-	rng := rand.New(rand.NewSource(0))
+	rng := rand.New(rand.NewPCG(0, 0))
 	for i := range in {
 		in[i] = rng.Float32()
 	}
