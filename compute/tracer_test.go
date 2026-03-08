@@ -211,6 +211,74 @@ func TestTracerHasOpaqueOps(t *testing.T) {
 	}
 }
 
+func TestTracerRecordMultiOutput(t *testing.T) {
+	tr := NewTracer[float32](nil)
+	a := newTestTensor([]int{4, 3})
+	out1 := newTestTensor([]int{2, 3})
+	out2 := newTestTensor([]int{2, 3})
+
+	tr.RecordMultiOutput("Split", []*tensor.TensorNumeric[float32]{a}, []*tensor.TensorNumeric[float32]{out1, out2}, map[string]any{"axis": 0, "numSplits": 2})
+
+	ops := tr.TracedOps()
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	if ops[0].OpName != "Split" {
+		t.Errorf("op name = %q, want Split", ops[0].OpName)
+	}
+	if len(ops[0].OutputIDs) != 2 {
+		t.Fatalf("expected 2 OutputIDs, got %d", len(ops[0].OutputIDs))
+	}
+	if ops[0].OutputIDs[0] == ops[0].OutputIDs[1] {
+		t.Error("different output tensors should have different slot IDs")
+	}
+	if ops[0].OutputID != ops[0].OutputIDs[0] {
+		t.Errorf("OutputID should match first OutputIDs entry")
+	}
+}
+
+func TestTracerRecordGather(t *testing.T) {
+	w := newTestTensor([]int{10, 4})
+	tr := NewTracer[float32]([]*tensor.TensorNumeric[float32]{w})
+
+	indices, _ := tensor.New[int]([]int{3}, []int{1, 5, 7})
+	out := newTestTensor([]int{3, 4})
+
+	tr.RecordGather(w, indices, out, nil)
+
+	ops := tr.TracedOps()
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(ops))
+	}
+	if ops[0].OpName != "Gather" {
+		t.Errorf("op name = %q, want Gather", ops[0].OpName)
+	}
+	if len(ops[0].InputIDs) != 2 {
+		t.Fatalf("expected 2 InputIDs (params + indices), got %d", len(ops[0].InputIDs))
+	}
+	// params should be frozen slot 0
+	if ops[0].InputIDs[0] != 0 {
+		t.Errorf("params slot = %d, want 0 (frozen)", ops[0].InputIDs[0])
+	}
+}
+
+func TestTracerSlotForIntTensor(t *testing.T) {
+	tr := NewTracer[float32](nil)
+	idx1, _ := tensor.New[int]([]int{3}, []int{1, 2, 3})
+	idx2, _ := tensor.New[int]([]int{3}, []int{4, 5, 6})
+
+	slot1 := tr.slotForIntTensor(idx1)
+	slot1Again := tr.slotForIntTensor(idx1)
+	slot2 := tr.slotForIntTensor(idx2)
+
+	if slot1 != slot1Again {
+		t.Errorf("same int tensor got different slots: %d vs %d", slot1, slot1Again)
+	}
+	if slot1 == slot2 {
+		t.Errorf("different int tensors got same slot: %d", slot1)
+	}
+}
+
 func TestTracerRecordMultipleInputs(t *testing.T) {
 	tr := NewTracer[float32](nil)
 	a := newTestTensor([]int{2, 3})

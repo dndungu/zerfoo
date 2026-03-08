@@ -8,9 +8,10 @@ import (
 )
 
 // TraceRecorder is the interface used by EngineProxy to record traced operations.
-// This will be satisfied by Tracer[T] once it is implemented.
 type TraceRecorder[T tensor.Numeric] interface {
 	Record(opName string, inputs []*tensor.TensorNumeric[T], output *tensor.TensorNumeric[T], extra map[string]any)
+	RecordMultiOutput(opName string, inputs []*tensor.TensorNumeric[T], outputs []*tensor.TensorNumeric[T], extra map[string]any)
+	RecordGather(params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T], extra map[string]any)
 }
 
 // EngineProxy wraps an Engine[T] and optionally records traced operations.
@@ -72,7 +73,11 @@ func (p *EngineProxy[T]) RandomUniform(ctx context.Context, t *tensor.TensorNume
 }
 
 func (p *EngineProxy[T]) Gather(ctx context.Context, params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T]) error {
-	return p.real.Gather(ctx, params, indices, output)
+	err := p.real.Gather(ctx, params, indices, output)
+	if err == nil && p.tracer != nil {
+		p.tracer.RecordGather(params, indices, output, nil)
+	}
+	return err
 }
 
 func (p *EngineProxy[T]) ScatterAdd(ctx context.Context, dEmbeddingTable *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], dOut *tensor.TensorNumeric[T]) error {
@@ -252,9 +257,10 @@ func (p *EngineProxy[T]) Concat(ctx context.Context, tensors []*tensor.TensorNum
 func (p *EngineProxy[T]) Split(ctx context.Context, a *tensor.TensorNumeric[T], numSplits int, axis int) ([]*tensor.TensorNumeric[T], error) {
 	results, err := p.real.Split(ctx, a, numSplits, axis)
 	if err == nil && p.tracer != nil {
-		for _, r := range results {
-			p.tracer.Record("Split", []*tensor.TensorNumeric[T]{a}, r, nil)
-		}
+		p.tracer.RecordMultiOutput("Split", []*tensor.TensorNumeric[T]{a}, results, map[string]any{
+			"numSplits": numSplits,
+			"axis":      axis,
+		})
 	}
 	return results, err
 }

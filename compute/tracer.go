@@ -111,6 +111,57 @@ func (t *Tracer[T]) MarkOpaque() {
 	t.hasOpaqueOps = true
 }
 
+// RecordMultiOutput appends a TracedOp for a multi-output operation (e.g., Split).
+func (t *Tracer[T]) RecordMultiOutput(opName string, inputs []*tensor.TensorNumeric[T], outputs []*tensor.TensorNumeric[T], extra map[string]any) {
+	inputIDs := make([]int, len(inputs))
+	for i, in := range inputs {
+		inputIDs[i] = t.slotFor(in)
+	}
+	outputIDs := make([]int, len(outputs))
+	for i, out := range outputs {
+		outputIDs[i] = t.slotFor(out)
+	}
+	outID := -1
+	if len(outputIDs) > 0 {
+		outID = outputIDs[0]
+	}
+	t.ops = append(t.ops, TracedOp{
+		OpName:    opName,
+		InputIDs:  inputIDs,
+		OutputID:  outID,
+		OutputIDs: outputIDs,
+		ExtraArgs: extra,
+	})
+}
+
+// RecordGather appends a TracedOp for Gather which uses int indices.
+func (t *Tracer[T]) RecordGather(params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T], extra map[string]any) {
+	paramsID := t.slotFor(params)
+	indicesID := t.slotForIntTensor(indices)
+	outID := t.slotFor(output)
+	t.ops = append(t.ops, TracedOp{
+		OpName:    "Gather",
+		InputIDs:  []int{paramsID, indicesID},
+		OutputID:  outID,
+		ExtraArgs: extra,
+	})
+}
+
+// slotForIntTensor returns the existing slot for an int tensor or assigns a new one.
+func (t *Tracer[T]) slotForIntTensor(tn *tensor.TensorNumeric[int]) int {
+	ptr := reflect.ValueOf(tn).Pointer()
+	if slot, ok := t.tensorMap[ptr]; ok {
+		return slot
+	}
+	slot := t.nextSlot
+	t.nextSlot++
+	t.tensorMap[ptr] = slot
+	if tn != nil {
+		t.shapes[slot] = tn.Shape()
+	}
+	return slot
+}
+
 // ptrOf returns the pointer identity of a tensor as a uintptr.
 func ptrOf[T tensor.Numeric](t *tensor.TensorNumeric[T]) uintptr {
 	return reflect.ValueOf(t).Pointer()

@@ -25,6 +25,16 @@ func (m *mockTracer[T]) Record(opName string, inputs []*tensor.TensorNumeric[T],
 	m.events = append(m.events, traceEvent[T]{opName: opName, inputs: inputs, output: output, extra: extra})
 }
 
+func (m *mockTracer[T]) RecordMultiOutput(opName string, inputs []*tensor.TensorNumeric[T], outputs []*tensor.TensorNumeric[T], extra map[string]any) {
+	for _, out := range outputs {
+		m.events = append(m.events, traceEvent[T]{opName: opName, inputs: inputs, output: out, extra: extra})
+	}
+}
+
+func (m *mockTracer[T]) RecordGather(params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T], extra map[string]any) {
+	m.events = append(m.events, traceEvent[T]{opName: "Gather", inputs: []*tensor.TensorNumeric[T]{params}, output: output, extra: extra})
+}
+
 func newTestProxy() (*EngineProxy[int], *mockTracer[int]) {
 	cpu := NewCPUEngine[int](numeric.IntOps{})
 	proxy := NewEngineProxy[int](cpu)
