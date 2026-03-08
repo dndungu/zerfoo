@@ -146,7 +146,9 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 
 	// Load ZMF model and build graph.
 	zmfPath := filepath.Join(info.Path, "model.zmf")
-	eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+	rawEng := compute.NewCPUEngine[float32](numeric.Float32Ops{})
+	proxy := compute.NewEngineProxy[float32](rawEng)
+	eng := compute.Engine[float32](proxy)
 
 	globalAttrs := map[string]interface{}{}
 	if meta.RopeScaling != nil && meta.RopeScaling.Type == "yarn" {
@@ -167,6 +169,8 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load model: %w", err)
 	}
+
+	mdl.Graph.SetEngineProxy(proxy)
 
 	return assembleModel(mdl.Graph, tok, eng, meta, info, o.maxSeqLen), nil
 }
