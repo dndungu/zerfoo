@@ -27,7 +27,8 @@ func TestRMSNormF32_Basic(t *testing.T) {
 	eps := float32(1e-6)
 
 	wantOut, wantScale := rmsnormRef(x, w, eps)
-	gotScale := RMSNormF32(&out[0], &x[0], &w[0], 4, eps)
+	var gotScale float32
+	RMSNormF32(&out[0], &x[0], &w[0], 4, eps, &gotScale)
 
 	for i := range 4 {
 		relErr := math.Abs(float64(out[i]-wantOut[i])) / math.Max(math.Abs(float64(wantOut[i])), 1e-30)
@@ -54,7 +55,8 @@ func TestRMSNormF32_Range(t *testing.T) {
 	eps := float32(1e-6)
 
 	wantOut, wantScale := rmsnormRef(x, w, eps)
-	gotScale := RMSNormF32(&out[0], &x[0], &w[0], D, eps)
+	var gotScale float32
+	RMSNormF32(&out[0], &x[0], &w[0], D, eps, &gotScale)
 
 	var maxRelErr float64
 	for i := range D {
@@ -87,7 +89,8 @@ func TestRMSNormF32_Lengths(t *testing.T) {
 			}
 			eps := float32(1e-6)
 			wantOut, wantScale := rmsnormRef(x, w, eps)
-			gotScale := RMSNormF32(&out[0], &x[0], &w[0], D, eps)
+			var gotScale float32
+			RMSNormF32(&out[0], &x[0], &w[0], D, eps, &gotScale)
 
 			var maxRelErr float64
 			for i := range D {
@@ -117,7 +120,8 @@ func TestRMSNormF32_UniformInput(t *testing.T) {
 		w[i] = 1.0
 	}
 	eps := float32(1e-6)
-	gotScale := RMSNormF32(&out[0], &x[0], &w[0], D, eps)
+	var gotScale float32
+	RMSNormF32(&out[0], &x[0], &w[0], D, eps, &gotScale)
 
 	// mean(x^2) = 9, rms = 3, scale = 1/3
 	wantScale := float32(1.0 / math.Sqrt(float64(9.0+eps)))
@@ -140,7 +144,8 @@ func TestRMSNormF32_ReturnScale(t *testing.T) {
 	w := []float32{1, 1, 1, 1}
 	out := make([]float32, 4)
 	eps := float32(1e-6)
-	gotScale := RMSNormF32(&out[0], &x[0], &w[0], 4, eps)
+	var gotScale float32
+	RMSNormF32(&out[0], &x[0], &w[0], 4, eps, &gotScale)
 
 	// mean(x^2) = 4, scale = 1/sqrt(4+eps) = ~0.5
 	wantScale := float32(1.0 / math.Sqrt(float64(4.0+eps)))
@@ -161,11 +166,12 @@ func BenchmarkRMSNormF32(b *testing.B) {
 		w[i] = float32(rng.Float64()*2 - 1)
 	}
 	eps := float32(1e-6)
+	var scale float32
 
 	b.SetBytes(int64(D * 4 * 3)) // read x + weight, write out
 	b.ResetTimer()
 	for range b.N {
-		RMSNormF32(&out[0], &x[0], &w[0], D, eps)
+		RMSNormF32(&out[0], &x[0], &w[0], D, eps, &scale)
 	}
 }
 

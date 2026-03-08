@@ -24,7 +24,7 @@ func FusedRMSNorm(input, weight *tensor.TensorNumeric[float32], epsilon float32)
 
 	for row := range rows {
 		off := row * D
-		scaleData[row] = xblas.RMSNormF32(&outData[off], &inData[off], &wData[0], D, epsilon)
+		xblas.RMSNormF32(&outData[off], &inData[off], &wData[0], D, epsilon, &scaleData[row])
 	}
 
 	// Build scales shape: same as input but last dim = 1.

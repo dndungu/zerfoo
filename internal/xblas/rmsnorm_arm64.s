@@ -1,9 +1,9 @@
 #include "textflag.h"
 
-// func RMSNormF32(out, x, weight *float32, D int, eps float32) float32
+// func RMSNormF32(out, x, weight *float32, D int, eps float32, scale *float32)
 //
 // Computes out[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i].
-// Returns the scale factor rsqrt(mean(x^2) + eps).
+// Writes the scale factor rsqrt(mean(x^2) + eps) to *scale.
 //
 // Algorithm:
 //   1. Sum of squares using dual NEON accumulators
@@ -19,8 +19,8 @@
 //   F24 = scalar scale result (avoids callee-saved V8-V15)
 //   F25,F26 = Newton-Raphson temporaries
 //
-// Layout: out=0(FP), x=8(FP), weight=16(FP), D=24(FP), eps=32(FP), ret=36(FP)
-TEXT ·RMSNormF32(SB), NOSPLIT, $0-40
+// Layout: out=0(FP), x=8(FP), weight=16(FP), D=24(FP), eps=32(FP), scale=40(FP)
+TEXT ·RMSNormF32(SB), NOSPLIT, $0-48
 	MOVD	out+0(FP), R0
 	MOVD	x+8(FP), R1
 	MOVD	weight+16(FP), R2
@@ -120,9 +120,9 @@ sumsq_reduce:
 	WORD	$0x5EB9FC9A      // FRSQRTS S26, S4, S25
 	FMULS	F26, F24, F24    // F24 = y2 = scale
 
-	// Store return value (use F0 intermediary for stack store)
-	FMOVS	F24, F0
-	FMOVS	F0, ret+36(FP)
+	// Store scale to *scale pointer
+	MOVD	scale+40(FP), R6
+	FMOVS	F24, (R6)
 
 	// ---- Pass 2: Normalize ----
 	// Broadcast scale to V6.4S
@@ -172,6 +172,4 @@ norm_scalar:
 	CBNZ	R4, norm_scalar
 
 done:
-	// Go ABIInternal returns float32 in F0
-	FMOVS	F24, F0
 	RET
