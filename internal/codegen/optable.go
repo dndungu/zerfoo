@@ -45,13 +45,19 @@ var emitters = map[string]OpEmitter{
 	"PowScalar": funcScalarOp("powf"),
 
 	// Reductions
-	"RMSNorm": rmsnormOp,
-	"Softmax": softmaxOp,
+	"RMSNorm":    rmsnormOp,
+	"Softmax":    softmaxOp,
+	"ReduceSum":  reduceOp("dev_reduce_sum"),
+	"ReduceMean": reduceOp("dev_reduce_mean"),
 
 	// Memory ops
 	"MatMul":      gemvOp,
 	"MatMulNBits": gemvQ4Op,
 	"Gather":      gatherOp,
+
+	// Indexing ops
+	"Slice":  sliceOp,
+	"Repeat": repeatOp,
 
 	// Shape ops (no-compute in megakernel, just reindex)
 	"Concat":    reshapeOp, // reindex in registers
@@ -163,4 +169,33 @@ func reshapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 func transposeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 	return fmt.Sprintf("  dev_transpose(slot_%d, slot_%d, shape_%d, perm_%d);",
 		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0], meta.OutputIdx), nil
+}
+
+func sliceOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	dim := 0
+	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
+		dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
+	return fmt.Sprintf("  dev_slice(slot_%d, slot_%d, start_%d, end_%d, axis_%d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, meta.OutputIdx, meta.OutputIdx, dim), nil
+}
+
+func repeatOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	dim := 0
+	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
+		dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
+	return fmt.Sprintf("  dev_repeat(slot_%d, slot_%d, axis_%d, reps_%d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, meta.OutputIdx, dim), nil
+}
+
+func reduceOp(fn string) OpEmitter {
+	return func(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+		dim := 0
+		if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
+			dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+		}
+		return fmt.Sprintf("  %s(slot_%d, slot_%d, axis_%d, %d);",
+			fn, meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, dim), nil
+	}
 }
