@@ -417,7 +417,7 @@ Acceptance:
 
 - [x] S97.5.1 Split/Concat tracing test  Owner: TBD  Est: 1h  2026 03 08
 
-##### T97.6 Handle UnaryOp and FusedRoPE fallback  Owner: TBD  Est: 2h
+##### T97.6 Handle UnaryOp and FusedRoPE fallback  Owner: TBD  Est: 2h  [x] 2026 03 07
 
 Two engine calls cannot be automatically traced to primitive ops:
 
@@ -447,7 +447,7 @@ Acceptance:
 - Gemma 3 model produces a clean trace (no opaque ops) after sigmoid fix.
 - Dependencies: T97.4.
 
-- [ ] S97.6.1 Opaque op fallback test  Owner: TBD  Est: 1h
+- [x] S97.6.1 Opaque op fallback test  Owner: TBD  Est: 1h  2026 03 07
 
 ##### T97.7 Handle Gather with int indices  Owner: TBD  Est: 1.5h  [x] 2026 03 08
 
@@ -827,6 +827,21 @@ A task is done when:
 ---
 
 ## 8. Progress Log
+
+### Change Summary -- 2026-03-07 (v15)
+
+Wave C4 complete (T97.6 + S97.6.1). UnaryOp opaque fallback and Sigmoid
+composition refactor done.
+
+**Track C completed tasks (Wave C4):**
+- T97.6 + S97.6.1: EngineProxy marks UnaryOp as opaque via MarkOpaque().
+  CompileTraced returns error when opaque ops detected. Sigmoid refactored
+  from BaseActivation/UnaryOp to composed engine.Exp + engine.AddScalar +
+  engine.Div. SwiGLU backward updated from UnaryOp to MulScalar + AddScalar.
+  Commits e553706, 0908d73, 19762fc.
+
+**Next:** T96.11 (S4 composition), T96.12 (SpectralFeature composition),
+then T96.13-T96.14 quality gates.
 
 ### Change Summary -- 2026-03-08 (v14)
 
