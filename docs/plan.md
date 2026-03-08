@@ -869,7 +869,7 @@ Acceptance:
 ARM64 NEON assembly for the operations that dominate non-matmul CPU time.
 All functions go in `internal/xblas/` following the existing pattern.
 
-##### T102.1 NEON vectorized Softmax  Owner: TBD  Est: 4h
+##### T102.1 NEON vectorized Softmax  Owner: TBD  Est: 4h  [x] 2026 03 07
 
 Create `internal/xblas/softmax_arm64.go` and `softmax_arm64.s`.
 
@@ -905,12 +905,12 @@ Acceptance:
 - Handles n not divisible by 4 (tail elements processed scalar).
 - Dependencies: none.
 
-- [ ] S102.1.1 NEON Softmax correctness + benchmark tests  Owner: TBD  Est: 1.5h
+- [x] S102.1.1 NEON Softmax correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
   - Test various lengths: 1, 4, 7, 128, 2048.
   - Compare output against reference math.Exp softmax.
   - BenchmarkSoftmaxNEON vs BenchmarkSoftmaxScalar.
 
-##### T102.2 NEON vectorized RMSNorm  Owner: TBD  Est: 4h
+##### T102.2 NEON vectorized RMSNorm  Owner: TBD  Est: 4h  [x] 2026 03 07
 
 Create `internal/xblas/rmsnorm_arm64.go` and `rmsnorm_arm64.s`.
 
@@ -940,9 +940,9 @@ Acceptance:
 - Benchmark: >= 3x faster for D=2048 (Gemma 3 hidden size).
 - Dependencies: none.
 
-- [ ] S102.2.1 NEON RMSNorm correctness + benchmark tests  Owner: TBD  Est: 1.5h
+- [x] S102.2.1 NEON RMSNorm correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
 
-##### T102.3 NEON vectorized SiLU (x * sigmoid(x))  Owner: TBD  Est: 3h
+##### T102.3 NEON vectorized SiLU (x * sigmoid(x))  Owner: TBD  Est: 3h  [x] 2026 03 07
 
 Create `internal/xblas/silu_arm64.go` and `silu_arm64.s`.
 
@@ -975,9 +975,9 @@ Acceptance:
 - SiLUGateF32 matches FusedSiLUGate output.
 - Dependencies: none.
 
-- [ ] S102.3.1 NEON SiLU/SiLUGate correctness + benchmark tests  Owner: TBD  Est: 1.5h
+- [x] S102.3.1 NEON SiLU/SiLUGate correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
 
-##### T102.4 NEON vectorized RoPE  Owner: TBD  Est: 3h
+##### T102.4 NEON vectorized RoPE  Owner: TBD  Est: 3h  [x] 2026 03 07
 
 Create `internal/xblas/rope_arm64.go` and `rope_arm64.s`.
 
@@ -1006,9 +1006,9 @@ Acceptance:
 - Handles non-aligned halfDim (tail scalar).
 - Dependencies: none.
 
-- [ ] S102.4.1 NEON RoPE correctness + benchmark tests  Owner: TBD  Est: 1.5h
+- [x] S102.4.1 NEON RoPE correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
 
-##### T102.5 NEON vectorized elementwise (Add, Mul, Sub for same-shape)  Owner: TBD  Est: 3h
+##### T102.5 NEON vectorized elementwise (Add, Mul, Sub for same-shape)  Owner: TBD  Est: 3h  [x] 2026 03 07
 
 Create `internal/xblas/elementwise_arm64.go` and `elementwise_arm64.s`.
 
@@ -1053,9 +1053,9 @@ Acceptance:
 - Tail elements handled correctly.
 - Dependencies: T101.1 (same-shape fast path).
 
-- [ ] S102.5.1 NEON elementwise correctness + benchmark tests  Owner: TBD  Est: 1h
+- [x] S102.5.1 NEON elementwise correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1h
 
-##### T102.6 NEON vectorized scalar ops (MulScalar, AddScalar, DivScalar)  Owner: TBD  Est: 2h
+##### T102.6 NEON vectorized scalar ops (MulScalar, AddScalar, DivScalar)  Owner: TBD  Est: 2h  [x] 2026 03 07
 
 Create `internal/xblas/scalar_arm64.go` and `scalar_arm64.s`.
 
@@ -1083,7 +1083,7 @@ Acceptance:
 - Benchmark: >= 2x faster for n=2048.
 - Dependencies: none.
 
-- [ ] S102.6.1 NEON scalar ops correctness + benchmark tests  Owner: TBD  Est: 1h
+- [x] S102.6.1 NEON scalar ops correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1h
 
 ##### T102.7 Factor out shared NEON exp polynomial  Owner: TBD  Est: 1.5h  [x] 2026 03 07
 
@@ -1400,6 +1400,23 @@ A task is done when:
 ---
 
 ## 8. Progress Log
+
+### Change Summary -- 2026-03-07 (v8)
+
+Wave D2 complete (6 NEON assembly kernels in parallel via worktrees). All
+committed to feat/neon-softmax. Tests pass, lint clean.
+
+**Completed tasks:**
+- T102.1: NEON Softmax (3-pass: max, exp+sum, normalize). Commit bc775d8.
+- T102.2: NEON RMSNorm (FRSQRTE + 2 Newton-Raphson). Commit a40a2f7.
+- T102.3: NEON SiLU + SiLUGate (inline exp polynomial + FRECPE). Commit d766923.
+- T102.4: NEON RoPE (4-wide SIMD + scalar tail + passthrough). Commit ef099ef.
+- T102.5: NEON elementwise VaddF32/VmulF32/VsubF32/VdivF32. Commit a40a2f7.
+- T102.6: NEON scalar VmulScalarF32/VaddScalarF32/VdivScalarF32. Commit c751b5c.
+- Lint fix: rmsnorm_generic.go D->dim, rope_test.go rand/v2. Commit 0faf769.
+
+**Wave D3 unblocked:** T101.4 (lint compute/), T102.8 (wire NEON into CPUEngine),
+T102.9 (lint xblas/), T103.2 (wire arena into CPUEngine), T103.3 (lint compute/).
 
 ### Change Summary -- 2026-03-07 (v7)
 
