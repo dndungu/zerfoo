@@ -1,6 +1,34 @@
 # Phase 34 -- Track D: NEON SIMD CPU Acceleration
 
-## Status: In Progress (Wave D4 Complete)
+## Status: COMPLETE
+
+## 2026-03-08 -- Wave C1: Track C Foundation + Track 0 Composition
+
+5 tasks completed in parallel via worktrees. All merged into feat/neon-softmax.
+
+Track C (tracing compiler):
+- T97.1: EngineProxy[T] wrapping Engine[T] with TraceRecorder interface (compute/engine_proxy.go)
+- T97.2: Tracer[T] with pointer-based tensor identity tracking (compute/tracer.go)
+- T99.1-3: Slice, Repeat, ReduceSum, ReduceMean emitters (internal/codegen/optable.go + megakernel_ops.cu)
+
+Track 0 (composition fixes):
+- T96.6: Conv2d refactored to im2col + engine.MatMul (layers/core/conv2d.go)
+- T96.9: PolynomialExpansion composed via engine primitives (layers/core/polynomial.go)
+- T96.10: SpectralFingerprint composed via engine.MatMul with Fourier basis (layers/core/spectral_fingerprint.go)
+
+Deviation: Fixed pre-existing SWA test helpers redeclaration (training/optimizer).
+
+Quality gates: all 66+ packages pass, 0 lint issues, race detector clean.
+
+Next: Wave C2 -- T97.3 (wire proxy into graph), T97.5 (Split/Concat tracing),
+T97.7 (Gather tracing), T98.1-3 (GPU KV cache).
+
+## 2026-03-07 -- Trim: Track D knowledge extracted to docs/design.md
+
+Trimmed completed Track D (E101-E104) from docs/plan.md. Stable knowledge
+preserved in docs/design.md section 15.16. Resolved risks R105-R108 removed.
+ADR index in design.md updated with ADRs 022-029. Milestone M60 marked PARTIAL
+(8.15 tok/s vs 10 target). Next work: Track C (tracing compiler).
 
 ## 2026-03-07 -- Wave D4: Benchmark Validation + Assembly Fixes
 

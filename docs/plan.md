@@ -3,7 +3,7 @@
 ## 1. Context
 
 See docs/design.md for full architecture context and Phases 1-33 history.
-See docs/design.md section 15.16 for Phase 34 completed work (Tracks 0/A/B).
+See docs/design.md section 15.16 for Phase 34 completed work (Tracks 0/A/B and Track D).
 
 ### Problem Statement
 
@@ -21,13 +21,9 @@ Track C (tracing compiler) resolves this: an EngineProxy records every Engine
 method call during compilation, automatically decomposing composite nodes into
 primitive ops. See docs/adr/028-tracing-compiler.md.
 
-CPU inference is 6.86 tok/s. llama.cpp achieves ~100 tok/s on the same hardware
-because it uses NEON SIMD assembly for all hot-path operations (softmax, rmsnorm,
-silu, elementwise, rope, scalar ops), has zero-allocation compute graphs, and uses
-quantized integer accumulation. Zerfoo currently has NEON assembly only for matmul
-(q4dot, vdotf32, sgemmAccRow). Track D adds NEON SIMD for all remaining hot-path
-ops, same-shape fast paths to eliminate broadcasting overhead, and a tensor arena.
-See docs/adr/029-neon-simd-cpu-acceleration.md.
+Track D (NEON SIMD CPU acceleration) is complete. Achieved 8.15 tok/s median
+(+18.8% over 6.86 baseline). Target was 10 tok/s; remaining gap requires GEMM
+cache tiling. See docs/design.md section 15.16 and docs/adr/029-neon-simd-cpu-acceleration.md.
 
 ### Objectives
 
@@ -38,10 +34,6 @@ See docs/adr/029-neon-simd-cpu-acceleration.md.
 - O98: Implement GPU KV cache for megakernel attention.
 - O89: Generate a single-kernel decode for Gemma 3 2B transformer.
 - O90: Achieve >= 50 tok/s median for Gemma 3 2B Q4 on DGX Spark GB10.
-- O101: NEON SIMD acceleration for all CPU hot-path operations.
-- O102: Same-shape fast paths and Pow x^2 specialization in CPUEngine.
-- O103: Tensor arena for buffer reuse across engine operations.
-- O104: Achieve >= 10 tok/s CPU ARM64 for Gemma 3 2B Q4 on DGX Spark GB10.
 
 ### Non-Goals
 
@@ -63,8 +55,6 @@ See docs/adr/029-neon-simd-cpu-acceleration.md.
 - DGX Spark GB10 at `ssh ndungu@192.168.86.250` for all GPU validation.
 - Go 1.25.0, CUDA 13.0, sm_121 (Blackwell) on DGX Spark.
 - Target model: Gemma 3 2B Q4 (ZMF), path: ~/models/gemma3-q4/model.zmf.
-- ARM64 NEON assembly uses Go plan9 syntax in _arm64.s files.
-- Generic fallbacks in _generic.go files for non-ARM64 platforms.
 
 ### Success Metrics
 
@@ -72,7 +62,7 @@ See docs/adr/029-neon-simd-cpu-acceleration.md.
 |--------|---------|--------|-------------|
 | GPU tok/s median | 7.78 | >= 50 | bench_tps -device cuda, 7 runs, median |
 | GPU tok/s peak | 10.32 | >= 60 | bench_tps -device cuda, best of 7 |
-| CPU tok/s ARM64 | 6.86 | >= 10 | bench_tps -device cpu, 7 runs, median |
+| CPU tok/s ARM64 | 8.15 | >= 10 | bench_tps -device cpu, 7 runs, median |
 | Kernel launches per token | ~650 | 1 | nsys profile |
 | Global mem round-trips | ~650 | ~26 (weight reads only) | nsys profile |
 
@@ -91,11 +81,6 @@ See docs/adr/029-neon-simd-cpu-acceleration.md.
 | D434 | Megakernel fires on real Gemma 3 model | C+B | End-to-end integration |
 | D425 | Megakernel performance tuning | B | nsys profiling, memory optimization |
 | D429 | End-to-end benchmark >= 50 tok/s | B | Final validation |
-| D435 | Same-shape binaryOp fast path + Pow x^2 | D | Eliminate broadcasting overhead |
-| D436 | NEON Softmax, RMSNorm, SiLU, RoPE assembly | D | Vectorize CPU hot-path ops |
-| D437 | NEON vectorized elementwise + scalar ops | D | SIMD Add/Mul/Sub/MulScalar/etc. |
-| D438 | Tensor arena for buffer reuse | D | Eliminate GC allocation overhead |
-| D439 | CPU benchmark >= 10 tok/s ARM64 | D | Final CPU validation |
 
 ### Out of Scope
 
@@ -118,14 +103,14 @@ See docs/design.md section 15.16. Remaining:
 
 ##### Priority 2: Other Model Variants (continued)
 
-- [ ] T96.6 Refactor Conv2d to im2col + engine.MatMul  Owner: TBD  Est: 3h
+- [x] T96.6 Refactor Conv2d to im2col + engine.MatMul  Owner: TBD  Est: 3h  2026 03 08
   - File: `layers/core/conv2d.go` lines 60-144.
   - Violation: 6-nested loop convolution with direct data access.
   - Fix: im2col transform then engine.MatMul(weight_matrix, col_matrix).
   - Acceptance: Zero nested compute loops in Forward(). Output within 1e-5.
   - Dependencies: none.
 
-- [ ] S96.6.1 Conv2d composition parity test  Owner: TBD  Est: 1h
+- [x] S96.6.1 Conv2d composition parity test  Owner: TBD  Est: 1h  2026 03 08
 
 ##### Priority 3: Specialized Layers (not on Gemma 3 path)
 
@@ -141,14 +126,14 @@ See docs/design.md section 15.16. Remaining:
 
 - [ ] S96.8.1 MoE composition parity test  Owner: TBD  Est: 1h
 
-- [ ] T96.9 Refactor PolynomialExpansion to compose engine primitives  Owner: TBD  Est: 1.5h
+- [x] T96.9 Refactor PolynomialExpansion to compose engine primitives  Owner: TBD  Est: 1.5h  2026 03 08
   - File: `layers/core/polynomial.go` lines 191-249.
   - Fix: engine.Pow for each term, engine.MulScalar, engine.Add.
   - Dependencies: none.
 
-- [ ] S96.9.1 Polynomial composition parity test  Owner: TBD  Est: 45m
+- [x] S96.9.1 Polynomial composition parity test  Owner: TBD  Est: 45m  2026 03 08
 
-- [ ] T96.10 Refactor SpectralFingerprint to compose engine primitives  Owner: TBD  Est: 2h
+- [x] T96.10 Refactor SpectralFingerprint to compose engine primitives  Owner: TBD  Est: 2h  2026 03 08
   - File: `layers/core/spectral_fingerprint.go` lines 96-157.
   - Fix: engine.MatMul with precomputed Fourier basis matrix.
   - Dependencies: none.
@@ -210,7 +195,7 @@ Engine call during Forward(), producing an instruction tape of primitive ops.
 
 #### E97: EngineProxy and Tracer (O97)
 
-##### T97.1 Create EngineProxy[T] implementing Engine[T]  Owner: TBD  Est: 4h
+##### T97.1 Create EngineProxy[T] implementing Engine[T]  Owner: TBD  Est: 4h  [x] 2026 03 08
 
 Create `compute/engine_proxy.go`.
 
@@ -271,12 +256,12 @@ Acceptance:
   verify results match CPUEngine directly.
 - Dependencies: none.
 
-- [ ] S97.1.1 EngineProxy unit tests  Owner: TBD  Est: 1.5h
+- [x] S97.1.1 EngineProxy unit tests  Owner: TBD  Est: 1.5h  2026 03 08
   - Test each traced method records correct OpName.
   - Test non-traced methods delegate without recording.
   - Test tracing off (tracer == nil) produces no trace.
 
-##### T97.2 Create Tracer[T] with tensor identity tracking  Owner: TBD  Est: 3h
+##### T97.2 Create Tracer[T] with tensor identity tracking  Owner: TBD  Est: 3h  [x] 2026 03 08
 
 Create `compute/tracer.go`.
 
@@ -331,7 +316,7 @@ Acceptance:
 - ExtraArgs captured for all parameterized ops.
 - Dependencies: none.
 
-- [ ] S97.2.1 Tracer unit tests  Owner: TBD  Est: 1.5h
+- [x] S97.2.1 Tracer unit tests  Owner: TBD  Est: 1.5h  2026 03 08
   - Test tensor identity: same pointer = same slot.
   - Test frozen tensor registration.
   - Test ExtraArgs for Softmax, Transpose, Reshape, MulScalar.
@@ -579,7 +564,7 @@ Acceptance:
 The traced instruction tape may contain ops not yet in the emitter table.
 Add emitters for ops that appear in the Gemma 3 trace.
 
-##### T99.1 Add Slice emitter to optable.go  Owner: TBD  Est: 1.5h
+##### T99.1 Add Slice emitter to optable.go  Owner: TBD  Est: 1.5h  [x] 2026 03 08
 
 RoPE uses engine.Slice (or tensor slicing). The tracer records Slice ops.
 Add emitter:
@@ -589,9 +574,9 @@ Add emitter:
 Acceptance: Emitted code compiles. Slice op in trace gets emitted.
 Dependencies: none.
 
-- [ ] S99.1.1 Slice emitter test  Owner: TBD  Est: 45m
+- [x] S99.1.1 Slice emitter test  Owner: TBD  Est: 45m  2026 03 08
 
-##### T99.2 Add Repeat emitter to optable.go  Owner: TBD  Est: 1.5h
+##### T99.2 Add Repeat emitter to optable.go  Owner: TBD  Est: 1.5h  [x] 2026 03 08
 
 GQA uses engine.Repeat for K/V head replication.
 - "Repeat": `dev_repeat(slot_out, slot_in, axis, repetitions, dims);`
@@ -600,9 +585,9 @@ GQA uses engine.Repeat for K/V head replication.
 Acceptance: Emitted code compiles. Repeat op in trace gets emitted.
 Dependencies: none.
 
-- [ ] S99.2.1 Repeat emitter test  Owner: TBD  Est: 45m
+- [x] S99.2.1 Repeat emitter test  Owner: TBD  Est: 45m  2026 03 08
 
-##### T99.3 Add ReduceSum and ReduceMean emitters  Owner: TBD  Est: 2h
+##### T99.3 Add ReduceSum and ReduceMean emitters  Owner: TBD  Est: 2h  [x] 2026 03 08
 
 Used in normalization and attention layers.
 - "ReduceSum": `dev_reduce_sum(slot_out, slot_in, axis, dim);`
@@ -612,7 +597,7 @@ Used in normalization and attention layers.
 Acceptance: Emitted code compiles.
 Dependencies: none.
 
-- [ ] S99.3.1 Reduction emitter test  Owner: TBD  Est: 45m
+- [x] S99.3.1 Reduction emitter test  Owner: TBD  Est: 45m  2026 03 08
 
 ##### T99.4 Verify emitter coverage against real Gemma 3 trace  Owner: TBD  Est: 2h
 
@@ -748,517 +733,6 @@ Acceptance:
 
 ---
 
-### Track D: NEON SIMD CPU Acceleration (NEW)
-
-Decision rationale: docs/adr/029-neon-simd-cpu-acceleration.md.
-
-CPU inference is 6.86 tok/s. Profiling shows the hot path after matmul includes
-Pow (8.9%), binaryOp broadcasting overhead (10.4%), Softmax, RMSNorm, SiLU, and
-RoPE -- all running through generic Go per-element loops. llama.cpp vectorizes
-all of these with NEON SIMD. Track D adds NEON assembly for these ops, same-shape
-fast paths, and a tensor arena for buffer reuse.
-
-All assembly files follow the established pattern:
-- `internal/xblas/<name>_arm64.go` -- Go declarations with `//go:noescape`
-- `internal/xblas/<name>_arm64.s` -- ARM64 NEON plan9 assembly
-- `internal/xblas/<name>_generic.go` -- `//go:build !arm64` pure-Go fallback
-
-#### E101: Same-Shape Fast Paths and Pow Specialization (O102)
-
-These are pure Go changes in compute/cpu_engine.go. No assembly needed. Highest
-ROI because they eliminate unnecessary work rather than doing work faster.
-
-##### T101.1 Add same-shape fast path to binaryOp  Owner: TBD  Est: 2h  [x] 2026 03 07
-
-Current `binaryOp()` at `compute/cpu_engine.go:546` computes broadcast shapes
-and does per-element coordinate decoding (lines 576-594) even when both tensors
-have identical shapes (no broadcast). This coordinate-decode loop is 10.4% of
-CPU inference time.
-
-Add a fast path at the top of binaryOp():
-```go
-if slicesEqual(a.Shape(), b.Shape()) {
-    // Same shape: no broadcast needed. Direct element-wise loop.
-    aData := a.Data()
-    bData := b.Data()
-    rData := result.Data()
-    parallelFor(len(aData), func(start, end int) {
-        for i := start; i < end; i++ {
-            rData[i] = op(aData[i], bData[i])
-        }
-    })
-    return result, nil
-}
-```
-
-This fast path is taken for all same-shape binary ops (Add, Sub, Mul, Div, Pow)
-which is the common case in transformer inference (residual connections, attention
-scores, etc.).
-
-Acceptance:
-- binaryOp benchmark: >= 40% faster for same-shape [1, 2048] tensors.
-- All existing binary op tests pass unchanged.
-- Broadcasting still works for non-matching shapes.
-- Dependencies: none.
-
-- [x] S101.1.1 Same-shape fast path benchmark test  Owner: TBD  Est: 1h  2026 03 07
-  - BenchmarkBinaryOpSameShape vs BenchmarkBinaryOpBroadcast.
-  - Verify fast path taken for same-shape, slow path for broadcast.
-
-##### T101.2 Add Pow x^2 specialization  Owner: TBD  Est: 1.5h  [x] 2026 03 07
-
-Current `Pow()` at `compute/cpu_engine.go:1358` calls `e.ops.Pow(base, exponent)`
-which calls `math.Pow()` for every element. Profiling shows Pow is 8.9% of
-CPU inference time. In Gemma 3, Pow is called exclusively by RMSNorm with
-exponent=2.0 (squaring).
-
-Add specialization in Pow():
-```go
-func (e *CPUEngine[T]) Pow(ctx context.Context, base, exponent *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-    defer e.recordOp("Pow", time.Now())
-
-    // Specialization: if exponent is a scalar broadcast tensor with value 2.0,
-    // use x*x instead of math.Pow(x, 2).
-    if isScalarBroadcast(exponent) {
-        expVal := e.ops.ToFloat64(exponent.Data()[0])
-        if expVal == 2.0 {
-            return e.UnaryOp(ctx, base, func(x T) T { return e.ops.Mul(x, x) }, dst...)
-        }
-    }
-    return e.binaryOp(ctx, base, exponent, e.ops.Pow, dst...)
-}
-```
-
-`isScalarBroadcast()` checks if the tensor has exactly one unique value
-(shape is [1] or all elements are identical).
-
-Acceptance:
-- Pow with exponent=2.0 is >= 5x faster than math.Pow path.
-- Pow with other exponents still works via math.Pow.
-- RMSNorm end-to-end benchmark shows improvement.
-- All existing Pow tests pass.
-- Dependencies: none.
-
-- [x] S101.2.1 Pow specialization benchmark test  Owner: TBD  Est: 45m  2026 03 07
-  - BenchmarkPowSquare vs BenchmarkPowGeneric.
-
-##### T101.3 Add same-shape fast path to scalar ops  Owner: TBD  Est: 1h  [x] 2026 03 07
-
-Current `MulScalar()`, `AddScalar()`, `DivScalar()` at `cpu_engine.go:359-394`
-use `e.ops.Mul(aData[i], scalar)` per element. For float32 specialization,
-this can directly use `aData[i] * scalar` when T is float32 (the common
-inference type). But even without type specialization, the existing loop is
-already simple. The main optimization here is to dispatch to NEON in T101.7.
-
-For now, ensure the scalar ops use the same parallelFor pattern with the
-compute pool (they already do). This task is primarily to verify the scalar
-ops are ready for NEON dispatch in T101.7.
-
-Acceptance:
-- Scalar ops use parallelFor.
-- Benchmarks established as baselines for NEON comparison.
-- Dependencies: none.
-
-- [x] S101.3.1 Scalar op baseline benchmarks  Owner: TBD  Est: 30m  2026 03 07
-
-##### T101.4 Run golangci-lint on compute/  Owner: TBD  Est: 15m  [x] 2026 03 07
-  - Dependencies: T101.1-T101.3.
-
-#### E102: NEON Assembly for Hot-Path Operations (O101)
-
-ARM64 NEON assembly for the operations that dominate non-matmul CPU time.
-All functions go in `internal/xblas/` following the existing pattern.
-
-##### T102.1 NEON vectorized Softmax  Owner: TBD  Est: 4h  [x] 2026 03 07
-
-Create `internal/xblas/softmax_arm64.go` and `softmax_arm64.s`.
-
-```go
-// SoftmaxF32 computes softmax(x) in-place for a float32 vector of length n.
-// Uses 3-pass NEON: (1) find max via FMAXP, (2) exp(x-max) via polynomial
-// approximation + FMLA, (3) normalize by reciprocal sum.
-//go:noescape
-func SoftmaxF32(data *float32, n int)
-```
-
-NEON implementation:
-1. Pass 1 (max): Load 4 floats at a time, FMAX across lanes, FMAXP to reduce.
-2. Pass 2 (exp + sum): Subtract max, compute exp() using a degree-4 polynomial
-   approximation of exp() (sufficient for float32 precision):
-   `exp(x) ~ 1 + x + x^2/2 + x^3/6 + x^4/24` for x in [-max, 0].
-   For wider range, use the identity `exp(x) = 2^(x/ln2)` with integer part
-   extracted via FCVTZS and fractional part via polynomial.
-   Accumulate sum with FADD.
-3. Pass 3 (normalize): Compute 1/sum, FMUL each element.
-
-Also create `internal/xblas/softmax_generic.go`:
-```go
-//go:build !arm64
-func SoftmaxF32(data *float32, n int) { softmaxF32Scalar(data, n) }
-```
-
-Wire into CPUEngine.Softmax for the common case (float32, last-axis, contiguous).
-
-Acceptance:
-- SoftmaxF32 output matches math.Exp-based softmax within 1e-5 relative error.
-- Benchmark: >= 3x faster than current per-element softmax for n=2048.
-- Handles n not divisible by 4 (tail elements processed scalar).
-- Dependencies: none.
-
-- [x] S102.1.1 NEON Softmax correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
-  - Test various lengths: 1, 4, 7, 128, 2048.
-  - Compare output against reference math.Exp softmax.
-  - BenchmarkSoftmaxNEON vs BenchmarkSoftmaxScalar.
-
-##### T102.2 NEON vectorized RMSNorm  Owner: TBD  Est: 4h  [x] 2026 03 07
-
-Create `internal/xblas/rmsnorm_arm64.go` and `rmsnorm_arm64.s`.
-
-```go
-// RMSNormF32 computes x * rsqrt(mean(x^2) + eps) * weight for one row.
-// x is input [D], weight is [D], out is [D], eps is epsilon.
-// Returns the scale factor rsqrt(mean(x^2) + eps).
-//go:noescape
-func RMSNormF32(out, x, weight *float32, D int, eps float32) float32
-```
-
-NEON implementation:
-1. Sum of squares: Load 4 x[i] at a time, FMUL x*x, FADD to accumulator.
-   Use dual accumulators V0/V1 to hide latency.
-2. Compute mean: FADDP to reduce, FDIV by D.
-3. Compute rsqrt: FADD eps, FRSQRTE + Newton-Raphson refinement (2 iterations
-   for float32 precision). ARM NEON has FRSQRTE instruction.
-4. Normalize: Load x[i] and weight[i], FMUL x * scale * weight, store to out.
-
-Also create generic fallback.
-
-Wire into `compute.FusedRMSNorm()` (currently at `compute/fused_rmsnorm.go`).
-Call `RMSNormF32()` per row instead of the per-element Go loop.
-
-Acceptance:
-- Output matches current FusedRMSNorm within 1e-5 relative error.
-- Benchmark: >= 3x faster for D=2048 (Gemma 3 hidden size).
-- Dependencies: none.
-
-- [x] S102.2.1 NEON RMSNorm correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
-
-##### T102.3 NEON vectorized SiLU (x * sigmoid(x))  Owner: TBD  Est: 3h  [x] 2026 03 07
-
-Create `internal/xblas/silu_arm64.go` and `silu_arm64.s`.
-
-```go
-// SiLUF32 computes silu(x) = x / (1 + exp(-x)) for n float32 values.
-// Reads from x, writes to out (may alias x for in-place).
-//go:noescape
-func SiLUF32(out, x *float32, n int)
-
-// SiLUGateF32 computes silu(gate) * up for n float32 values.
-// This is the SwiGLU operation: result[i] = gate[i] * sigmoid(gate[i]) * up[i].
-//go:noescape
-func SiLUGateF32(out, gate, up *float32, n int)
-```
-
-NEON implementation:
-- exp(-x) via the same polynomial approximation as Softmax T102.1.
-  Factor out the exp polynomial into a shared macro or inline function
-  in the assembly.
-- sigmoid(x) = 1 / (1 + exp(-x)): FNEG, exp polynomial, FADD 1, FRECPE + NR.
-- silu(x) = x * sigmoid(x): FMUL.
-- SiLUGateF32 fuses the SwiGLU operation: silu(gate) * up in one pass.
-
-Wire into `compute.FusedSiLUGate()` (at `compute/fused_silugate.go`).
-Call `SiLUGateF32()` instead of per-element Go loop with `math.Exp`.
-
-Acceptance:
-- Output matches math.Exp-based SiLU within 1e-5 relative error.
-- Benchmark: >= 3x faster for n=2048.
-- SiLUGateF32 matches FusedSiLUGate output.
-- Dependencies: none.
-
-- [x] S102.3.1 NEON SiLU/SiLUGate correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
-
-##### T102.4 NEON vectorized RoPE  Owner: TBD  Est: 3h  [x] 2026 03 07
-
-Create `internal/xblas/rope_arm64.go` and `rope_arm64.s`.
-
-```go
-// RoPEF32 applies rotary position embeddings to one position.
-// in is [head_dim], cos/sin are [half_dim], out is [head_dim].
-// rotaryDim must be even and <= head_dim.
-//go:noescape
-func RoPEF32(out, in, cos, sin *float32, halfDim, headDim int)
-```
-
-NEON implementation:
-1. Load 4 cos[i] and 4 sin[i].
-2. Load 4 in[i] (first half) and 4 in[i+halfDim] (second half).
-3. Compute: out[i] = in[i]*cos[i] - in[i+half]*sin[i]
-           out[i+half] = in[i+half]*cos[i] + in[i]*sin[i]
-   Using FMUL + FMLS (fused multiply-subtract) and FMLA (fused multiply-add).
-4. Copy pass-through dimensions (rotaryDim < headDim) with LDP/STP.
-
-Wire into `compute.FusedRoPE()` (at `compute/fused_rope.go`).
-Call `RoPEF32()` per (batch, seq) position instead of the per-element loop.
-
-Acceptance:
-- Output matches current FusedRoPE within 1e-6 relative error.
-- Benchmark: >= 2x faster for head_dim=256.
-- Handles non-aligned halfDim (tail scalar).
-- Dependencies: none.
-
-- [x] S102.4.1 NEON RoPE correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1.5h
-
-##### T102.5 NEON vectorized elementwise (Add, Mul, Sub for same-shape)  Owner: TBD  Est: 3h  [x] 2026 03 07
-
-Create `internal/xblas/elementwise_arm64.go` and `elementwise_arm64.s`.
-
-```go
-// VaddF32 computes out[i] = a[i] + b[i] for n float32 values using NEON.
-//go:noescape
-func VaddF32(out, a, b *float32, n int)
-
-// VmulF32 computes out[i] = a[i] * b[i] for n float32 values using NEON.
-//go:noescape
-func VmulF32(out, a, b *float32, n int)
-
-// VsubF32 computes out[i] = a[i] - b[i] for n float32 values using NEON.
-//go:noescape
-func VsubF32(out, a, b *float32, n int)
-
-// VdivF32 computes out[i] = a[i] / b[i] for n float32 values using NEON.
-//go:noescape
-func VdivF32(out, a, b *float32, n int)
-```
-
-NEON implementation: Load 8 elements (2x V registers), FADD/FMUL/FSUB/FDIV,
-store. Same loop structure as existing vdotf32 with tail handling.
-
-Wire into the same-shape fast path from T101.1. When T is float32 and shapes
-match, dispatch to the NEON function instead of the per-element Go loop:
-```go
-if slicesEqual(a.Shape(), b.Shape()) {
-    // Type-assert to float32 for NEON dispatch
-    if af32, ok := any(a).(*tensor.TensorNumeric[float32]); ok {
-        xblas.VaddF32(&rData[0], &af32.Data()[0], &bf32.Data()[0], len(rData))
-        return result, nil
-    }
-    // Generic same-shape loop fallback
-    ...
-}
-```
-
-Acceptance:
-- Output matches Go loop within float32 precision.
-- Benchmark: >= 2x faster for n=2048.
-- Tail elements handled correctly.
-- Dependencies: T101.1 (same-shape fast path).
-
-- [x] S102.5.1 NEON elementwise correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1h
-
-##### T102.6 NEON vectorized scalar ops (MulScalar, AddScalar, DivScalar)  Owner: TBD  Est: 2h  [x] 2026 03 07
-
-Create `internal/xblas/scalar_arm64.go` and `scalar_arm64.s`.
-
-```go
-// VmulScalarF32 computes out[i] = a[i] * scalar for n float32 values.
-//go:noescape
-func VmulScalarF32(out, a *float32, scalar float32, n int)
-
-// VaddScalarF32 computes out[i] = a[i] + scalar for n float32 values.
-//go:noescape
-func VaddScalarF32(out, a *float32, scalar float32, n int)
-
-// VdivScalarF32 computes out[i] = a[i] / scalar for n float32 values.
-//go:noescape
-func VdivScalarF32(out, a *float32, scalar float32, n int)
-```
-
-NEON implementation: VDUP scalar to all 4 lanes, then FMUL/FADD/FDIV with
-loaded data, same loop structure as VmulF32 but with broadcast scalar.
-
-Wire into CPUEngine.MulScalar/AddScalar/DivScalar via float32 type assertion.
-
-Acceptance:
-- Output matches Go loop.
-- Benchmark: >= 2x faster for n=2048.
-- Dependencies: none.
-
-- [x] S102.6.1 NEON scalar ops correctness + benchmark tests  [x] 2026 03 07  Owner: TBD  Est: 1h
-
-##### T102.7 Factor out shared NEON exp polynomial  Owner: TBD  Est: 1.5h  [x] 2026 03 07
-
-T102.1 (Softmax), T102.3 (SiLU) both need a vectorized exp() approximation.
-Factor the exp polynomial into a reusable assembly macro or a separate function:
-
-```go
-// VexpF32 computes out[i] = exp(x[i]) for n float32 values.
-// Uses range-reduced polynomial: exp(x) = 2^(int(x/ln2)) * poly(frac).
-//go:noescape
-func VexpF32(out, x *float32, n int)
-```
-
-The range-reduction approach:
-1. n = round(x / ln2) via FCVTNS (round to nearest int).
-2. r = x - n * ln2 (reduced range in [-ln2/2, ln2/2]).
-3. poly(r) = 1 + r + r^2/2 + r^3/6 + r^4/24 + r^5/120 (degree 5 for <1e-6 error).
-4. result = ldexp(poly(r), n) via integer add to float32 exponent bits.
-
-This function is used by:
-- SoftmaxF32 (exp(x-max) in pass 2)
-- SiLUF32 (exp(-x) for sigmoid)
-- Exp engine op (standalone)
-
-Acceptance:
-- VexpF32 output matches math.Exp within 1e-6 relative error for [-88, 88].
-- Handles -inf, +inf, NaN correctly.
-- Shared between Softmax and SiLU implementations.
-- Dependencies: none (but should be done before or alongside T102.1, T102.3).
-
-- [x] S102.7.1 VexpF32 correctness test  Owner: TBD  Est: 1h  2026 03 07
-  - Test edge cases: 0, -0, very negative (underflow), very positive (overflow), NaN.
-  - Test accuracy: 10000 random values in [-88, 88], max relative error < 1e-6.
-
-##### T102.8 Wire NEON functions into CPUEngine  Owner: TBD  Est: 2h  [x] 2026 03 07
-
-Update `compute/cpu_engine.go` and `compute/fused_*.go` to dispatch to the
-new NEON functions when T is float32 on ARM64:
-
-1. `Softmax()`: For float32, last-axis, call `xblas.SoftmaxF32()` per row.
-2. `FusedRMSNorm()`: Call `xblas.RMSNormF32()` per row.
-3. `FusedSiLUGate()`: Call `xblas.SiLUGateF32()`.
-4. `FusedRoPE()`: Call `xblas.RoPEF32()` per position.
-5. `Exp()`: Call `xblas.VexpF32()` for float32.
-6. `binaryOp()` same-shape fast path: Call `xblas.VaddF32` etc.
-7. `MulScalar/AddScalar/DivScalar()`: Call `xblas.VmulScalarF32` etc.
-
-Use runtime type assertion `any(a).(*tensor.TensorNumeric[float32])` to detect
-float32 tensors. Non-float32 types fall through to the generic loop.
-
-Acceptance:
-- All existing tests pass (NEON path produces same results as Go path).
-- bench_tps CPU shows measurable improvement.
-- No regression for non-float32 types.
-- Dependencies: T102.1-T102.7, T101.1.
-
-- [x] S102.8.1 End-to-end wiring integration test  Owner: TBD  Est: 1h  [x] 2026 03 07
-  - Run full Gemma 3 inference on ARM64 (DGX Spark). Verify output unchanged.
-
-##### T102.9 Run golangci-lint on compute/, internal/xblas/  Owner: TBD  Est: 30m  [x] 2026 03 07
-  - Dependencies: T102.1-T102.8.
-
-#### E103: Tensor Arena for Buffer Reuse (O103)
-
-A major source of CPU overhead is Go heap allocation of intermediate tensors.
-Each engine op creates a new tensor (slice header + backing array), which the
-GC must collect. A tensor arena pre-allocates a pool of buffers and reuses them.
-
-##### T103.1 Design and implement TensorArena  Owner: TBD  Est: 4h  [x] 2026 03 07
-
-Create `compute/arena.go`.
-
-```go
-type TensorArena struct {
-    mu      sync.Mutex
-    buffers map[int][]*[]float32 // size -> free list of backing arrays
-    stats   ArenaStats
-}
-
-type ArenaStats struct {
-    Hits   int64
-    Misses int64
-    Bytes  int64
-}
-
-func NewTensorArena() *TensorArena
-func (a *TensorArena) Get(size int) []float32    // reuse or allocate
-func (a *TensorArena) Put(buf []float32)          // return to pool
-func (a *TensorArena) Stats() ArenaStats
-func (a *TensorArena) Reset()                     // release all buffers
-```
-
-Strategy:
-- Bucket sizes by power-of-2 rounding (e.g., request 2048 elements gets a
-  2048-element buffer; request 2049 gets a 4096 buffer).
-- Per-bucket free list (stack). Get pops, Put pushes.
-- Arena.Reset() clears all free lists (called between generations).
-- Thread-safe via sync.Mutex (low contention since parallelFor uses shared pool).
-
-Acceptance:
-- Get returns buffers of correct minimum size.
-- Put + Get cycle reuses the same buffer.
-- No data corruption from buffer reuse (caller zeroes if needed).
-- Dependencies: none.
-
-- [x] S103.1.1 TensorArena unit tests  Owner: TBD  Est: 1.5h  2026 03 07
-  - Test Get/Put cycle, size bucketing, Reset.
-  - Test concurrent Get/Put from multiple goroutines.
-
-##### T103.2 Wire TensorArena into CPUEngine  Owner: TBD  Est: 3h  [x] 2026 03 07
-
-Update `CPUEngine.getOrCreateDest()` to use the arena when a dst tensor is
-not provided:
-
-```go
-func (e *CPUEngine[T]) getOrCreateDest(shape []int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-    if len(dst) > 0 && dst[0] != nil {
-        return dst[0], nil
-    }
-    size := 1
-    for _, d := range shape {
-        size *= d
-    }
-    // Get buffer from arena
-    buf := e.arena.Get(size)
-    return tensor.NewFromBuffer(shape, buf[:size])
-}
-```
-
-Add `arena *TensorArena` field to CPUEngine. Initialize in `NewCPUEngine()`.
-Arena.Reset() called at the start of each Forward() pass (or per generation).
-
-For the `dst` pattern: when the engine is done with an intermediate tensor,
-the arena reclaims it. This requires a tensor finalizer or explicit release.
-Simplest approach: the ExecutionPlan.Run() loop can call arena.Put() for slot
-buffers that are no longer referenced (their last consumer has run).
-
-Acceptance:
-- Arena hit rate > 80% during decode (most tensors have repeating shapes).
-- No double-free or use-after-free (verified with race detector).
-- Memory usage stable during 100-token generation (no growth).
-- Dependencies: T103.1.
-
-- [x] S103.2.1 Arena integration benchmarks  Owner: TBD  Est: 1.5h  [x] 2026 03 07
-  - BenchmarkForwardWithArena vs BenchmarkForwardWithoutArena.
-  - Memory allocation profile comparison.
-
-##### T103.3 Run golangci-lint on compute/  Owner: TBD  Est: 15m  [x] 2026 03 07
-  - Dependencies: T103.1-T103.2.
-
-#### E104: CPU Benchmark Validation (O104)
-
-##### T104.1 CPU ARM64 benchmark with all optimizations  Owner: TBD  Est: 2h  2026 03 07
-- [x] S104.1.1 CPU benchmark report  Owner: TBD  Est: 30m  2026 03 07
-  - Baseline: 6.86 tok/s. NEON: 8.15 tok/s median (7.72-8.45 range). +18.8%.
-  - Target was 10 tok/s. Achieved 81.5% of target.
-  - GEMM dominates at 72%, already NEON-accelerated. Remaining gap needs cache tiling.
-
-##### T104.2 Per-operation profiling  Owner: TBD  Est: 1.5h  2026 03 07
-- [x] S104.2.1 Per-operation profiling report  Owner: TBD  Est: 30m  2026 03 07
-  - sgemmAccRowNeon: 37.0% (F32 GEMM, NEON)
-  - q4DotRowSIMD: 35.2% (Q4 GEMV, NEON)
-  - Transpose: 4.4%
-  - Other: 23.4%
-
-##### T104.3 Output correctness verification  Owner: TBD  Est: 1h  2026 03 07
-- [x] 100 tokens generated without crashes or NaN/Inf.
-- Note: Q4 output is garbled (pre-existing Q4 quality issue, not NEON related).
-
-##### T104.4 Run golangci-lint on all modified packages  Owner: TBD  Est: 15m  2026 03 07
-- [x] go vet + go build clean on arm64.
-- Pre-existing: amd64 vdotf32 missing Go declaration (not our scope).
-
----
-
 ## 4. Parallel Work
 
 | Track | Epics | Description | Prerequisite |
@@ -1266,7 +740,6 @@ Acceptance:
 | 0 remaining | E96 P2-P3 | Fix 7 remaining composition violations | none |
 | A remaining | T87.3, S88/S89 | Remaining purego tests and cleanup | none |
 | C: tracing | E97, E98, E99, E100 | Tracing compiler + GPU KV cache + emitters + integration | none (builds on completed Track B infrastructure) |
-| D: NEON SIMD | E101, E102, E103, E104 | CPU SIMD acceleration + arena + benchmark | none |
 | B: tuning | E94, E95 | GPU performance tuning and benchmark | Track C complete |
 
 ### Track C Internal Parallelism
@@ -1279,17 +752,7 @@ Acceptance:
 | C4 | T98.4, T99.5, T100.1, T100.2 | After C3: integration wiring |
 | C5 | T100.3, T100.4 | After C4: end-to-end test |
 
-### Track D Internal Parallelism
-
-| Wave | Tasks | Notes |
-|------|-------|-------|
-| D1 | T101.1, T101.2, T101.3, T102.7, T103.1 | All independent: fast paths, exp polynomial, arena |
-| D2 | T102.1, T102.2, T102.3, T102.4, T102.5, T102.6 | After D1 (T102.7 needed for exp): all 6 NEON kernels in parallel |
-| D3 | T101.4, T102.8, T102.9, T103.2, T103.3 | After D2: wire everything into CPUEngine + arena + lint |
-| D4 | T104.1, T104.2, T104.3, T104.4 | After D3: benchmark and validate |
-
-Track C and Track D are fully independent and can run in parallel.
-Track 0 remaining and Track A remaining can run in parallel with both.
+Track 0 remaining and Track A remaining can run in parallel with Track C.
 Track B (E94, E95) starts only after Track C is complete.
 
 ---
@@ -1302,11 +765,9 @@ Track B (E94, E95) starts only after Track C is complete.
 | M57: GPU KV cache works | E98 | none | KV data on GPU, append/read correct, megakernel_ops.cu KV functions compile. |
 | M58: Megakernel fires | E100 | M56, M57, E99 | bench_tps shows "megakernel: compiled and loaded". Output matches plan.Run(). |
 | M59: 50 tok/s GPU | E94, E95 | M58 | bench_tps >= 50 tok/s median on DGX Spark GB10. |
-| M60: 10 tok/s CPU ARM64 | E104 | E101, E102, E103 | bench_tps -device cpu >= 10 tok/s median on DGX Spark GB10. |
+| M60: 10 tok/s CPU ARM64 | -- | -- | PARTIAL: 8.15 tok/s achieved (+18.8%). Remaining gap requires GEMM cache tiling. See docs/design.md 15.16. |
 
 Critical path (GPU): T97.1 -> T97.3 -> T97.4 -> T100.1 -> T100.2 -> T100.3 -> T94.1 -> T95.1
-
-Critical path (CPU): T102.7 -> T102.1/T102.3 -> T102.8 -> T104.1
 
 ---
 
@@ -1319,10 +780,6 @@ Critical path (CPU): T102.7 -> T102.1/T102.3 -> T102.8 -> T104.1
 | R102 | GPU KV cache memory budget: 26 layers x 2 (K/V) x 8192 seq x 1024 dim x 4 bytes = 1.6GB for full context. DGX Spark unified memory is large but this is significant. | Out of memory for long contexts | Low | Default to 512-token budget (~104MB). Allow user-configurable max_seq_len for megakernel path. Fall back to plan.Run() for longer contexts. |
 | R103 | EngineProxy adds interface dispatch overhead to normal (non-tracing) inference. | Small performance regression on non-megakernel path | Low | Interface dispatch is ~1-2ns. With 650 engine calls per token at 7.78 tok/s, total overhead is ~1us. Negligible vs 128ms per token. |
 | R104 | UnaryOp in sigmoid (inside SwiGLU) blocks clean trace for Gemma 3. | Must refactor sigmoid before megakernel works | Medium | T97.6 addresses this. Refactor Sigmoid.Forward() to use engine.Exp + engine.AddScalar + engine.Div. Small, focused change. |
-| R105 | NEON exp polynomial approximation may have insufficient precision for some models. | Softmax/SiLU output differs enough to change generated tokens | Low | Degree-5 polynomial with range reduction achieves <1e-6 relative error. Verify with full 100-token generation comparison test (T104.3). |
-| R106 | Plan9 assembler lacks many NEON mnemonics; must use raw WORD encoding. | Assembly is harder to write and debug | High | Existing q4dot_arm64.s demonstrates the pattern. Comment each WORD with the mnemonic it represents. Use the same encoding patterns throughout. |
-| R107 | Tensor arena may cause use-after-free if buffer returned to pool while still referenced. | Data corruption, intermittent test failures | Medium | Run all tests with -race flag. Arena.Put() only called by ExecutionPlan.Run() for slots that have been consumed by all downstream ops. Never Put() a buffer that is still a function argument. |
-| R108 | float32 type assertion in CPUEngine NEON dispatch may not optimize with Go generics. | Dispatch overhead cancels NEON benefit for small tensors | Low | Only dispatch to NEON for tensors with >= 32 elements. Below that, the scalar loop is fast enough. Profile the type assertion overhead. |
 | R92 | Register pressure: hidden_dim=2048 does not fit in registers | Must use shared/global memory, slower | High | Tile the hidden dimension. Profile with nvcc --ptxas-options=-v. |
 | R95 | KV cache reads limit bandwidth utilization for long contexts | Cannot reach theoretical max | High | Focus on short contexts (< 512). Document crossover point. |
 | R98 | 50 tok/s target not achieved | Unknown bottleneck | Medium | If 30+ tok/s, profile with nsys. If < 30, fall back to fused kernels (archived E83-E85). |
@@ -1370,6 +827,42 @@ A task is done when:
 
 ## 8. Progress Log
 
+### Change Summary -- 2026-03-08 (v12)
+
+Wave C1 complete (5 tasks in parallel via worktrees). Track C foundation and
+Track 0 composition fixes merged into feat/neon-softmax.
+
+**Track C completed tasks:**
+- T97.1 + S97.1.1: EngineProxy[T] with TraceRecorder interface. Commit 4f5518b.
+- T97.2 + S97.2.1: Tracer[T] with pointer-based tensor identity tracking. Commit 4f5518b.
+- T99.1 + S99.1.1: Slice emitter in optable.go + megakernel_ops.cu.
+- T99.2 + S99.2.1: Repeat emitter in optable.go + megakernel_ops.cu.
+- T99.3 + S99.3.1: ReduceSum and ReduceMean emitters with shared memory reduction.
+
+**Track 0 completed tasks:**
+- T96.6 + S96.6.1: Conv2d refactored to im2col + engine.MatMul. 8 parity tests.
+- T96.9 + S96.9.1: PolynomialExpansion composed via engine.Fill/Pow/Mul/Concat.
+- T96.10: SpectralFingerprint composed via precomputed Fourier basis + engine.MatMul.
+
+**Deviation:** Fixed pre-existing SWA test helpers (noopOptimizer/setOptimizer
+redeclaration between ema_test.go and helpers_test.go). Commit a79afed.
+
+**Wave C2 unblocked:** T97.3, T97.5, T97.7, T98.1, T98.2, T98.3.
+
+### Change Summary -- 2026-03-07 (v11)
+
+Trimmed plan. Stable knowledge preserved in docs/design.md section 15.16 and
+docs/adr/029-neon-simd-cpu-acceleration.md. Removed completed epics: E101,
+E102, E103, E104 (Track D). Removed resolved risks: R105, R106, R107, R108.
+Removed completed Track D parallel work section and wave entries. Removed
+NEON Exp Polynomial Reference and ARM64 encoding cheat sheet from Appendix
+(moved to docs/design.md 15.16). Updated ADR index in docs/design.md (added
+ADRs 022-029). Updated milestone M60 to PARTIAL (8.15 tok/s achieved).
+Updated CPU tok/s current from 6.86 to 8.15 in success metrics. Removed
+Track D objectives (O101-O104) and deliverables (D435-D439). Removed
+completed Track D from hand-off notes key file map. Kept only v10 progress
+log entry.
+
 ### Change Summary -- 2026-03-07 (v10)
 
 Wave D4 complete. All Track D tasks done. Benchmark: 8.15 tok/s median (+18.8%
@@ -1387,121 +880,6 @@ of CPU, already NEON-accelerated. Remaining gap requires GEMM cache tiling.
 **System issue:** DGX Spark Go 1.25.0 has intermittent segfaults (~10-40%) across
 ALL packages including tensor/ (no assembly). Confirmed not caused by our code.
 
-### Change Summary -- 2026-03-07 (v9)
-
-Wave D3 complete (sequential). NEON wired into CPUEngine, TensorArena integrated.
-
-**Completed tasks:**
-- T101.4: golangci-lint compute/ -- 0 issues.
-- T102.8: Wire NEON into CPUEngine (Softmax, Exp, Add/Sub/Mul/Div, scalars, fused ops). Commits 7ac9a35, 0afe430.
-- T102.9: golangci-lint compute/ + internal/xblas/ -- 0 issues.
-- T103.1: TensorArena (re-implemented, original commit was empty). Commit dc97cd7.
-- T103.2: Wire TensorArena into CPUEngine getOrCreateDest. Commit e3775a8.
-- T103.3: golangci-lint compute/ -- 0 issues.
-
-**Deviation:** T103.1 was marked complete in Wave D1 but the commit was empty (no files).
-Re-implemented as part of Wave D3 with proper tests and committed.
-
-**Wave D4 unblocked:** T104.1-T104.4 (benchmark validation on DGX Spark).
-
-### Change Summary -- 2026-03-07 (v8)
-
-Wave D2 complete (6 NEON assembly kernels in parallel via worktrees). All
-committed to feat/neon-softmax. Tests pass, lint clean.
-
-**Completed tasks:**
-- T102.1: NEON Softmax (3-pass: max, exp+sum, normalize). Commit bc775d8.
-- T102.2: NEON RMSNorm (FRSQRTE + 2 Newton-Raphson). Commit a40a2f7.
-- T102.3: NEON SiLU + SiLUGate (inline exp polynomial + FRECPE). Commit d766923.
-- T102.4: NEON RoPE (4-wide SIMD + scalar tail + passthrough). Commit ef099ef.
-- T102.5: NEON elementwise VaddF32/VmulF32/VsubF32/VdivF32. Commit a40a2f7.
-- T102.6: NEON scalar VmulScalarF32/VaddScalarF32/VdivScalarF32. Commit c751b5c.
-- Lint fix: rmsnorm_generic.go D->dim, rope_test.go rand/v2. Commit 0faf769.
-
-**Wave D3 unblocked:** T101.4 (lint compute/), T102.8 (wire NEON into CPUEngine),
-T102.9 (lint xblas/), T103.2 (wire arena into CPUEngine), T103.3 (lint compute/).
-
-### Change Summary -- 2026-03-07 (v7)
-
-Wave D1 complete (5 tasks in parallel via worktrees). All merged into
-feat/same-shape-fast-path. Tests pass, lint clean.
-
-**Completed tasks:**
-- T101.1: Same-shape fast path in binaryOp (7-8x speedup for same-shape ops). Commit f733d15.
-- T101.2: Pow x^2 specialization using x*x (13-15x speedup). Commit c28a529.
-- T101.3: Scalar op baseline benchmarks (MulScalar, AddScalar, DivScalar). Commit 3d8c3d7.
-- T102.7: NEON VexpF32 vectorized exp polynomial (max error 8.98e-08). Commit 5931298.
-- T103.1: TensorArena with power-of-2 bucketed pooling (6 tests + bench). Commit b4b5eb1.
-
-**Wave D2 unblocked:** T102.1 (Softmax), T102.2 (RMSNorm), T102.3 (SiLU),
-T102.4 (RoPE), T102.5 (elementwise), T102.6 (scalar ops) -- all 6 NEON kernels.
-
-### Change Summary -- 2026-03-07 (v6)
-
-Added Track D (NEON SIMD CPU Acceleration) with 4 new epics to close the CPU
-performance gap with llama.cpp.
-
-**New epics:**
-- E101: Same-Shape Fast Paths and Pow Specialization (T101.1-T101.4)
-- E102: NEON Assembly for Hot-Path Operations (T102.1-T102.9)
-- E103: Tensor Arena for Buffer Reuse (T103.1-T103.3)
-- E104: CPU Benchmark Validation (T104.1-T104.4)
-
-**New objectives:** O101 (NEON SIMD), O102 (fast paths), O103 (arena), O104 (10 tok/s CPU).
-**New milestone:** M60 (10 tok/s CPU ARM64).
-**New risks:** R105 (exp precision), R106 (plan9 asm), R107 (arena use-after-free), R108 (dispatch overhead).
-
-**ADRs created:**
-- docs/adr/029-neon-simd-cpu-acceleration.md: NEON SIMD strategy for CPU parity
-  with llama.cpp. Evaluates 3 approaches (CGo+intrinsics, plan9 assembly,
-  compiler autovectorization), selects plan9 assembly.
-
-**Key design decisions:**
-- All NEON assembly follows existing internal/xblas/ pattern with _arm64.s +
-  _arm64.go + _generic.go triple.
-- exp() approximation shared between Softmax and SiLU via VexpF32 (T102.7).
-- Same-shape fast path (T101.1) is pure Go, NEON dispatch (T102.5) layers on top.
-- Tensor arena uses power-of-2 bucketing with per-bucket free lists.
-- Track D is fully independent of Track C and can run in parallel.
-
-### Change Summary -- 2026-03-07 (v5)
-
-Added Track C (Tracing Compiler) to resolve megakernel blocker.
-
-**Root cause identified**: graph.Compile() records composite node OpTypes
-(GroupedQueryAttention, FFN, EmbeddingLookup, LMHead) instead of primitive
-Engine ops. The megakernel emitter only knows primitives, so CheckSupport()
-fails silently. The megakernel never fires on the real model.
-
-**Solution**: Tracing compiler (approach C). An EngineProxy wraps the Engine
-and records every primitive Engine method call during compilation. Forward()
-calls proceed normally through all composite layers, but the proxy captures
-every primitive call (MatMul, Softmax, etc.) as a separate instruction. This
-is the JAX/PyTorch FX pattern -- layers remain high-level abstractions, the
-compiler flattens automatically.
-
-New epics:
-- E97: EngineProxy and Tracer (T97.1-T97.8)
-- E98: GPU KV Cache for Megakernel Attention (T98.1-T98.4)
-- E99: New Primitive Op Emitters (T99.1-T99.5)
-- E100: Tracing Compiler Integration (T100.1-T100.4)
-
-New milestones: M56 (tracing works), M57 (GPU KV cache), M58 (megakernel fires),
-M59 (50 tok/s).
-
-ADRs created:
-- docs/adr/028-tracing-compiler.md: Tracing compiler for automatic primitive
-  op decomposition. Evaluates 3 approaches, selects approach C.
-
-Trimmed: Completed epics E90, E91, E92, and completed tasks from E96 P1,
-E87, E88, E89, E93 moved to docs/design.md section 15.16.
-
-### Change Summary -- 2026-03-07 (v4)
-
-Added Track 0 (E96: Composition Fixes). 5-agent audit found 12 violations.
-Priority 1 (T96.1-T96.3) and Priority 2 partial (T96.4-T96.5) completed.
-ADR 027 created. Milestone M49 added. Risk R99 added.
-
 ---
 
 ## 9. Hand-off Notes
@@ -1509,57 +887,42 @@ ADR 027 created. Milestone M49 added. Risk R99 added.
 ### For a New Contributor
 
 - **Architecture:** Read docs/design.md for full context. ADRs in docs/adr/.
-- **Phase 34 status:** Tracks 0/A/B infrastructure complete. Track C (tracing
-  compiler) and Track D (NEON SIMD) are the active work. See docs/design.md
-  section 15.16 for what was already delivered.
+- **Phase 34 status:** Tracks 0/A/B infrastructure and Track D (NEON SIMD)
+  complete. Track C (tracing compiler) is the primary active work.
+  See docs/design.md section 15.16 for all completed work.
 - **Track C core problem:** The megakernel is fully built (emit, compile, load,
   wire) but never fires because the instruction tape has composite ops. The
   tracing compiler (E97) fixes this by recording primitive Engine calls.
-- **Track D core problem:** CPU inference is 6.86 tok/s, llama.cpp is ~100.
-  The gap is NEON SIMD for all non-matmul ops, broadcasting overhead, and GC
-  allocation pressure. E101 (fast paths), E102 (NEON assembly), E103 (arena).
 - **Key starting points:**
   - Track C: `compute/engine.go` (Engine interface) -> `compute/engine_proxy.go`
     (T97.1) -> `compute/tracer.go` (T97.2) -> `graph/compile.go` CompileTraced() (T97.4)
-  - Track D: `compute/cpu_engine.go:546` (binaryOp) -> T101.1 same-shape fast path.
-    `internal/xblas/q4dot_arm64.s` (existing NEON pattern) -> T102.x new kernels.
 - **Pre-commit hook:** Runs golangci-lint and tests. Rejects multi-directory commits.
 
 ### Key File Map
 
-| File | Purpose | Track C Change | Track D Change |
-|------|---------|---------------|---------------|
-| `compute/engine.go` | Engine[T] interface (~25 methods) | Reference for EngineProxy | Reference for NEON dispatch |
-| `compute/engine_proxy.go` | (new) EngineProxy[T] wrapping Engine | T97.1 | -- |
-| `compute/tracer.go` | (new) Tracer[T] records TracedOps | T97.2 | -- |
-| `compute/cpu_engine.go` | CPUEngine implementation | -- | T101.1 fast path, T102.8 NEON wiring |
-| `compute/fused_rmsnorm.go` | FusedRMSNorm | -- | T102.2 NEON dispatch |
-| `compute/fused_rope.go` | FusedRoPE | -- | T102.4 NEON dispatch |
-| `compute/fused_silugate.go` | FusedSiLUGate | -- | T102.3 NEON dispatch |
-| `compute/arena.go` | (new) TensorArena | -- | T103.1 |
-| `graph/compile.go` | Compile() + ExecutionPlan | Add CompileTraced() T97.4 | -- |
-| `graph/graph.go` | Graph[T] struct | Add EngineProxy accessors T97.3 | -- |
-| `generate/tracing_cache.go` | (new) TracingCacheProvider | T98.1 | -- |
-| `internal/codegen/kv_cache.go` | (new) GPUKVCache | T98.2 | -- |
-| `internal/codegen/optable.go` | Op emitter table (26 ops) | Add Slice, Repeat, Reduce T99 | -- |
-| `internal/codegen/emit.go` | EmitMegakernel() | Add KV cache kernel args T98.3 | -- |
-| `internal/xblas/softmax_arm64.s` | (new) NEON Softmax | -- | T102.1 |
-| `internal/xblas/rmsnorm_arm64.s` | (new) NEON RMSNorm | -- | T102.2 |
-| `internal/xblas/silu_arm64.s` | (new) NEON SiLU/SiLUGate | -- | T102.3 |
-| `internal/xblas/rope_arm64.s` | (new) NEON RoPE | -- | T102.4 |
-| `internal/xblas/elementwise_arm64.s` | (new) NEON Add/Mul/Sub/Div | -- | T102.5 |
-| `internal/xblas/scalar_arm64.s` | (new) NEON MulScalar/etc. | -- | T102.6 |
-| `internal/xblas/exp_arm64.s` | (new) NEON VexpF32 | -- | T102.7 |
-| `generate/generator.go` | Generate() decode loop | Use CompileTraced T100.1 | -- |
-| `generate/stream.go` | GenerateStream() decode loop | Use CompileTraced T100.1 | -- |
-| `generate/megakernel.go` | tryCompileMegakernel() | Wire GPU KV cache T100.2 | -- |
-| `inference/arch_common.go` | buildTransformerGraph() | Wrap engine with EngineProxy T97.3 | -- |
+| File | Purpose | Track C Change |
+|------|---------|---------------|
+| `compute/engine.go` | Engine[T] interface (~25 methods) | Reference for EngineProxy |
+| `compute/engine_proxy.go` | (new) EngineProxy[T] wrapping Engine | T97.1 |
+| `compute/tracer.go` | (new) Tracer[T] records TracedOps | T97.2 |
+| `compute/cpu_engine.go` | CPUEngine implementation | -- |
+| `graph/compile.go` | Compile() + ExecutionPlan | Add CompileTraced() T97.4 |
+| `graph/graph.go` | Graph[T] struct | Add EngineProxy accessors T97.3 |
+| `generate/tracing_cache.go` | (new) TracingCacheProvider | T98.1 |
+| `internal/codegen/kv_cache.go` | (new) GPUKVCache | T98.2 |
+| `internal/codegen/optable.go` | Op emitter table (26 ops) | Add Slice, Repeat, Reduce T99 |
+| `internal/codegen/emit.go` | EmitMegakernel() | Add KV cache kernel args T98.3 |
+| `generate/generator.go` | Generate() decode loop | Use CompileTraced T100.1 |
+| `generate/stream.go` | GenerateStream() decode loop | Use CompileTraced T100.1 |
+| `generate/megakernel.go` | tryCompileMegakernel() | Wire GPU KV cache T100.2 |
+| `inference/arch_common.go` | buildTransformerGraph() | Wrap engine with EngineProxy T97.3 |
 
 ### Performance Baselines
 
 | Config | tok/s | Source |
 |--------|-------|--------|
-| CPU ARM64 | 6.86 | Phase 30 |
+| CPU ARM64 (post Track D) | 8.15 median | Phase 34 Track D |
+| CPU ARM64 (pre Track D) | 6.86 | Phase 30 |
 | GPU (cuda) | 10.32 peak / 7.78 median | Phase 33 |
 | GPU (purego) | 6.59 CPU | Phase 34 Track A |
 | Ollama GB10 | ~100 (est.) | Interpolated |
@@ -1569,37 +932,5 @@ ADR 027 created. Milestone M49 added. Risk R99 added.
 
 ## 10. Appendix
 
-### NEON Exp Polynomial Reference
-
-The vectorized exp() (T102.7) uses range reduction with degree-5 polynomial:
-
-```
-Input: x (float32)
-1. n = round(x * (1/ln2))        // FMUL + FCVTNS
-2. r = x - n * ln2               // FMSUB (fused)
-3. p = c0 + r*(c1 + r*(c2 + r*(c3 + r*(c4 + r*c5))))  // Horner's method
-   c0=1.0, c1=1.0, c2=0.5, c3=1/6, c4=1/24, c5=1/120
-4. result = ldexp(p, n)           // add n to float32 exponent bits:
-                                  //   FCVTZS Vn.4S, Vn.4S (float->int)
-                                  //   SHL Vn.4S, Vn.4S, #23 (shift to exponent)
-                                  //   ADD Vp.4S, Vp.4S, Vn.4S (add exponent)
-```
-
-Max relative error: < 2e-7 for x in [-87.3, 88.7] (float32 range).
-
-### ARM64 NEON Instruction Encoding Cheat Sheet
-
-Common instructions requiring WORD encoding in Go plan9 assembly:
-
-| Instruction | Encoding | Description |
-|-------------|----------|-------------|
-| FMAXP Vd.4S, Vn.4S, Vm.4S | `6E20F400+...` | Pairwise max |
-| FADDP Vd.4S, Vn.4S, Vm.4S | `6E20D400+...` | Pairwise add |
-| FRSQRTE Vd.4S, Vn.4S | `6EA1D800+...` | Reciprocal sqrt estimate |
-| FRSQRTS Vd.4S, Vn.4S, Vm.4S | `0EA0FC00+...` | RSqrt Newton step |
-| FCVTNS Vd.4S, Vn.4S | `4E21A800+...` | Float to int nearest |
-| FRINTX Vd.4S, Vn.4S | `6E219800+...` | Round to integral |
-| FNEG Vd.4S, Vn.4S | `6EA0F800+...` | Negate |
-
-Note: All register operand fields must be encoded correctly in the immediate.
-Use `aarch64-linux-gnu-objdump -d` on a test .o to verify encodings.
+No appendix content. Technical references for NEON assembly (exp polynomial,
+instruction encoding) moved to docs/design.md section 15.16.
