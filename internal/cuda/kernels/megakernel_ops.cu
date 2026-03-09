@@ -8,6 +8,7 @@
 //   #include "megakernel_ops.cu"
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <cooperative_groups.h>
 #include <math.h>
 
@@ -147,38 +148,46 @@ __device__ void dev_softmax(float* out, const float* in, int rows, int cols) {
 // T92.5: Q4 GEMV device function
 // ============================================================
 
-// Q4 block format: 32 nibbles (16 bytes) + 1 float scale + 1 float zero.
-// Total block size: 24 bytes for 32 elements.
+// Q4_0 block format (Zerfoo Q4Storage):
+//   bytes[0:2] = float16 scale (little-endian)
+//   bytes[2:18] = 16 packed bytes (32 x 4-bit values, low nibble first)
+//   Dequant: val = (nibble - 8) * scale
+// Total block size: 18 bytes for 32 elements.
 #define Q4_BLOCK_SIZE 32
+#define Q4_BLOCK_BYTES 18
 
-// dev_gemv_q4 computes matrix-vector product with Q4-quantized weight matrix.
+// dev_gemv_q4 computes matrix-vector product with Q4_0 weight matrix.
 // out[m] = sum_k(dequant(weight[m][k]) * activation[k]) for k in [0, K)
 //
-// Weight layout: row-major blocks of Q4_BLOCK_SIZE elements.
-// Each block: scale (float), zero (float), 16 bytes of packed nibbles.
+// Weight layout: row-major Q4_0 blocks, 18 bytes each.
 __device__ void dev_gemv_q4(float* out, const void* weight,
                              const float* activation, int M, int K) {
-    // Each thread handles one or more output rows.
+    int num_blocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
     for (int m = threadIdx.x; m < M; m += blockDim.x) {
         float acc = 0.0f;
-        int num_blocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
-        const char* row = (const char*)weight + (size_t)m * num_blocks * 24;
+        const unsigned char* row = (const unsigned char*)weight +
+            (size_t)m * num_blocks * Q4_BLOCK_BYTES;
 
         for (int blk = 0; blk < num_blocks; blk++) {
-            const char* block_ptr = row + blk * 24;
-            float scale = *(const float*)block_ptr;
-            float zero = *(const float*)(block_ptr + 4);
-            const unsigned char* nibbles = (const unsigned char*)(block_ptr + 8);
+            const unsigned char* blk_ptr = row + blk * Q4_BLOCK_BYTES;
 
+            // Read float16 scale (2 bytes, little-endian).
+            unsigned short scale_bits = (unsigned short)blk_ptr[0] |
+                                        ((unsigned short)blk_ptr[1] << 8);
+            float scale = __half2float(*(const __half*)&scale_bits);
+
+            const unsigned char* packed = blk_ptr + 2;
             int k_start = blk * Q4_BLOCK_SIZE;
-            for (int i = 0; i < 16 && (k_start + i * 2) < K; i++) {
-                unsigned char packed = nibbles[i];
-                float v0 = ((packed & 0x0F) - 8) * scale + zero;
-                float v1 = ((packed >> 4) - 8) * scale + zero;
+
+            #pragma unroll
+            for (int i = 0; i < 16; i++) {
                 int k0 = k_start + i * 2;
-                int k1 = k0 + 1;
+                if (k0 >= K) break;
+                unsigned char byte_val = packed[i];
+                float v0 = (float)((int)(byte_val & 0x0F) - 8) * scale;
+                float v1 = (float)((int)(byte_val >> 4) - 8) * scale;
                 acc += v0 * activation[k0];
-                if (k1 < K) acc += v1 * activation[k1];
+                if (k0 + 1 < K) acc += v1 * activation[k0 + 1];
             }
         }
         out[m] = acc;
