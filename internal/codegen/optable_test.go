@@ -12,27 +12,34 @@ func TestEmitterRegistered(t *testing.T) {
 	type opSpec struct {
 		name      string
 		numInputs int
+		extra     map[string]any
 	}
+	scalarExtra := map[string]any{"scalar": 0.5}
+	axisExtra := map[string]any{"axis": 0}
+	sliceExtra := map[string]any{"starts": []int{0}, "ends": []int{10}, "axes": []int{0}}
+	repeatExtra := map[string]any{"axis": 0, "repetitions": 2}
+	transposeExtra := map[string]any{"axes": []int{1, 0}}
 	gemmaOps := []opSpec{
-		{"Add", 2}, {"Sub", 2}, {"Mul", 2}, {"Div", 2}, {"Pow", 2},
-		{"Exp", 1}, {"Log", 1}, {"Sqrt", 1}, {"Rsqrt", 1}, {"Tanh", 1},
-		{"Neg", 1}, {"Abs", 1}, {"Silu", 1},
-		{"AddScalar", 1}, {"MulScalar", 1}, {"SubScalar", 1}, {"DivScalar", 1}, {"PowScalar", 1},
-		{"RMSNorm", 2}, {"Softmax", 1},
-		{"ReduceSum", 1}, {"ReduceMean", 1},
-		{"Slice", 1}, {"Repeat", 1},
-		{"MatMul", 2}, {"MatMulNBits", 2},
-		{"Gather", 2}, {"Concat", 1}, {"Reshape", 1}, {"Transpose", 1},
-		{"KVCacheAppendK", 2}, {"KVCacheAppendV", 2},
-		{"KVCacheGetK", 1}, {"KVCacheGetV", 1},
-		{"KVCacheSeqLen", 0},
+		{"Add", 2, nil}, {"Sub", 2, nil}, {"Mul", 2, nil}, {"Div", 2, nil}, {"Pow", 2, nil},
+		{"Exp", 1, nil}, {"Log", 1, nil}, {"Sqrt", 1, nil}, {"Rsqrt", 1, nil}, {"Tanh", 1, nil},
+		{"Neg", 1, nil}, {"Abs", 1, nil}, {"Silu", 1, nil},
+		{"AddScalar", 1, scalarExtra}, {"MulScalar", 1, scalarExtra},
+		{"SubScalar", 1, scalarExtra}, {"DivScalar", 1, scalarExtra}, {"PowScalar", 1, scalarExtra},
+		{"RMSNorm", 2, nil}, {"Softmax", 1, axisExtra},
+		{"ReduceSum", 1, axisExtra}, {"ReduceMean", 1, axisExtra},
+		{"Slice", 1, sliceExtra}, {"Repeat", 1, repeatExtra},
+		{"MatMul", 2, nil}, {"MatMulNBits", 2, nil},
+		{"Gather", 2, nil}, {"Concat", 1, nil}, {"Reshape", 1, nil}, {"Transpose", 1, transposeExtra},
+		{"KVCacheAppendK", 2, nil}, {"KVCacheAppendV", 2, nil},
+		{"KVCacheGetK", 1, nil}, {"KVCacheGetV", 1, nil},
+		{"KVCacheSeqLen", 0, nil},
 	}
 	for _, op := range gemmaOps {
 		inputIdx := make([]int, op.numInputs)
 		for i := range inputIdx {
 			inputIdx[i] = i
 		}
-		meta := graph.InstructionMeta{OpName: op.name, InputIdx: inputIdx, OutputIdx: 10}
+		meta := graph.InstructionMeta{OpName: op.name, InputIdx: inputIdx, OutputIdx: 10, ExtraArgs: op.extra}
 		slots := make([]SlotInfo, op.numInputs)
 		for i := range slots {
 			slots[i] = SlotInfo{Shape: []int{1, 2048}}
@@ -60,30 +67,32 @@ func TestEmitterOutputFormat(t *testing.T) {
 	tests := []struct {
 		op      string
 		inputs  int
+		extra   map[string]any
 		wantSub string // substring that should appear in emitted code
 	}{
-		{"Add", 2, "slot_"},
-		{"Exp", 1, "expf"},
-		{"MulScalar", 1, "slot_"},
-		{"RMSNorm", 2, "dev_rmsnorm"},
-		{"Softmax", 1, "dev_softmax"},
-		{"ReduceSum", 1, "dev_reduce_sum"},
-		{"ReduceMean", 1, "dev_reduce_mean"},
-		{"Slice", 1, "dev_slice"},
-		{"Repeat", 1, "dev_repeat"},
-		{"MatMul", 2, "dev_gemv"},
-		{"Gather", 2, "dev_gather"},
-		{"KVCacheAppendK", 2, "dev_kv_append"},
-		{"KVCacheAppendV", 2, "dev_kv_append"},
-		{"KVCacheGetK", 1, "kv_k["},
-		{"KVCacheGetV", 1, "kv_v["},
-		{"KVCacheSeqLen", 0, "kv_seq_len"},
+		{"Add", 2, nil, "slot_"},
+		{"Exp", 1, nil, "expf"},
+		{"MulScalar", 1, map[string]any{"scalar": 0.125}, "slot_"},
+		{"RMSNorm", 2, nil, "dev_rmsnorm"},
+		{"Softmax", 1, map[string]any{"axis": -1}, "dev_softmax"},
+		{"ReduceSum", 1, map[string]any{"axis": 0}, "dev_reduce_sum"},
+		{"ReduceMean", 1, map[string]any{"axis": 0}, "dev_reduce_mean"},
+		{"Slice", 1, map[string]any{"starts": []int{0}, "ends": []int{10}, "axes": []int{0}}, "dev_slice"},
+		{"Repeat", 1, map[string]any{"axis": 0, "repetitions": 2}, "dev_repeat"},
+		{"MatMul", 2, nil, "dev_gemv"},
+		{"Gather", 2, nil, "dev_gather"},
+		{"KVCacheAppendK", 2, nil, "dev_kv_append"},
+		{"KVCacheAppendV", 2, nil, "dev_kv_append"},
+		{"KVCacheGetK", 1, nil, "kv_k["},
+		{"KVCacheGetV", 1, nil, "kv_v["},
+		{"KVCacheSeqLen", 0, nil, "kv_seq_len"},
 	}
 	for _, tc := range tests {
 		meta := graph.InstructionMeta{
 			OpName:    tc.op,
 			InputIdx:  make([]int, tc.inputs),
 			OutputIdx: 10,
+			ExtraArgs: tc.extra,
 		}
 		slots := make([]SlotInfo, tc.inputs)
 		for i := range slots {

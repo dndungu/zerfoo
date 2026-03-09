@@ -5,9 +5,99 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/zerfoo/zerfoo/graph"
 )
+
+// --- ExtraArgs helpers ---
+
+// extraFloat extracts a float64 from ExtraArgs. Returns 0 if missing.
+func extraFloat(extra map[string]any, key string) (float64, bool) {
+	if extra == nil {
+		return 0, false
+	}
+	v, ok := extra[key]
+	if !ok {
+		return 0, false
+	}
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	default:
+		return 0, false
+	}
+}
+
+// extraInt extracts an int from ExtraArgs. Returns fallback if missing.
+func extraInt(extra map[string]any, key string, fallback int) int {
+	if extra == nil {
+		return fallback
+	}
+	v, ok := extra[key]
+	if !ok {
+		return fallback
+	}
+	switch val := v.(type) {
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case float64:
+		return int(val)
+	default:
+		return fallback
+	}
+}
+
+// extraIntSlice extracts an int slice from ExtraArgs.
+func extraIntSlice(extra map[string]any, key string) []int {
+	if extra == nil {
+		return nil
+	}
+	v, ok := extra[key]
+	if !ok {
+		return nil
+	}
+	switch val := v.(type) {
+	case []int:
+		return val
+	case []any:
+		result := make([]int, len(val))
+		for i, item := range val {
+			switch iv := item.(type) {
+			case int:
+				result[i] = iv
+			case float64:
+				result[i] = int(iv)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+// lastDim returns the last dimension of the i-th input shape.
+func lastDim(inputs []SlotInfo, i int) int {
+	if i < len(inputs) && len(inputs[i].Shape) > 0 {
+		return inputs[i].Shape[len(inputs[i].Shape)-1]
+	}
+	return 0
+}
+
+// formatIntArray formats an int slice as a CUDA array initializer: {1, 2, 3}.
+func formatIntArray(vals []int) string {
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = fmt.Sprintf("%d", v)
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
 
 // SlotInfo describes a slot's shape for the emitter.
 type SlotInfo struct {
@@ -143,15 +233,23 @@ func prefixUnaryOp(prefix string) OpEmitter {
 
 func scalarOp(op string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] %s scalar_%d;",
-			meta.OutputIdx, meta.InputIdx[0], op, meta.OutputIdx), nil
+		scalar, ok := extraFloat(meta.ExtraArgs, "scalar")
+		if !ok {
+			return "", fmt.Errorf("scalarOp %q: missing ExtraArgs[\"scalar\"]", op)
+		}
+		return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] %s %.9ef;",
+			meta.OutputIdx, meta.InputIdx[0], op, scalar), nil
 	}
 }
 
 func funcScalarOp(fn string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid], scalar_%d);",
-			meta.OutputIdx, fn, meta.InputIdx[0], meta.OutputIdx), nil
+		scalar, ok := extraFloat(meta.ExtraArgs, "scalar")
+		if !ok {
+			return "", fmt.Errorf("funcScalarOp %q: missing ExtraArgs[\"scalar\"]", fn)
+		}
+		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid], %.9ef);",
+			meta.OutputIdx, fn, meta.InputIdx[0], scalar), nil
 	}
 }
 
@@ -160,9 +258,13 @@ func siluOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0]), nil
 }
 
-func rmsnormOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  dev_rmsnorm(slot_%d, slot_%d, slot_%d, dim_%d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx), nil
+func rmsnormOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	dim := lastDim(inputs, 0)
+	if dim == 0 {
+		return "", fmt.Errorf("rmsnormOp: cannot determine normalization dimension from input shape")
+	}
+	return fmt.Sprintf("  dev_rmsnorm(slot_%d, slot_%d, slot_%d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dim), nil
 }
 
 func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -174,26 +276,45 @@ func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		meta.OutputIdx, meta.InputIdx[0], cols), nil
 }
 
-func gemvOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  dev_gemv_f32(slot_%d, frozen_%d, slot_%d, dim_m_%d, dim_k_%d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1],
-		meta.OutputIdx, meta.OutputIdx), nil
+func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	dimM, dimK := 0, 0
+	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
+		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
+		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
+	if dimM == 0 || dimK == 0 {
+		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions from input shape %v", inputs[0].Shape)
+	}
+	return fmt.Sprintf("  dev_gemv_f32(slot_%d, frozen_%d, slot_%d, %d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dimM, dimK), nil
 }
 
-func gemvQ4Op(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  dev_gemv_q4(slot_%d, frozen_%d, slot_%d, dim_m_%d, dim_k_%d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1],
-		meta.OutputIdx, meta.OutputIdx), nil
+func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	dimM, dimK := 0, 0
+	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
+		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
+		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
+	if dimM == 0 || dimK == 0 {
+		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions from input shape %v", inputs[0].Shape)
+	}
+	return fmt.Sprintf("  dev_gemv_q4(slot_%d, frozen_%d, slot_%d, %d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dimM, dimK), nil
 }
 
-func gatherOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	// Embedding dim is the last dimension of the embedding table (frozen slot).
+	dim := lastDim(inputs, 0)
+	if dim == 0 && len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
+		dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
 	if len(meta.InputIdx) < 2 {
 		// Single input: params is frozen, indices come from InputIdx[0].
-		return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, dim_%d);",
-			meta.OutputIdx, meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx), nil
+		return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, %d);",
+			meta.OutputIdx, meta.OutputIdx, meta.InputIdx[0], dim), nil
 	}
-	return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, dim_%d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx), nil
+	return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dim), nil
 }
 
 func reshapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
@@ -217,37 +338,64 @@ func constantOfShapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error)
 		meta.OutputIdx), nil
 }
 
-func transposeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  dev_transpose(slot_%d, slot_%d, shape_%d, perm_%d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0], meta.OutputIdx), nil
+func transposeOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	// Get input shape and permutation axes from ExtraArgs.
+	var shape []int
+	if len(inputs) > 0 {
+		shape = inputs[0].Shape
+	}
+	axes := extraIntSlice(meta.ExtraArgs, "axes")
+	if len(shape) == 0 || len(axes) == 0 {
+		// Fallback: treat as no-op reindex if we can't determine shape/perm.
+		return fmt.Sprintf("  // Transpose: slot_%d = slot_%d (shape/perm unknown, no-op)",
+			meta.OutputIdx, meta.InputIdx[0]), nil
+	}
+	return fmt.Sprintf("  { const int shape[] = %s; const int perm[] = %s; dev_transpose(slot_%d, slot_%d, shape, perm); }",
+		formatIntArray(shape), formatIntArray(axes),
+		meta.OutputIdx, meta.InputIdx[0]), nil
 }
 
 func sliceOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	dim := 0
-	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
-		dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+	dim := lastDim(inputs, 0)
+	// Extract slice parameters from ExtraArgs.
+	starts := extraIntSlice(meta.ExtraArgs, "starts")
+	ends := extraIntSlice(meta.ExtraArgs, "ends")
+	axes := extraIntSlice(meta.ExtraArgs, "axes")
+	start, end, axis := 0, dim, 0
+	if len(starts) > 0 {
+		start = starts[0]
 	}
-	return fmt.Sprintf("  dev_slice(slot_%d, slot_%d, start_%d, end_%d, axis_%d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, meta.OutputIdx, meta.OutputIdx, dim), nil
+	if len(ends) > 0 {
+		end = ends[0]
+	}
+	if len(axes) > 0 {
+		axis = axes[0]
+	}
+	return fmt.Sprintf("  dev_slice(slot_%d, slot_%d, %d, %d, %d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], start, end, axis, dim), nil
 }
 
 func repeatOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	dim := 0
-	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
-		dim = inputs[0].Shape[len(inputs[0].Shape)-1]
-	}
-	return fmt.Sprintf("  dev_repeat(slot_%d, slot_%d, axis_%d, reps_%d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, meta.OutputIdx, dim), nil
+	dim := lastDim(inputs, 0)
+	axis := extraInt(meta.ExtraArgs, "axis", 0)
+	reps := extraInt(meta.ExtraArgs, "repetitions", 1)
+	return fmt.Sprintf("  dev_repeat(slot_%d, slot_%d, %d, %d, %d);",
+		meta.OutputIdx, meta.InputIdx[0], axis, reps, dim), nil
 }
 
 func reduceOp(fn string) OpEmitter {
 	return func(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-		dim := 0
-		if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
-			dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+		dim := lastDim(inputs, 0)
+		axis := extraInt(meta.ExtraArgs, "axis", -1)
+		if axis < 0 {
+			// Default to last axis.
+			axis = 0
+			if len(inputs) > 0 {
+				axis = len(inputs[0].Shape) - 1
+			}
 		}
-		return fmt.Sprintf("  %s(slot_%d, slot_%d, axis_%d, %d);",
-			fn, meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, dim), nil
+		return fmt.Sprintf("  %s(slot_%d, slot_%d, %d, %d);",
+			fn, meta.OutputIdx, meta.InputIdx[0], axis, dim), nil
 	}
 }
 

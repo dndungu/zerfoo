@@ -40,11 +40,16 @@ func TestEmitCheckRealOps(t *testing.T) {
 		"Reshape", "Transpose",
 	}
 
+	// ExtraArgs for ops that require compile-time constants.
+	extraForOp := map[string]map[string]any{
+		"MulScalar": {"scalar": 0.125},
+	}
 	for _, op := range realOps {
 		meta := graph.InstructionMeta{
 			OpName:    op,
 			InputIdx:  []int{0, 1},
 			OutputIdx: 2,
+			ExtraArgs: extraForOp[op],
 		}
 		slots := []SlotInfo{{Shape: []int{1, 2048}}, {Shape: []int{1, 2048}}}
 		_, err := Emit(meta, slots)

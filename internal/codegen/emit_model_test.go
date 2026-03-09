@@ -19,7 +19,7 @@ func TestEmitMegakernelLargeModel(t *testing.T) {
 		{OpName: "MatMulNBits", InputIdx: []int{7, 4}, OutputIdx: 8},  // K
 		{OpName: "MatMulNBits", InputIdx: []int{9, 4}, OutputIdx: 10}, // V
 		// Attention: Mul(Q, scale) -> Softmax -> MatMul(attn, V)
-		{OpName: "MulScalar", InputIdx: []int{6}, OutputIdx: 11},
+		{OpName: "MulScalar", InputIdx: []int{6}, OutputIdx: 11, ExtraArgs: map[string]any{"scalar": 0.0883883}},
 		{OpName: "Softmax", InputIdx: []int{11}, OutputIdx: 12},
 		{OpName: "MatMul", InputIdx: []int{12, 10}, OutputIdx: 13},
 		// Post-attention: MatMul(O) -> Add(residual)
