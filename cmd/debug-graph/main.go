@@ -107,7 +107,15 @@ func main() {
 		if s.OpType == "Parameter" || s.OpType == "Constant" || s.OpType == "AutoPositionIds" || s.OpType == "AutoZeroKVCache" {
 			continue
 		}
-		log.Printf("  node[%d] %-25s shape=%-20v first4=%v", s.Index, s.OpType, s.Shape, truncate(s.Data, 4))
+		// Show full 25 values for 5x5 matrices (masks), 8 for others
+		n := 8
+		if len(s.Shape) >= 2 {
+			last2 := s.Shape[len(s.Shape)-2] * s.Shape[len(s.Shape)-1]
+			if last2 <= 25 {
+				n = last2
+			}
+		}
+		log.Printf("  node[%d] %-25s shape=%-20v deps=%v data=%v", s.Index, s.OpType, s.Shape, s.DepIdxs, truncate(s.Data, n))
 		if s.OpType == "Softmax" {
 			softmaxCount++
 			if softmaxCount >= 1 {

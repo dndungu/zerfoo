@@ -330,10 +330,12 @@ var _ Node[float32] = (*inputNode[float32])(nil)
 
 // NodeOutput holds the result of a single node evaluation during DebugForward.
 type NodeOutput[T tensor.Numeric] struct {
-	Index  int
-	OpType string
-	Shape  []int
-	Data   []T // first min(16, len) elements
+	Index    int
+	OpType   string
+	Shape    []int
+	Data     []T   // first min(N, len) elements
+	DepIdxs  []int // indices of dependency nodes
+	DepOps   []string
 }
 
 // DebugForward executes forward like Forward but records a snapshot of each
@@ -353,6 +355,12 @@ func (g *Graph[T]) DebugForward(ctx context.Context, inputs ...*tensor.TensorNum
 	}
 
 	var snapshots []*NodeOutput[T]
+
+	// Build node-to-index map for dependency tracking.
+	nodeIdx := make(map[Node[T]]int, len(g.nodes))
+	for i, n := range g.nodes {
+		nodeIdx[n] = i
+	}
 
 	for idx, n := range g.nodes {
 		if _, ok := n.(*inputNode[T]); ok {
@@ -374,12 +382,17 @@ func (g *Graph[T]) DebugForward(ctx context.Context, inputs ...*tensor.TensorNum
 		if output != nil {
 			snap.Shape = output.Shape()
 			data := output.Data()
-			limit := 16
+			limit := 32
 			if len(data) < limit {
 				limit = len(data)
 			}
 			snap.Data = make([]T, limit)
 			copy(snap.Data, data[:limit])
+		}
+		// Record dependency indices and op types.
+		for _, dep := range g.dependencies[n] {
+			snap.DepIdxs = append(snap.DepIdxs, nodeIdx[dep])
+			snap.DepOps = append(snap.DepOps, dep.OpType())
 		}
 		snapshots = append(snapshots, snap)
 	}
