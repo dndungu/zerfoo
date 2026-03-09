@@ -45,6 +45,29 @@ func sourceHash(source string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// kernelIncludePath finds the directory containing megakernel_ops.cu by
+// using runtime.Caller to locate this source file, then navigating to
+// internal/cuda/kernels/ relative to the module root.
+func kernelIncludePath(fallbackDir string) string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	// thisFile is .../internal/codegen/compile.go
+	// We need .../internal/cuda/kernels/
+	codegenDir := filepath.Dir(thisFile)                      // internal/codegen
+	internalDir := filepath.Dir(codegenDir)                   // internal
+	kernelsDir := filepath.Join(internalDir, "cuda", "kernels")
+	if _, err := os.Stat(filepath.Join(kernelsDir, "megakernel_ops.cu")); err == nil {
+		return kernelsDir
+	}
+	// Fallback: check if megakernel_ops.cu is in fallbackDir.
+	if _, err := os.Stat(filepath.Join(fallbackDir, "megakernel_ops.cu")); err == nil {
+		return fallbackDir
+	}
+	return ""
+}
+
 // CachedCompile compiles a CUDA source string to a shared library (.so),
 // caching the result alongside the model. If the cached .so exists and
 // the source hash matches, the cached version is returned immediately.
@@ -84,15 +107,23 @@ func CachedCompile(source, cacheDir, modelName string) (string, error) {
 		return "", fmt.Errorf("write .cu: %w", err)
 	}
 
+	// Find include path for megakernel_ops.cu. Walk up from the .cu file's
+	// directory looking for internal/cuda/kernels/megakernel_ops.cu.
+	includePath := kernelIncludePath(cacheDir)
+
 	// Compile to shared library.
 	arch := gpuArch()
 	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, nvcc, //nolint:gosec // nvcc path is from known locations
-		"-arch="+arch,
+	args := []string{
+		"-arch=" + arch,
 		"--shared",
 		"-o", soPath,
-		cuPath,
-	)
+	}
+	if includePath != "" {
+		args = append(args, "-I"+includePath)
+	}
+	args = append(args, cuPath)
+	cmd := exec.CommandContext(ctx, nvcc, args...) //nolint:gosec // nvcc path is from known locations
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("nvcc compilation failed: %w", err)
