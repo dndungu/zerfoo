@@ -56,6 +56,7 @@ func run() error {
 	maxTokens := flag.Int("tokens", 64, "max tokens to generate")
 	useMmap := flag.Bool("mmap", false, "use memory-mapped loading")
 	device := flag.String("device", "cpu", "compute device (cpu, cuda, cuda:0)")
+	greedy := flag.Bool("greedy", false, "use greedy decoding (temperature=0)")
 	cpuprofile := flag.String("cpuprofile", "", "write CPU profile to file")
 	flag.Parse()
 
@@ -90,7 +91,12 @@ func run() error {
 
 	// Warm-up run (short).
 	fmt.Println("Warm-up...")
-	_, _ = mdl.Generate(context.Background(), *prompt, inference.WithMaxTokens(4))
+	var genOpts []inference.GenerateOption
+	genOpts = append(genOpts, inference.WithMaxTokens(4))
+	if *greedy {
+		genOpts = append(genOpts, inference.WithTemperature(0))
+	}
+	_, _ = mdl.Generate(context.Background(), *prompt, genOpts...)
 
 	// Timed run with streaming to count tokens.
 	fmt.Println("Generating...")
@@ -105,7 +111,11 @@ func run() error {
 	})
 
 	t1 := time.Now()
-	err = mdl.GenerateStream(context.Background(), *prompt, handler, inference.WithMaxTokens(*maxTokens))
+	streamOpts := []inference.GenerateOption{inference.WithMaxTokens(*maxTokens)}
+	if *greedy {
+		streamOpts = append(streamOpts, inference.WithTemperature(0))
+	}
+	err = mdl.GenerateStream(context.Background(), *prompt, handler, streamOpts...)
 	elapsed := time.Since(t1)
 	if err != nil {
 		return fmt.Errorf("generate error: %w", err)
