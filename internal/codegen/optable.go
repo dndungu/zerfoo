@@ -203,17 +203,30 @@ func Supported(opName string) bool {
 
 // --- Emitter constructors ---
 
+// indexExpr returns "[tid]" for vector inputs or "[0]" for scalar inputs
+// to handle broadcasting correctly.
+func indexExpr(inputs []SlotInfo, i int) string {
+	if i < len(inputs) && slotSize(inputs[i].Shape) <= 1 {
+		return "[0]"
+	}
+	return "[tid]"
+}
+
 func binaryOp(op string) OpEmitter {
-	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  %s[tid] = %s[tid] %s %s[tid];",
-			outRef(meta), inRef(meta, 0), op, inRef(meta, 1)), nil
+	return func(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+		idx0 := indexExpr(inputs, 0)
+		idx1 := indexExpr(inputs, 1)
+		return fmt.Sprintf("  %s[tid] = %s%s %s %s%s;",
+			outRef(meta), inRef(meta, 0), idx0, op, inRef(meta, 1), idx1), nil
 	}
 }
 
 func funcBinaryOp(fn string) OpEmitter {
-	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  %s[tid] = %s(%s[tid], %s[tid]);",
-			outRef(meta), fn, inRef(meta, 0), inRef(meta, 1)), nil
+	return func(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+		idx0 := indexExpr(inputs, 0)
+		idx1 := indexExpr(inputs, 1)
+		return fmt.Sprintf("  %s[tid] = %s(%s%s, %s%s);",
+			outRef(meta), fn, inRef(meta, 0), idx0, inRef(meta, 1), idx1), nil
 	}
 }
 
@@ -283,22 +296,31 @@ func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	// depending on how the engine was called.
 	for i := range len(meta.InputIdx) {
 		if isQ4Input(meta, i) {
-			return gemvQ4Op(meta, inputs, i)
+			// Only use Q4 GEMV for 2D weight matrices, not 1D parameters
+			// (e.g. RMSNorm weights). 1D Q4 slots have too few bytes for
+			// dev_gemv_q4 which expects M*K/32*18 bytes of Q4 data.
+			if i < len(inputs) && len(inputs[i].Shape) >= 2 {
+				return gemvQ4Op(meta, inputs, i)
+			}
 		}
 	}
-	dimM, dimK := gemvDims(meta, inputs)
+	dimM, dimK, weightIdx := gemvDimsWithWeight(meta, inputs)
 	if dimM == 0 || dimK == 0 {
 		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
+	actIdx := 1 - weightIdx
+	if actIdx < 0 || actIdx >= len(meta.InputIdx) {
+		actIdx = 0
+	}
 	return fmt.Sprintf("  dev_gemv_f32(%s, %s, %s, %d, %d);",
-		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
+		outRef(meta), inRef(meta, weightIdx), inRef(meta, actIdx), dimM, dimK), nil
 }
 
 // gemvQ4Op emits a Q4 dequant-GEMV. weightIdx is the input index holding
 // the Q4 frozen data. The other input is the activation vector.
 func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo, weightIdx int) (string, error) {
-	dimM, dimK := gemvDims(meta, inputs)
+	dimM, dimK, _ := gemvDimsWithWeight(meta, inputs)
 	if dimM == 0 || dimK == 0 {
 		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
@@ -313,33 +335,46 @@ func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo, weightIdx int) (str
 }
 
 
-// gemvDims extracts matrix dimensions for gemv ops from available shape info.
-// Tries: (1) SlotInfo shapes, (2) ExtraArgs aShape/bShape from trace,
-// (3) output shape + input vector shape.
-func gemvDims(meta graph.InstructionMeta, inputs []SlotInfo) (dimM, dimK int) {
+// gemvDimsWithWeight extracts matrix dimensions and weight input index for gemv.
+// For MatMul(A, B) where A=[..., seqLen, K] and B=[K, N]:
+//   - M = N (output dimension, number of rows in weight matrix)
+//   - K = inner/reduction dimension
+//   - weightIdx = which input (0 or 1) is the weight matrix
+//
+// The dev_gemv kernel computes: out[m] = sum_k(weight[m*K+k] * input[k])
+// so M is the output size (N from the matmul) and K is the inner dimension.
+func gemvDimsWithWeight(meta graph.InstructionMeta, inputs []SlotInfo) (dimM, dimK, weightIdx int) {
+	outShape := extraIntSlice(meta.ExtraArgs, "_outputShape")
+	aShape := extraIntSlice(meta.ExtraArgs, "aShape")
+	bShape := extraIntSlice(meta.ExtraArgs, "bShape")
+
+	// Use bShape to get M and K: B=[K, N] -> M=N=bShape[-1], K=bShape[-2].
+	// B is input 1 in MatMul(A, B).
+	if len(bShape) >= 2 {
+		dimK = bShape[len(bShape)-2]
+		dimM = bShape[len(bShape)-1]
+		weightIdx = 1
+		return
+	}
+
+	// Use output shape for M and aShape for K.
+	if len(outShape) > 0 && len(aShape) > 0 {
+		dimM = outShape[len(outShape)-1]
+		dimK = aShape[len(aShape)-1]
+		weightIdx = 1 // default: B is weight
+		return
+	}
+
 	// Try weight shape from SlotInfo (first input).
 	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
 		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
 		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
+		weightIdx = 0
 		return
 	}
-	// Try shapes recorded during tracing (engine_proxy records aShape, bShape).
-	aShape := extraIntSlice(meta.ExtraArgs, "aShape")
-	bShape := extraIntSlice(meta.ExtraArgs, "bShape")
-	if len(aShape) >= 2 && len(bShape) >= 1 {
-		// MatMul(A, B): A is [*, M, K], B is [*, K, N] or [K] for gemv.
-		dimM = aShape[len(aShape)-2]
-		dimK = aShape[len(aShape)-1]
-		return
-	}
-	if len(bShape) >= 2 && len(aShape) >= 1 {
-		// A might be [K] vector, B is [K, N] weight.
-		dimK = bShape[len(bShape)-2]
-		dimM = bShape[len(bShape)-1]
-		return
-	}
+
 	// Fallback: M from output shape, K from input vector shape.
-	outShape := extraIntSlice(meta.ExtraArgs, "_outputShape")
+	weightIdx = 0
 	if len(outShape) > 0 {
 		dimM = outShape[len(outShape)-1]
 	}

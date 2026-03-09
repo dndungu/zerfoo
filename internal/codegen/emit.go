@@ -246,10 +246,11 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 	b.WriteString("    int num_elements\n")
 	b.WriteString(") {\n")
 	b.WriteString("  int grid = 1; // single cooperative block for inter-instruction sync\n")
+	b.WriteString("  size_t smem = 1024 * sizeof(float); // shared memory for reductions\n")
 	if cfg.NumKVLayers > 0 {
-		b.WriteString("  megakernel<<<grid, 1024>>>(workspace, frozen, pos, kv_k, kv_v, seq_pos, kv_seq_len, num_elements);\n")
+		b.WriteString("  megakernel<<<grid, 1024, smem>>>(workspace, frozen, pos, kv_k, kv_v, seq_pos, kv_seq_len, num_elements);\n")
 	} else {
-		b.WriteString("  megakernel<<<grid, 1024>>>(workspace, frozen, pos, num_elements);\n")
+		b.WriteString("  megakernel<<<grid, 1024, smem>>>(workspace, frozen, pos, num_elements);\n")
 	}
 	b.WriteString("  return (int)cudaDeviceSynchronize();\n")
 	b.WriteString("}\n")
