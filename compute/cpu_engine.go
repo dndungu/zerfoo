@@ -1858,23 +1858,26 @@ func (e *CPUEngine[T]) tryQuantizedMatMul(
 		// Not handled on A; fall through to check B.
 	}
 
-	// Check B for Q4 storage. This handles the case where a graph-level
-	// Transpose node passes through Q4 storage with shape [K,N] but
-	// data in [N,K] layout. GemmF32Q4NT reads the Q4 blocks directly
-	// from the original [N,K] weight layout using NEON q4DotBlockSIMD.
+	// Check B for Q4 storage. In the standard MatMul path (A[m,k] @ B[k,n]),
+	// B's Q4 data is stored in row-major [K,N] layout matching its shape.
+	// Dequantize and use standard SGEMM. (GemmF32Q4NT is only correct when
+	// B's data is in [N,K] layout, which happens in the tryQ4BTransposed
+	// path in MatMul.Forward where B was transposed from [N,K] to [K,N]
+	// but Q4 data kept its original [N,K] block order.)
 	storB := b.GetStorage()
-	switch qsB := any(storB).(type) {
+	switch any(storB).(type) {
 	case *tensor.Q4Storage:
 		aF := any(a.Data()).([]float32)
+		bF := any(b.Data()).([]float32) // dequantizes Q4 to F32 in [K,N] layout
 		rF := any(result.Data()).([]float32)
-		if batchSize == 1 {
-			xblas.GemmF32Q4NT(m, n, k, aF, qsB, rF)
-		} else {
-			for i := range batchSize {
-				aOff := i * m * k
-				cOff := i * m * n
-				xblas.GemmF32Q4NT(m, n, k, aF[aOff:aOff+m*k], qsB, rF[cOff:cOff+m*n])
+		for i := range batchSize {
+			aOff := i * m * k
+			cOff := i * m * n
+			bOff := 0
+			if len(aShape) == len(bShape) {
+				bOff = i * k * n
 			}
+			xblas.GemmF32(m, n, k, aF[aOff:aOff+m*k], bF[bOff:bOff+k*n], rF[cOff:cOff+m*n])
 		}
 		return true
 	default:

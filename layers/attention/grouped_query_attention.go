@@ -431,7 +431,21 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 		return nil, err
 	}
 
-	attnOutputHeads, err := gqa.scaledDotProductAttention.Forward(ctx, qForSDPA, kForSDPA, vForSDPA, mask)
+	// ONNX GroupQueryAttention is always causal. When a 2D padding mask is
+	// provided (from maskFromInputNode), create a proper 4D causal mask.
+	// For decode steps (seqLen==1) no causal mask is needed because the
+	// single query position attends to all past KV positions.
+	sdpaMask := mask
+	if mask != nil && len(mask.Shape()) == 2 && seqLen > 1 {
+		sdpaMask, err = gqa.buildCausalMask(seqLen, kvSeqLen)
+		if err != nil {
+			return nil, fmt.Errorf("build causal mask: %w", err)
+		}
+	} else if mask != nil && len(mask.Shape()) == 2 && seqLen == 1 {
+		sdpaMask = nil // single token decode: attend to all cached positions
+	}
+
+	attnOutputHeads, err := gqa.scaledDotProductAttention.Forward(ctx, qForSDPA, kForSDPA, vForSDPA, sdpaMask)
 	if err != nil {
 		return nil, err
 	}
@@ -462,6 +476,30 @@ func (gqa *GroupedQueryAttention[T]) Forward(ctx context.Context, inputs ...*ten
 	}
 
 	return output, nil
+}
+
+// buildCausalMask creates a lower-triangular causal mask with shape
+// [1, 1, seqLenQ, seqLenK]. Allowed positions are 0, masked positions are -1e9.
+// This matches the ONNX GroupQueryAttention spec where causal masking is built-in.
+func (gqa *GroupedQueryAttention[T]) buildCausalMask(seqLenQ, seqLenK int) (*tensor.TensorNumeric[T], error) {
+	largeNeg := gqa.ops.FromFloat64(-1e9)
+	zero := gqa.ops.FromFloat64(0)
+	data := make([]T, seqLenQ*seqLenK)
+
+	// For prefill: query position i can attend to KV positions 0..i
+	// offset handles the case where kvSeqLen > seqLenQ (cached positions).
+	offset := seqLenK - seqLenQ
+	for i := range seqLenQ {
+		for j := range seqLenK {
+			if j <= i+offset {
+				data[i*seqLenK+j] = zero
+			} else {
+				data[i*seqLenK+j] = largeNeg
+			}
+		}
+	}
+
+	return tensor.New([]int{1, 1, seqLenQ, seqLenK}, data)
 }
 
 // reverseHeadReplication sums gradients from replicated heads back to the

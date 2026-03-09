@@ -44,6 +44,7 @@ func DefaultArchConfigRegistry() *ArchConfigRegistry {
 	r.Register("gemma", parseGemmaConfig)
 	r.Register("gemma2", parseGemmaConfig)
 	r.Register("gemma3", parseGemmaConfig)
+	r.Register("gemma3_text", parseGemmaConfig)
 	r.Register("llama", parseLlamaConfig)
 	r.Register("mistral", parseMistralConfig)
 	r.Register("qwen2", parseQwenConfig)
