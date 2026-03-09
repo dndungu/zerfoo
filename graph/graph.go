@@ -328,6 +328,65 @@ func (n *inputNode[T]) Parameters() []*Parameter[T] { return nil }
 // Statically assert that the type implements the interface.
 var _ Node[float32] = (*inputNode[float32])(nil)
 
+// NodeOutput holds the result of a single node evaluation during DebugForward.
+type NodeOutput[T tensor.Numeric] struct {
+	Index  int
+	OpType string
+	Shape  []int
+	Data   []T // first min(16, len) elements
+}
+
+// DebugForward executes forward like Forward but records a snapshot of each
+// node's output (op type, shape, first 16 values). Pool-based release is
+// disabled so all intermediates survive for inspection.
+func (g *Graph[T]) DebugForward(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) ([]*NodeOutput[T], *tensor.TensorNumeric[T], error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if len(inputs) != len(g.inputs) {
+		return nil, nil, fmt.Errorf("expected %d inputs, got %d", len(g.inputs), len(inputs))
+	}
+
+	memo := make(map[Node[T]]*tensor.TensorNumeric[T])
+	for i, n := range g.inputs {
+		memo[n] = inputs[i]
+	}
+
+	var snapshots []*NodeOutput[T]
+
+	for idx, n := range g.nodes {
+		if _, ok := n.(*inputNode[T]); ok {
+			continue
+		}
+
+		nodeInputs := make([]*tensor.TensorNumeric[T], len(g.dependencies[n]))
+		for i, dep := range g.dependencies[n] {
+			nodeInputs[i] = memo[dep]
+		}
+
+		output, err := n.Forward(ctx, nodeInputs...)
+		if err != nil {
+			return snapshots, nil, fmt.Errorf("node[%d] %s: %w", idx, n.OpType(), err)
+		}
+		memo[n] = output
+
+		snap := &NodeOutput[T]{Index: idx, OpType: n.OpType()}
+		if output != nil {
+			snap.Shape = output.Shape()
+			data := output.Data()
+			limit := 16
+			if len(data) < limit {
+				limit = len(data)
+			}
+			snap.Data = make([]T, limit)
+			copy(snap.Data, data[:limit])
+		}
+		snapshots = append(snapshots, snap)
+	}
+
+	return snapshots, memo[g.output], nil
+}
+
 func topologicalSort[T tensor.Numeric](nodes []Node[T], deps map[Node[T]][]Node[T]) ([]Node[T], error) {
 	var sorted []Node[T]
 
