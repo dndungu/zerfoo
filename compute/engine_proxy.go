@@ -2,8 +2,6 @@ package compute
 
 import (
 	"context"
-	stdlog "log"
-	"reflect"
 
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
@@ -89,7 +87,6 @@ func (p *EngineProxy[T]) RandomUniform(ctx context.Context, t *tensor.TensorNume
 func (p *EngineProxy[T]) Gather(ctx context.Context, params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T]) error {
 	err := p.real.Gather(ctx, params, indices, output)
 	if err == nil && p.tracer != nil {
-		stdlog.Printf("EngineProxy.Gather: output ptr=%x", reflect.ValueOf(output).Pointer())
 		p.tracer.RecordGather(params, indices, output, nil)
 	}
 	return err
@@ -253,9 +250,6 @@ func (p *EngineProxy[T]) ReduceMean(ctx context.Context, a *tensor.TensorNumeric
 func (p *EngineProxy[T]) Reshape(ctx context.Context, a *tensor.TensorNumeric[T], shape []int, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.Reshape(ctx, a, shape, dst...)
 	if err == nil {
-		if p.tracer != nil {
-			stdlog.Printf("EngineProxy.Reshape: input ptr=%x result ptr=%x shape=%v", reflect.ValueOf(a).Pointer(), reflect.ValueOf(result).Pointer(), shape)
-		}
 		p.record("Reshape", []*tensor.TensorNumeric[T]{a}, result, map[string]any{"shape": shape})
 	}
 	return result, err
