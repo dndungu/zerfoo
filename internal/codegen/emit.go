@@ -160,8 +160,7 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 	}
 	b.WriteString("    int num_elements\n")
 	b.WriteString(") {\n")
-	b.WriteString("  int tid = blockIdx.x * blockDim.x + threadIdx.x;\n")
-	b.WriteString("  if (tid >= num_elements) return;\n\n")
+	b.WriteString("  int tid = threadIdx.x;\n\n")
 
 	// Slot pointer declarations (non-frozen slots in workspace).
 	var slotIndices []int
@@ -204,7 +203,22 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 			return "", fmt.Errorf("instruction %d (%s): %w", i, inst.OpName, err)
 		}
 		fmt.Fprintf(&b, "  // [%d] %s\n", i, inst.OpName)
-		b.WriteString(code)
+
+		// Elementwise ops use [tid] indexing and need a loop wrapper.
+		// Device function ops (dev_*) handle their own thread cooperation.
+		if strings.Contains(code, "[tid]") {
+			outSize := slotSize(cfg.SlotShapes[inst.OutputIdx])
+			if outSize == 0 {
+				outSize = 1
+			}
+			fmt.Fprintf(&b, "  for (int tid = threadIdx.x; tid < %d; tid += blockDim.x) {\n", outSize)
+			b.WriteString("  ")
+			b.WriteString(code)
+			b.WriteString("\n  }\n  __syncthreads();\n")
+		} else {
+			b.WriteString(code)
+			b.WriteString("\n  __syncthreads();\n")
+		}
 		b.WriteString("\n")
 	}
 
@@ -223,11 +237,11 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 	}
 	b.WriteString("    int num_elements\n")
 	b.WriteString(") {\n")
-	b.WriteString("  int grid = (num_elements + 255) / 256;\n")
+	b.WriteString("  int grid = 1; // single cooperative block for inter-instruction sync\n")
 	if cfg.NumKVLayers > 0 {
-		b.WriteString("  megakernel<<<grid, 256>>>(workspace, frozen, pos, kv_k, kv_v, seq_pos, kv_seq_len, num_elements);\n")
+		b.WriteString("  megakernel<<<grid, 1024>>>(workspace, frozen, pos, kv_k, kv_v, seq_pos, kv_seq_len, num_elements);\n")
 	} else {
-		b.WriteString("  megakernel<<<grid, 256>>>(workspace, frozen, pos, num_elements);\n")
+		b.WriteString("  megakernel<<<grid, 1024>>>(workspace, frozen, pos, num_elements);\n")
 	}
 	b.WriteString("  return (int)cudaDeviceSynchronize();\n")
 	b.WriteString("}\n")
