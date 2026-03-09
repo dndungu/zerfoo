@@ -25,13 +25,13 @@ type Instruction[T tensor.Numeric] struct {
 // interpreted node-by-node Forward() loop. Node outputs are stored in an
 // indexed slot array instead of a map, eliminating map lookups.
 type ExecutionPlan[T tensor.Numeric] struct {
-	instructions  []Instruction[T]
-	slots         []*tensor.TensorNumeric[T] // indexed output storage
-	slotShapes    [][]int                    // shapes from warmup pass
-	inputIdx      []int                      // which slots receive graph inputs
-	outputIdx     int                        // which slot holds the final output
-	frozenIdx     []int                      // slots holding frozen data (params)
-	megakernelFn  atomic.Value               // stores func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) or nil
+	instructions []Instruction[T]
+	slots        []*tensor.TensorNumeric[T] // indexed output storage
+	slotShapes   [][]int                    // shapes from warmup pass
+	inputIdx     []int                      // which slots receive graph inputs
+	outputIdx    int                        // which slot holds the final output
+	frozenIdx    []int                      // slots holding frozen data (params)
+	megakernelFn atomic.Value               // stores func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) or nil
 }
 
 // InstructionMeta is the exported metadata for a single compiled instruction.
@@ -139,7 +139,9 @@ func (p *ExecutionPlan[T]) Run(ctx context.Context, inputs ...*tensor.TensorNume
 		ins := make([]*tensor.TensorNumeric[T], len(inst.InputIdx))
 		for j, idx := range inst.InputIdx {
 			ins[j] = slots[idx]
-			if ins[j] == nil {
+			// Gather's indices input (j==1) is int-typed and cannot be stored
+			// in the T-typed slot array; its Forward uses cached output instead.
+			if ins[j] == nil && (inst.OpName != "Gather" || j != 1) {
 				return nil, fmt.Errorf("instruction %d (%s): input %d (slot %d) is nil", i, inst.OpName, j, idx)
 			}
 		}
