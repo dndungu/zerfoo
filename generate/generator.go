@@ -149,7 +149,7 @@ func (gen *Generator[T]) compileGraph(ctx context.Context, tokenTensor *tensor.T
 		}
 		if cErr == nil {
 			gen.plan.Store(compiled)
-			go tryCompileMegakernel(compiled, nil)
+			tryCompileMegakernel(compiled, nil) // synchronous for debugging
 		}
 	})
 }
