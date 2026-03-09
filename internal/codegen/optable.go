@@ -282,8 +282,13 @@ func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
-	return fmt.Sprintf("  dev_gemv_f32(slot_%d, frozen_%d, slot_%d, %d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dimM, dimK), nil
+	// Use frozen_ or slot_ depending on whether input 0 is a frozen slot.
+	in0Ref := fmt.Sprintf("slot_%d", meta.InputIdx[0])
+	if isFrozenInput(meta.ExtraArgs, 0) {
+		in0Ref = fmt.Sprintf("frozen_%d", meta.InputIdx[0])
+	}
+	return fmt.Sprintf("  dev_gemv_f32(slot_%d, %s, slot_%d, %d, %d);",
+		meta.OutputIdx, in0Ref, meta.InputIdx[1], dimM, dimK), nil
 }
 
 func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -292,17 +297,37 @@ func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
-	return fmt.Sprintf("  dev_gemv_q4(slot_%d, frozen_%d, slot_%d, %d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dimM, dimK), nil
+	in0Ref := fmt.Sprintf("slot_%d", meta.InputIdx[0])
+	if isFrozenInput(meta.ExtraArgs, 0) {
+		in0Ref = fmt.Sprintf("frozen_%d", meta.InputIdx[0])
+	}
+	return fmt.Sprintf("  dev_gemv_q4(slot_%d, %s, slot_%d, %d, %d);",
+		meta.OutputIdx, in0Ref, meta.InputIdx[1], dimM, dimK), nil
 }
 
 // gemvDims extracts matrix dimensions for gemv ops from available shape info.
-// Tries: (1) weight shape [M, K], (2) output shape for M + input vector for K.
+// Tries: (1) SlotInfo shapes, (2) ExtraArgs aShape/bShape from trace,
+// (3) output shape + input vector shape.
 func gemvDims(meta graph.InstructionMeta, inputs []SlotInfo) (dimM, dimK int) {
-	// Try weight shape (first input).
+	// Try weight shape from SlotInfo (first input).
 	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
 		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
 		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
+		return
+	}
+	// Try shapes recorded during tracing (engine_proxy records aShape, bShape).
+	aShape := extraIntSlice(meta.ExtraArgs, "aShape")
+	bShape := extraIntSlice(meta.ExtraArgs, "bShape")
+	if len(aShape) >= 2 && len(bShape) >= 1 {
+		// MatMul(A, B): A is [*, M, K], B is [*, K, N] or [K] for gemv.
+		dimM = aShape[len(aShape)-2]
+		dimK = aShape[len(aShape)-1]
+		return
+	}
+	if len(bShape) >= 2 && len(aShape) >= 1 {
+		// A might be [K] vector, B is [K, N] weight.
+		dimK = bShape[len(bShape)-2]
+		dimM = bShape[len(bShape)-1]
 		return
 	}
 	// Fallback: M from output shape, K from input vector shape.
@@ -324,8 +349,32 @@ func safeShape(inputs []SlotInfo, i int) []int {
 	return nil
 }
 
+// isFrozenInput returns true if the i-th input is a frozen (weight) slot.
+func isFrozenInput(extra map[string]any, i int) bool {
+	if extra == nil {
+		return false
+	}
+	v, ok := extra["_frozenInputs"]
+	if !ok {
+		return false
+	}
+	if frozen, ok := v.([]bool); ok && i < len(frozen) {
+		return frozen[i]
+	}
+	return false
+}
+
+// slotRef returns "frozen_N" if the input at position i is frozen, else "slot_N".
+func slotRef(meta graph.InstructionMeta, i int) string {
+	idx := meta.InputIdx[i]
+	if isFrozenInput(meta.ExtraArgs, i) {
+		return fmt.Sprintf("frozen_%d", idx)
+	}
+	return fmt.Sprintf("slot_%d", idx)
+}
+
 func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	// Embedding dim is the last dimension of the embedding table (frozen slot).
+	// Embedding dim is the last dimension of the embedding table.
 	dim := lastDim(inputs, 0)
 	// Fallback: try output shape last dim (output of gather has same embed dim).
 	if dim == 0 {
@@ -335,12 +384,13 @@ func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		}
 	}
 	if len(meta.InputIdx) < 2 {
-		// Single input: params is frozen, indices come from InputIdx[0].
+		// Single input: params is frozen (by convention at OutputIdx), indices from InputIdx[0].
 		return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, %d);",
 			meta.OutputIdx, meta.OutputIdx, meta.InputIdx[0], dim), nil
 	}
-	return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dim), nil
+	paramsRef := slotRef(meta, 0)
+	return fmt.Sprintf("  dev_gather(slot_%d, %s, slot_%d, %d);",
+		meta.OutputIdx, paramsRef, meta.InputIdx[1], dim), nil
 }
 
 func reshapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {

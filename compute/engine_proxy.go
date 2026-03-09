@@ -149,7 +149,12 @@ func (p *EngineProxy[T]) Pow(ctx context.Context, base, exponent *tensor.TensorN
 func (p *EngineProxy[T]) MatMul(ctx context.Context, a, b *tensor.TensorNumeric[T], dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.MatMul(ctx, a, b, dst...)
 	if err == nil {
-		p.record("MatMul", []*tensor.TensorNumeric[T]{a, b}, result, nil)
+		// Record input shapes for the megakernel emitter's dimension inference.
+		extra := map[string]any{
+			"aShape": a.Shape(),
+			"bShape": b.Shape(),
+		}
+		p.record("MatMul", []*tensor.TensorNumeric[T]{a, b}, result, extra)
 	}
 	return result, err
 }

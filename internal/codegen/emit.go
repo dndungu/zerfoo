@@ -185,13 +185,19 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 			}
 		}
 
-		// Inject output shape into ExtraArgs so emitters can infer dimensions.
+		// Inject output shape and frozen input info into ExtraArgs.
+		if inst.ExtraArgs == nil {
+			inst.ExtraArgs = make(map[string]any)
+		}
 		if inst.OutputIdx < len(cfg.SlotShapes) && cfg.SlotShapes[inst.OutputIdx] != nil {
-			if inst.ExtraArgs == nil {
-				inst.ExtraArgs = make(map[string]any)
-			}
 			inst.ExtraArgs["_outputShape"] = cfg.SlotShapes[inst.OutputIdx]
 		}
+		// Mark which inputs are frozen so emitters can use frozen_N vs slot_N.
+		frozenInputs := make([]bool, len(inst.InputIdx))
+		for j, idx := range inst.InputIdx {
+			frozenInputs[j] = frozenSet[idx]
+		}
+		inst.ExtraArgs["_frozenInputs"] = frozenInputs
 
 		code, err := Emit(inst, inputs)
 		if err != nil {
