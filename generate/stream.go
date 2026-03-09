@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/zerfoo/zerfoo/tensor"
 )
 
 // errStopString is a sentinel indicating that a stop string was matched
@@ -42,8 +44,13 @@ func (gen *Generator[T]) GenerateStream(ctx context.Context, prompt string, sc S
 		return fmt.Errorf("prompt produced no tokens")
 	}
 
-	cache := NewKVCache[T](gen.config.NumLayers, gen.config.MaxSeqLen)
-	genCtx := WithKVCache(ctx, cache)
+	var cacheProvider CacheProvider[T]
+	if gen.blockPool != nil {
+		cacheProvider = NewPagedKVCache[T](gen.blockPool, gen.config.NumLayers)
+	} else {
+		cacheProvider = NewKVCache[T](gen.config.NumLayers, gen.config.MaxSeqLen)
+	}
+	genCtx := WithCache(ctx, cacheProvider)
 
 	stopSet := make(map[int]bool, len(sc.StopTokenIDs)+1)
 	for _, id := range sc.StopTokenIDs {
@@ -84,23 +91,37 @@ func (gen *Generator[T]) GenerateStream(ctx context.Context, prompt string, sc S
 	}
 
 	// Autoregressive decode loop.
+	// allIDs tracks the full sequence for graphs without KV caching.
+	allIDs := make([]int, len(promptIDs), len(promptIDs)+sc.MaxNewTokens)
+	copy(allIDs, promptIDs)
+	allIDs = append(allIDs, nextToken)
+
 	for range sc.MaxNewTokens - 1 {
 		if err := ctx.Err(); err != nil {
 			break
 		}
 
-		tokenTensor, tErr := gen.idsToTensor([]int{nextToken})
-		if tErr != nil {
-			return fmt.Errorf("create token tensor: %w", tErr)
+		var inputTensor *tensor.TensorNumeric[T]
+		if gen.hasKVCache {
+			inputTensor, err = gen.idsToTensor([]int{nextToken})
+		} else {
+			inputTensor, err = gen.idsToTensor(allIDs)
+		}
+		if err != nil {
+			return fmt.Errorf("create token tensor: %w", err)
 		}
 
-		if p := gen.plan.Load(); p != nil {
-			logits, err = p.Run(genCtx, tokenTensor)
-		} else {
-			logits, err = gen.graph.Forward(genCtx, tokenTensor)
-			if err == nil {
-				gen.compileGraph(genCtx, tokenTensor)
+		if gen.hasKVCache {
+			if p := gen.plan.Load(); p != nil {
+				logits, err = p.Run(genCtx, inputTensor)
+			} else {
+				logits, err = gen.graph.Forward(genCtx, inputTensor)
+				if err == nil {
+					gen.compileGraph(genCtx, inputTensor)
+				}
 			}
+		} else {
+			logits, err = gen.graph.Forward(genCtx, inputTensor)
 		}
 		if err != nil {
 			return fmt.Errorf("decode forward: %w", err)
@@ -115,6 +136,7 @@ func (gen *Generator[T]) GenerateStream(ctx context.Context, prompt string, sc S
 			break
 		}
 		generatedIDs = append(generatedIDs, nextToken)
+		allIDs = append(allIDs, nextToken)
 
 		if emitErr := gen.emitToken(generatedIDs, &prevDecoded, sc.StopStrings, stream); emitErr != nil {
 			if errors.Is(emitErr, errStopString) {

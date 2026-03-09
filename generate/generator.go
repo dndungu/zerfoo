@@ -67,15 +67,16 @@ func WithPagedKV(maxMemoryMB, headDim int) GeneratorOption {
 
 // Generator produces text autoregressively using a loaded model graph.
 type Generator[T tensor.Numeric] struct {
-	graph     *graph.Graph[T]
-	tokenizer tokenizer.Tokenizer
-	engine    compute.Engine[T]
-	config    ModelConfig
-	pool      *compute.TensorPool[T]                    // reusable intermediate buffers
-	blockPool *BlockPool[T]                              // nil when using pre-allocated KV cache
-	headDim   int                                        // per-head dim for paged KV
-	plan      atomic.Pointer[graph.ExecutionPlan[T]]     // compiled decode plan (nil until first decode)
-	planOnce  sync.Once                                  // ensures compile happens once
+	graph      *graph.Graph[T]
+	tokenizer  tokenizer.Tokenizer
+	engine     compute.Engine[T]
+	config     ModelConfig
+	pool       *compute.TensorPool[T]                    // reusable intermediate buffers
+	blockPool  *BlockPool[T]                              // nil when using pre-allocated KV cache
+	headDim    int                                        // per-head dim for paged KV
+	plan       atomic.Pointer[graph.ExecutionPlan[T]]     // compiled decode plan (nil until first decode)
+	planOnce   sync.Once                                  // ensures compile happens once
+	hasKVCache bool                                       // true if graph nodes use KV cache from context
 }
 
 // NewGenerator creates a Generator from a model graph, tokenizer, engine, and config.
@@ -101,6 +102,15 @@ func NewGenerator[T tensor.Numeric](
 	if g != nil {
 		gen.pool = compute.NewTensorPool[T]()
 		g.WithPool(gen.pool)
+		// Detect if any graph node uses KV caching (e.g., GroupedQueryAttention).
+		// Primitive ONNX graphs have no KV cache and need full-sequence decode.
+		for _, n := range g.Nodes() {
+			op := n.OpType()
+			if op == "GroupQueryAttention" || op == "GlobalAttention" || op == "MultiHeadLatentAttention" {
+				gen.hasKVCache = true
+				break
+			}
+		}
 	}
 
 	if gopts.pagedKVMaxMB > 0 && gopts.headDim > 0 {
@@ -212,26 +222,39 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 	}
 
 	// Autoregressive decode loop.
+	// allIDs tracks the full sequence for graphs without KV caching.
+	allIDs := make([]int, len(promptIDs), len(promptIDs)+sc.MaxNewTokens)
+	copy(allIDs, promptIDs)
+	allIDs = append(allIDs, nextToken)
+
 	for range sc.MaxNewTokens - 1 {
 		if err := ctx.Err(); err != nil {
 			break
 		}
 
-		tokenTensor, tErr := gen.idsToTensor([]int{nextToken})
-		if tErr != nil {
-			return "", fmt.Errorf("create token tensor: %w", tErr)
+		var inputTensor *tensor.TensorNumeric[T]
+		if gen.hasKVCache {
+			// With KV caching, only feed the new token.
+			inputTensor, err = gen.idsToTensor([]int{nextToken})
+		} else {
+			// Without KV caching, feed the full accumulated sequence.
+			inputTensor, err = gen.idsToTensor(allIDs)
+		}
+		if err != nil {
+			return "", fmt.Errorf("create token tensor: %w", err)
 		}
 
-		if p := gen.plan.Load(); p != nil {
-			logits, err = p.Run(genCtx, tokenTensor)
-		} else {
-			logits, err = gen.graph.Forward(genCtx, tokenTensor)
-			// After the first decode Forward(), compile the graph.
-			// The graph's memo from this Forward() provides shapes
-			// without re-executing (avoids corrupting model state).
-			if err == nil {
-				gen.compileGraph(genCtx, tokenTensor)
+		if gen.hasKVCache {
+			if p := gen.plan.Load(); p != nil {
+				logits, err = p.Run(genCtx, inputTensor)
+			} else {
+				logits, err = gen.graph.Forward(genCtx, inputTensor)
+				if err == nil {
+					gen.compileGraph(genCtx, inputTensor)
+				}
 			}
+		} else {
+			logits, err = gen.graph.Forward(genCtx, inputTensor)
 		}
 		if err != nil {
 			return "", fmt.Errorf("decode forward: %w", err)
@@ -246,6 +269,7 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 			break
 		}
 		generatedIDs = append(generatedIDs, nextToken)
+		allIDs = append(allIDs, nextToken)
 
 		if stopped, text := gen.checkStop(generatedIDs, sc.StopStrings); stopped {
 			return text, nil
