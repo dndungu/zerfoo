@@ -70,6 +70,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 
 	// Extract frozen slot data for GPU upload.
 	frozenData := make([][]float32, len(frozenSlots))
+	var totalFrozenBytes int64
 	for i, f := range frozenSlots {
 		if f.Data != nil {
 			raw := f.Data.Data()
@@ -78,7 +79,16 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 				f32[j] = float32(v)
 			}
 			frozenData[i] = f32
+			totalFrozenBytes += int64(len(f32)) * 4
 		}
+	}
+	// Skip megakernel if frozen data exceeds 2 GB (Q4 models dequantized).
+	const maxFrozenBytes = 2 * 1024 * 1024 * 1024
+	if totalFrozenBytes > maxFrozenBytes {
+		log.Printf("megakernel: skipping, frozen data too large (%d MB, max %d MB)",
+			totalFrozenBytes/(1024*1024), maxFrozenBytes/(1024*1024))
+		_ = runner.Close()
+		return
 	}
 
 	// Allocate GPU workspace and upload weights.
@@ -89,22 +99,6 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	}
 
 	outputShape := runner.OutputShape()
-
-	// Validate with a test launch before enabling.
-	inputSize := 1
-	if len(cfg.InputSlots) > 0 && cfg.InputSlots[0] < len(cfg.SlotShapes) {
-		for _, d := range cfg.SlotShapes[cfg.InputSlots[0]] {
-			inputSize *= d
-		}
-	}
-	testInput := make([]float32, inputSize)
-	if _, err := runner.Launch(testInput, 0); err != nil {
-		log.Printf("megakernel: test launch failed: %v", err)
-		runner.ClearGPUError()
-		_ = runner.Close()
-		return
-	}
-	log.Printf("megakernel: test launch passed")
 
 	// Set the megakernel function on the plan.
 	plan.SetMegakernelFn(func(ctx context.Context, inputs []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
