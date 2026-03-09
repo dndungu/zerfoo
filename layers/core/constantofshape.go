@@ -2,13 +2,16 @@ package core
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/zerfoo/zerfoo/compute"
 	"github.com/zerfoo/zerfoo/graph"
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
 	"github.com/zerfoo/zerfoo/types"
+	"github.com/zerfoo/zmf"
 )
 
 // ConstantOfShape creates a tensor of a given shape filled with a constant value.
@@ -63,6 +66,31 @@ func BuildConstantOfShape[T tensor.Numeric](
 			value = ops.FromFloat32(val)
 		case int64:
 			value = ops.FromFloat64(float64(val))
+		case *zmf.Tensor:
+			// ONNX ConstantOfShape stores the fill value as a scalar tensor attribute.
+			// Extract the scalar float value from the raw tensor bytes.
+			if val != nil && len(val.Data) > 0 {
+				switch val.Dtype {
+				case zmf.Tensor_FLOAT32:
+					if len(val.Data) >= 4 {
+						bits := binary.LittleEndian.Uint32(val.Data[:4])
+						value = ops.FromFloat32(math.Float32frombits(bits))
+					}
+				case zmf.Tensor_FLOAT64:
+					if len(val.Data) >= 8 {
+						bits := binary.LittleEndian.Uint64(val.Data[:8])
+						value = ops.FromFloat64(math.Float64frombits(bits))
+					}
+				case zmf.Tensor_INT64:
+					if len(val.Data) >= 8 {
+						value = ops.FromFloat64(float64(int64(binary.LittleEndian.Uint64(val.Data[:8]))))
+					}
+				case zmf.Tensor_INT32:
+					if len(val.Data) >= 4 {
+						value = ops.FromFloat64(float64(int32(binary.LittleEndian.Uint32(val.Data[:4]))))
+					}
+				}
+			}
 		}
 	}
 	return &ConstantOfShape[T]{engine: engine, value: value}, nil
