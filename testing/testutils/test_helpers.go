@@ -268,6 +268,11 @@ func (e *MockEngine[T]) Pow(_ context.Context, _, _ *tensor.TensorNumeric[T], _ 
 	return nil, e.Err
 }
 
+// Tanh computes the hyperbolic tangent of tensor elements.
+func (e *MockEngine[T]) Tanh(_ context.Context, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	return nil, e.Err
+}
+
 // Zero sets all elements of the tensor to zero.
 func (e *MockEngine[T]) Zero(_ context.Context, _ *tensor.TensorNumeric[T]) error {
 	return e.Err

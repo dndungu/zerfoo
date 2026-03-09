@@ -57,6 +57,13 @@ func (e *errEngine) UnaryOp(ctx context.Context, a *tensor.TensorNumeric[float32
 	return e.Engine.UnaryOp(ctx, a, fn, dst...)
 }
 
+func (e *errEngine) Tanh(ctx context.Context, a *tensor.TensorNumeric[float32], dst ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
+	if err := e.check("Tanh"); err != nil {
+		return nil, err
+	}
+	return e.Engine.Tanh(ctx, a, dst...)
+}
+
 func (e *errEngine) Mul(ctx context.Context, a, b *tensor.TensorNumeric[float32], dst ...*tensor.TensorNumeric[float32]) (*tensor.TensorNumeric[float32], error) {
 	if err := e.check("Mul"); err != nil {
 		return nil, err
@@ -273,7 +280,7 @@ func TestSimpleRNN_ForwardErrors(t *testing.T) {
 		// Forward: bias.Forward = Add#2
 		{"bias_error", map[string]int{"Add": 2}},
 		// Forward: activation.Forward = UnaryOp#1
-		{"activation_error", map[string]int{"UnaryOp": 1}},
+		{"activation_error", map[string]int{"Tanh": 1}},
 	}
 
 	for _, tt := range tests {
@@ -311,7 +318,7 @@ func TestSimpleRNN_BackwardErrors(t *testing.T) {
 		// activation.Backward uses UnaryOp (derivative) then Mul
 		// Forward uses: UnaryOp#1 (activation)
 		// Backward: UnaryOp#2 (derivative of tanh)
-		{"activation_backward_error", map[string]int{"UnaryOp": 2}},
+		{"activation_backward_error", map[string]int{"Tanh": 2}},
 		// inputWeights.Backward: Reshape calls in Linear.Backward
 		// Forward: MatMul#1(iw), MatMul#2(hw), Add#1, Add#2(bias), UnaryOp#1
 		// Backward: UnaryOp#2(tanh deriv), Mul#1(grad*deriv), then inputWeights.Backward starts
