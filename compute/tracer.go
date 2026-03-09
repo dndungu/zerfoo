@@ -171,10 +171,17 @@ func (t *Tracer[T]) RecordMultiOutput(opName string, inputs []*tensor.TensorNume
 }
 
 // RecordGather appends a TracedOp for Gather which uses int indices.
+// The output tensor is cached in ExtraArgs["_cachedOutput"] so that
+// CompileTraced can populate the slot for plan validation (the int-typed
+// indices tensor cannot be stored in the T-typed slot array).
 func (t *Tracer[T]) RecordGather(params *tensor.TensorNumeric[T], indices *tensor.TensorNumeric[int], output *tensor.TensorNumeric[T], extra map[string]any) {
 	paramsID := t.slotFor(params)
 	indicesID := t.slotForIntTensor(indices)
 	outID := t.slotFor(output)
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	extra["_cachedOutput"] = output
 	t.ops = append(t.ops, TracedOp{
 		OpName:    "Gather",
 		InputIDs:  []int{paramsID, indicesID},
