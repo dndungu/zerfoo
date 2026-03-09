@@ -1,6 +1,7 @@
 package compute
 
 import (
+	"log"
 	"reflect"
 
 	"github.com/zerfoo/zerfoo/tensor"
@@ -89,6 +90,7 @@ func (t *Tracer[T]) slotFor(tn *tensor.TensorNumeric[T]) int {
 		// metadata when first encountered (e.g. pre-allocated dst buffers).
 		if tn != nil && len(t.shapes[slot]) == 0 {
 			if s := tn.Shape(); len(s) > 0 {
+				log.Printf("tracer: backfill slot %d shape=%v", slot, s)
 				t.shapes[slot] = s
 			}
 		}
@@ -98,7 +100,12 @@ func (t *Tracer[T]) slotFor(tn *tensor.TensorNumeric[T]) int {
 	t.nextSlot++
 	t.tensorMap[ptr] = slot
 	if tn != nil {
-		t.shapes[slot] = tn.Shape()
+		s := tn.Shape()
+		t.shapes[slot] = s
+		if len(s) == 0 && !t.frozen[ptr] {
+			log.Printf("tracer: NEW slot %d has EMPTY shape (ptr=%x, size=%d, storage=%T)",
+				slot, ptr, tn.Size(), tn.GetStorage())
+		}
 	}
 	return slot
 }
