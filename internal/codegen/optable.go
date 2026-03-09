@@ -205,29 +205,29 @@ func Supported(opName string) bool {
 
 func binaryOp(op string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] %s slot_%d[tid];",
-			meta.OutputIdx, meta.InputIdx[0], op, meta.InputIdx[1]), nil
+		return fmt.Sprintf("  %s[tid] = %s[tid] %s %s[tid];",
+			outRef(meta), inRef(meta, 0), op, inRef(meta, 1)), nil
 	}
 }
 
 func funcBinaryOp(fn string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid], slot_%d[tid]);",
-			meta.OutputIdx, fn, meta.InputIdx[0], meta.InputIdx[1]), nil
+		return fmt.Sprintf("  %s[tid] = %s(%s[tid], %s[tid]);",
+			outRef(meta), fn, inRef(meta, 0), inRef(meta, 1)), nil
 	}
 }
 
 func unaryOp(fn string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid]);",
-			meta.OutputIdx, fn, meta.InputIdx[0]), nil
+		return fmt.Sprintf("  %s[tid] = %s(%s[tid]);",
+			outRef(meta), fn, inRef(meta, 0)), nil
 	}
 }
 
 func prefixUnaryOp(prefix string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid]);",
-			meta.OutputIdx, prefix, meta.InputIdx[0]), nil
+		return fmt.Sprintf("  %s[tid] = %s(%s[tid]);",
+			outRef(meta), prefix, inRef(meta, 0)), nil
 	}
 }
 
@@ -237,8 +237,8 @@ func scalarOp(op string) OpEmitter {
 		if !ok {
 			return "", fmt.Errorf("scalarOp %q: missing ExtraArgs[\"scalar\"]", op)
 		}
-		return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] %s %.9ef;",
-			meta.OutputIdx, meta.InputIdx[0], op, scalar), nil
+		return fmt.Sprintf("  %s[tid] = %s[tid] %s %.9ef;",
+			outRef(meta), inRef(meta, 0), op, scalar), nil
 	}
 }
 
@@ -248,14 +248,15 @@ func funcScalarOp(fn string) OpEmitter {
 		if !ok {
 			return "", fmt.Errorf("funcScalarOp %q: missing ExtraArgs[\"scalar\"]", fn)
 		}
-		return fmt.Sprintf("  slot_%d[tid] = %s(slot_%d[tid], %.9ef);",
-			meta.OutputIdx, fn, meta.InputIdx[0], scalar), nil
+		return fmt.Sprintf("  %s[tid] = %s(%s[tid], %.9ef);",
+			outRef(meta), fn, inRef(meta, 0), scalar), nil
 	}
 }
 
 func siluOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid] * (1.0f / (1.0f + expf(-slot_%d[tid])));",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0]), nil
+	in := inRef(meta, 0)
+	return fmt.Sprintf("  %s[tid] = %s[tid] * (1.0f / (1.0f + expf(-%s[tid])));",
+		outRef(meta), in, in), nil
 }
 
 func rmsnormOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -263,8 +264,8 @@ func rmsnormOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	if dim == 0 {
 		return "", fmt.Errorf("rmsnormOp: cannot determine normalization dimension from input shape")
 	}
-	return fmt.Sprintf("  dev_rmsnorm(slot_%d, slot_%d, slot_%d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dim), nil
+	return fmt.Sprintf("  dev_rmsnorm(%s, %s, %s, %d);",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), dim), nil
 }
 
 func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -272,8 +273,8 @@ func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
 		cols = inputs[0].Shape[len(inputs[0].Shape)-1]
 	}
-	return fmt.Sprintf("  dev_softmax(slot_%d, slot_%d, 1, %d);",
-		meta.OutputIdx, meta.InputIdx[0], cols), nil
+	return fmt.Sprintf("  dev_softmax(%s, %s, 1, %d);",
+		outRef(meta), inRef(meta, 0), cols), nil
 }
 
 func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -282,13 +283,8 @@ func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
-	// Use frozen_ or slot_ depending on whether input 0 is a frozen slot.
-	in0Ref := fmt.Sprintf("slot_%d", meta.InputIdx[0])
-	if isFrozenInput(meta.ExtraArgs, 0) {
-		in0Ref = fmt.Sprintf("frozen_%d", meta.InputIdx[0])
-	}
-	return fmt.Sprintf("  dev_gemv_f32(slot_%d, %s, slot_%d, %d, %d);",
-		meta.OutputIdx, in0Ref, meta.InputIdx[1], dimM, dimK), nil
+	return fmt.Sprintf("  dev_gemv_f32(%s, %s, %s, %d, %d);",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
 }
 
 func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -297,12 +293,8 @@ func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
-	in0Ref := fmt.Sprintf("slot_%d", meta.InputIdx[0])
-	if isFrozenInput(meta.ExtraArgs, 0) {
-		in0Ref = fmt.Sprintf("frozen_%d", meta.InputIdx[0])
-	}
-	return fmt.Sprintf("  dev_gemv_q4(slot_%d, %s, slot_%d, %d, %d);",
-		meta.OutputIdx, in0Ref, meta.InputIdx[1], dimM, dimK), nil
+	return fmt.Sprintf("  dev_gemv_q4(%s, %s, %s, %d, %d);",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
 }
 
 // gemvDims extracts matrix dimensions for gemv ops from available shape info.
@@ -373,6 +365,17 @@ func slotRef(meta graph.InstructionMeta, i int) string {
 	return fmt.Sprintf("slot_%d", idx)
 }
 
+// inRef returns slotRef(meta, i) for use in element-access expressions.
+// Convenience alias used by all emitters that reference input slots.
+func inRef(meta graph.InstructionMeta, i int) string {
+	return slotRef(meta, i)
+}
+
+// outRef returns the slot reference for the output. Outputs are never frozen.
+func outRef(meta graph.InstructionMeta) string {
+	return fmt.Sprintf("slot_%d", meta.OutputIdx)
+}
+
 func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	// Embedding dim is the last dimension of the embedding table.
 	dim := lastDim(inputs, 0)
@@ -384,18 +387,21 @@ func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		}
 	}
 	if len(meta.InputIdx) < 2 {
-		// Single input: params is frozen (by convention at OutputIdx), indices from InputIdx[0].
-		return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, %d);",
-			meta.OutputIdx, meta.OutputIdx, meta.InputIdx[0], dim), nil
+		return fmt.Sprintf("  dev_gather(%s, frozen_%d, %s, %d);",
+			outRef(meta), meta.OutputIdx, inRef(meta, 0), dim), nil
 	}
-	paramsRef := slotRef(meta, 0)
-	return fmt.Sprintf("  dev_gather(slot_%d, %s, slot_%d, %d);",
-		meta.OutputIdx, paramsRef, meta.InputIdx[1], dim), nil
+	return fmt.Sprintf("  dev_gather(%s, %s, %s, %d);",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), dim), nil
 }
 
 func reshapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  // %s: slot_%d = slot_%d (reindex, no compute)",
-		meta.OpName, meta.OutputIdx, meta.InputIdx[0]), nil
+	if meta.OutputIdx == meta.InputIdx[0] {
+		return fmt.Sprintf("  // %s: %s (in-place reindex, no compute)",
+			meta.OpName, outRef(meta)), nil
+	}
+	// Different slots: copy data from input to output.
+	return fmt.Sprintf("  %s[tid] = %s[tid]; // %s",
+		outRef(meta), inRef(meta, 0), meta.OpName), nil
 }
 
 func expandOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -405,35 +411,31 @@ func expandOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 			size *= d
 		}
 	}
-	return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid %% %d];",
-		meta.OutputIdx, meta.InputIdx[0], size), nil
+	return fmt.Sprintf("  %s[tid] = %s[tid %% %d];",
+		outRef(meta), inRef(meta, 0), size), nil
 }
 
 func constantOfShapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = 0.0f;",
-		meta.OutputIdx), nil
+	return fmt.Sprintf("  %s[tid] = 0.0f;", outRef(meta)), nil
 }
 
 func transposeOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	// Get input shape and permutation axes from ExtraArgs.
 	var shape []int
 	if len(inputs) > 0 {
 		shape = inputs[0].Shape
 	}
 	axes := extraIntSlice(meta.ExtraArgs, "axes")
 	if len(shape) == 0 || len(axes) == 0 {
-		// Fallback: treat as no-op reindex if we can't determine shape/perm.
-		return fmt.Sprintf("  // Transpose: slot_%d = slot_%d (shape/perm unknown, no-op)",
-			meta.OutputIdx, meta.InputIdx[0]), nil
+		return fmt.Sprintf("  // Transpose: %s = %s (shape/perm unknown, no-op)",
+			outRef(meta), inRef(meta, 0)), nil
 	}
-	return fmt.Sprintf("  { const int shape[] = %s; const int perm[] = %s; dev_transpose(slot_%d, slot_%d, shape, perm); }",
+	return fmt.Sprintf("  { const int shape[] = %s; const int perm[] = %s; dev_transpose(%s, %s, shape, perm); }",
 		formatIntArray(shape), formatIntArray(axes),
-		meta.OutputIdx, meta.InputIdx[0]), nil
+		outRef(meta), inRef(meta, 0)), nil
 }
 
 func sliceOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	dim := lastDim(inputs, 0)
-	// Extract slice parameters from ExtraArgs.
 	starts := extraIntSlice(meta.ExtraArgs, "starts")
 	ends := extraIntSlice(meta.ExtraArgs, "ends")
 	axes := extraIntSlice(meta.ExtraArgs, "axes")
@@ -447,16 +449,16 @@ func sliceOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	if len(axes) > 0 {
 		axis = axes[0]
 	}
-	return fmt.Sprintf("  dev_slice(slot_%d, slot_%d, %d, %d, %d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], start, end, axis, dim), nil
+	return fmt.Sprintf("  dev_slice(%s, %s, %d, %d, %d, %d);",
+		outRef(meta), inRef(meta, 0), start, end, axis, dim), nil
 }
 
 func repeatOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	dim := lastDim(inputs, 0)
 	axis := extraInt(meta.ExtraArgs, "axis", 0)
 	reps := extraInt(meta.ExtraArgs, "repetitions", 1)
-	return fmt.Sprintf("  dev_repeat(slot_%d, slot_%d, %d, %d, %d);",
-		meta.OutputIdx, meta.InputIdx[0], axis, reps, dim), nil
+	return fmt.Sprintf("  dev_repeat(%s, %s, %d, %d, %d);",
+		outRef(meta), inRef(meta, 0), axis, reps, dim), nil
 }
 
 func reduceOp(fn string) OpEmitter {
@@ -464,32 +466,31 @@ func reduceOp(fn string) OpEmitter {
 		dim := lastDim(inputs, 0)
 		axis := extraInt(meta.ExtraArgs, "axis", -1)
 		if axis < 0 {
-			// Default to last axis.
 			axis = 0
 			if len(inputs) > 0 {
 				axis = len(inputs[0].Shape) - 1
 			}
 		}
-		return fmt.Sprintf("  %s(slot_%d, slot_%d, %d, %d);",
-			fn, meta.OutputIdx, meta.InputIdx[0], axis, dim), nil
+		return fmt.Sprintf("  %s(%s, %s, %d, %d);",
+			fn, outRef(meta), inRef(meta, 0), axis, dim), nil
 	}
 }
 
 func castOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid];",
-		meta.OutputIdx, meta.InputIdx[0]), nil
+	return fmt.Sprintf("  %s[tid] = %s[tid];",
+		outRef(meta), inRef(meta, 0)), nil
 }
 
 func cmpOp(op string) OpEmitter {
 	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-		return fmt.Sprintf("  slot_%d[tid] = (slot_%d[tid] %s slot_%d[tid]) ? 1.0f : 0.0f;",
-			meta.OutputIdx, meta.InputIdx[0], op, meta.InputIdx[1]), nil
+		return fmt.Sprintf("  %s[tid] = (%s[tid] %s %s[tid]) ? 1.0f : 0.0f;",
+			outRef(meta), inRef(meta, 0), op, inRef(meta, 1)), nil
 	}
 }
 
 func whereOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = (slot_%d[tid] != 0.0f) ? slot_%d[tid] : slot_%d[tid];",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.InputIdx[2]), nil
+	return fmt.Sprintf("  %s[tid] = (%s[tid] != 0.0f) ? %s[tid] : %s[tid];",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), inRef(meta, 2)), nil
 }
 
 // kvCacheAppendOp emits a dev_kv_append call that writes new K or V data
@@ -506,8 +507,8 @@ func kvCacheAppendOp(arrayName string) OpEmitter {
 		if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
 			headDim = inputs[0].Shape[len(inputs[0].Shape)-1]
 		}
-		return fmt.Sprintf("  dev_kv_append(%s[%d], slot_%d, seq_pos, %d);",
-			arrayName, layer, meta.InputIdx[0], headDim), nil
+		return fmt.Sprintf("  dev_kv_append(%s[%d], %s, seq_pos, %d);",
+			arrayName, layer, inRef(meta, 0), headDim), nil
 	}
 }
 
@@ -532,16 +533,16 @@ func kvCacheSeqLenOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 
 // autoPositionIdsOp emits position ID generation using the pos kernel argument.
 func autoPositionIdsOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = (float)(pos + tid);", meta.OutputIdx), nil
+	return fmt.Sprintf("  %s[tid] = (float)(pos + tid);", outRef(meta)), nil
 }
 
 // autoZeroKVCacheOp emits zeroing of a KV cache region.
 func autoZeroKVCacheOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = 0.0f;", meta.OutputIdx), nil
+	return fmt.Sprintf("  %s[tid] = 0.0f;", outRef(meta)), nil
 }
 
 func rangeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  slot_%d[tid] = (float)tid;", meta.OutputIdx), nil
+	return fmt.Sprintf("  %s[tid] = (float)tid;", outRef(meta)), nil
 }
 
 func triluOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
@@ -549,11 +550,11 @@ func triluOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
 		cols = inputs[0].Shape[len(inputs[0].Shape)-1]
 	}
-	return fmt.Sprintf("  { int row = tid / %d; int col = tid %% %d; slot_%d[tid] = (col <= row) ? slot_%d[tid] : 0.0f; }",
-		cols, cols, meta.OutputIdx, meta.InputIdx[0]), nil
+	return fmt.Sprintf("  { int row = tid / %d; int col = tid %% %d; %s[tid] = (col <= row) ? %s[tid] : 0.0f; }",
+		cols, cols, outRef(meta), inRef(meta, 0)), nil
 }
 
 func scatterNDOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
-	return fmt.Sprintf("  // ScatterND: slot_%d updated from slot_%d via indices slot_%d\n  slot_%d[tid] = slot_%d[tid];",
-		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx, meta.InputIdx[0]), nil
+	return fmt.Sprintf("  // ScatterND: %s updated from %s via indices %s\n  %s[tid] = %s[tid];",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), outRef(meta), inRef(meta, 0)), nil
 }

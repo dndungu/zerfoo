@@ -134,7 +134,7 @@ func TestEmitMegakernelMultiOp(t *testing.T) {
 	}
 
 	// Both ops should appear in order.
-	mulIdx := strings.Index(code, "slot_2[tid] = slot_0[tid] * slot_1[tid]")
+	mulIdx := strings.Index(code, "slot_2[tid] = slot_0[tid] * frozen_1[tid]")
 	expIdx := strings.Index(code, "expf(slot_2[tid])")
 	if mulIdx < 0 {
 		t.Error("missing Mul instruction")
@@ -256,16 +256,16 @@ func TestEmitShapeOps(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "Shape is no-op reindex",
+			name:   "Shape copies when slots differ",
 			opName: "Shape",
 			inputs: []SlotInfo{{Shape: []int{2, 3}}},
-			want:   "// Shape: slot_1 = slot_0 (reindex, no compute)",
+			want:   "slot_1[tid] = slot_0[tid]; // Shape",
 		},
 		{
-			name:   "Unsqueeze is no-op reindex",
+			name:   "Unsqueeze copies when slots differ",
 			opName: "Unsqueeze",
 			inputs: []SlotInfo{{Shape: []int{2, 3}}},
-			want:   "// Unsqueeze: slot_1 = slot_0 (reindex, no compute)",
+			want:   "slot_1[tid] = slot_0[tid]; // Unsqueeze",
 		},
 		{
 			name:   "Expand uses modulo broadcast",
