@@ -127,7 +127,12 @@ func (p *ExecutionPlan[T]) SetMegakernelFn(fn func(context.Context, []*tensor.Te
 func (p *ExecutionPlan[T]) Run(ctx context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	if v := p.megakernelFn.Load(); v != nil {
 		fn := v.(func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error))
-		return fn(ctx, inputs)
+		result, err := fn(ctx, inputs)
+		if result != nil || err != nil {
+			return result, err
+		}
+		// nil result with nil error means megakernel disabled; fall through
+		// to per-instruction execution.
 	}
 
 	if len(inputs) != len(p.inputIdx) {
