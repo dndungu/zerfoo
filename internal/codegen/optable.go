@@ -187,6 +187,11 @@ func gemvQ4Op(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 }
 
 func gatherOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	if len(meta.InputIdx) < 2 {
+		// Single input: params is frozen, indices come from InputIdx[0].
+		return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, dim_%d);",
+			meta.OutputIdx, meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx), nil
+	}
 	return fmt.Sprintf("  dev_gather(slot_%d, frozen_%d, slot_%d, dim_%d);",
 		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx), nil
 }
