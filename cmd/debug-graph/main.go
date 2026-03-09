@@ -43,7 +43,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("encode: %v", err)
 	}
-	log.Printf("Token IDs: %v (len=%d)", tokenIDs, len(tokenIDs))
+	// Prepend BOS token (Gemma uses token ID 2).
+	tokenIDs = append([]int{2}, tokenIDs...)
+	log.Printf("Token IDs (with BOS): %v (len=%d)", tokenIDs, len(tokenIDs))
 
 	log.Printf("Loading model from %s", zmfPath)
 	eng := compute.NewCPUEngine[float32](numeric.Float32Ops{})

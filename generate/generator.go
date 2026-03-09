@@ -179,6 +179,10 @@ func (gen *Generator[T]) Generate(ctx context.Context, prompt string, sc Samplin
 	if len(promptIDs) == 0 {
 		return "", fmt.Errorf("prompt produced no tokens")
 	}
+	// Prepend BOS token if configured (required by Gemma, LLaMA, etc.).
+	if gen.config.BOSTokenID > 0 {
+		promptIDs = append([]int{gen.config.BOSTokenID}, promptIDs...)
+	}
 
 	var cacheProvider CacheProvider[T]
 	if gen.blockPool != nil {
