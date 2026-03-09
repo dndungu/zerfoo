@@ -50,6 +50,22 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	source, err := codegen.EmitMegakernel(cfg)
 	if err != nil {
 		log.Printf("megakernel: emit failed: %v", err)
+		for i, inst := range instructions {
+			if inst.OpName == "MatMul" || inst.OpName == "MatMulNBits" {
+				inShapes := make([][]int, len(inst.InputIdx))
+				for j, idx := range inst.InputIdx {
+					if idx < len(cfg.SlotShapes) {
+						inShapes[j] = cfg.SlotShapes[idx]
+					}
+				}
+				var outShape []int
+				if inst.OutputIdx < len(cfg.SlotShapes) {
+					outShape = cfg.SlotShapes[inst.OutputIdx]
+				}
+				log.Printf("  [%d] %s inputs=%v shapes=%v out=%d outShape=%v",
+					i, inst.OpName, inst.InputIdx, inShapes, inst.OutputIdx, outShape)
+			}
+		}
 		return
 	}
 
