@@ -346,11 +346,29 @@ func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNu
 	outputTensor := memo[g.output]
 	outputSlot := tracer.SlotFor(outputTensor)
 
+	// Build a slot-to-tensor map from memo so we can find traced outputs
+	// for ops like Gather whose int-typed indices don't fit the T slot system.
+	memoBySlot := make(map[int]*tensor.TensorNumeric[T])
+	for _, t := range memo {
+		if t != nil {
+			sid := tracer.SlotFor(t)
+			memoBySlot[sid] = t
+		}
+	}
+
 	// Build instructions from traced ops.
 	engine := proxy.Real()
 	instructions := make([]Instruction[T], len(tracedOps))
 	for i, op := range tracedOps {
-		fwd := makeTracedForward[T](engine, op)
+		// For Gather ops, the int-typed indices tensor doesn't fit the
+		// generic T slot system. Cache the traced output so plan validation
+		// can replay it. The megakernel emitter uses InstructionMeta only.
+		if op.OpName == "Gather" {
+			if cached, ok := memoBySlot[op.OutputID]; ok && slots[op.OutputID] == nil {
+				slots[op.OutputID] = cached
+			}
+		}
+		fwd := makeTracedForward(engine, op, slots)
 		inputIdx := make([]int, len(op.InputIDs))
 		copy(inputIdx, op.InputIDs)
 		instructions[i] = Instruction[T]{
@@ -382,8 +400,19 @@ func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNu
 
 // makeTracedForward creates a Forward closure for a traced op that replays the
 // engine call with the correct method and extra arguments.
-func makeTracedForward[T tensor.Numeric](engine compute.Engine[T], op compute.TracedOp) func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+func makeTracedForward[T tensor.Numeric](engine compute.Engine[T], op compute.TracedOp, slots []*tensor.TensorNumeric[T]) func(context.Context, []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	switch op.OpName {
+	case "Gather":
+		// Gather uses int-typed indices which don't fit the T-typed slot system.
+		// Return the pre-cached output from the tracing pass. The megakernel
+		// emitter handles Gather via InstructionMeta, not this Forward closure.
+		outIdx := op.OutputID
+		return func(_ context.Context, _ []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+			if outIdx < len(slots) && slots[outIdx] != nil {
+				return slots[outIdx], nil
+			}
+			return nil, fmt.Errorf("gather: no cached output for slot %d", outIdx)
+		}
 	case "Add":
 		return func(ctx context.Context, ins []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 			return engine.Add(ctx, ins[0], ins[1])
