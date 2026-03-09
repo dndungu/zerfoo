@@ -279,6 +279,63 @@ func TestTracerSlotForIntTensor(t *testing.T) {
 	}
 }
 
+func TestTracerShapeBackfill(t *testing.T) {
+	// Simulate the scenario where a tensor is first seen with an empty shape
+	// (e.g. a GPU tensor whose shape wasn't set yet), then re-encountered
+	// after the shape has been populated.
+	tr := NewTracer[float32](nil)
+
+	// Create a tensor and manually clear its shape to simulate a GPU tensor
+	// with empty shape at first encounter.
+	a, _ := tensor.New[float32]([]int{}, []float32{0})
+	out := newTestTensor([]int{2, 3})
+
+	// First encounter: a has empty shape.
+	slot := tr.slotFor(a)
+	shapes := tr.SlotShapes()
+	if len(shapes[slot]) != 0 {
+		t.Fatalf("expected empty shape on first encounter, got %v", shapes[slot])
+	}
+
+	// Simulate the tensor getting a real shape (e.g. after SetShape).
+	a.SetShape([]int{1, 2048})
+
+	// Second encounter via Record: slotFor should update the shape.
+	tr.Record("Add", []*tensor.TensorNumeric[float32]{a}, out, nil)
+	shapes = tr.SlotShapes()
+	if !reflect.DeepEqual(shapes[slot], []int{1, 2048}) {
+		t.Errorf("shape after backfill = %v, want [1 2048]", shapes[slot])
+	}
+}
+
+func TestTracerShapeBackfillFromExtraArgs(t *testing.T) {
+	// Test that Record backfills input shapes from ExtraArgs (aShape/bShape).
+	tr := NewTracer[float32](nil)
+
+	a, _ := tensor.New[float32]([]int{}, []float32{0})
+	b, _ := tensor.New[float32]([]int{}, []float32{0})
+	out := newTestTensor([]int{2, 4})
+
+	// Record with ExtraArgs containing shape info.
+	extra := map[string]any{
+		"aShape": []int{2, 3},
+		"bShape": []int{3, 4},
+	}
+	tr.Record("MatMul", []*tensor.TensorNumeric[float32]{a, b}, out, extra)
+
+	ops := tr.TracedOps()
+	shapes := tr.SlotShapes()
+
+	aSlot := ops[0].InputIDs[0]
+	bSlot := ops[0].InputIDs[1]
+	if !reflect.DeepEqual(shapes[aSlot], []int{2, 3}) {
+		t.Errorf("a shape from ExtraArgs = %v, want [2 3]", shapes[aSlot])
+	}
+	if !reflect.DeepEqual(shapes[bSlot], []int{3, 4}) {
+		t.Errorf("b shape from ExtraArgs = %v, want [3 4]", shapes[bSlot])
+	}
+}
+
 func TestTracerRecordMultipleInputs(t *testing.T) {
 	tr := NewTracer[float32](nil)
 	a := newTestTensor([]int{2, 3})

@@ -56,6 +56,22 @@ func (t *Tracer[T]) Record(opName string, inputs []*tensor.TensorNumeric[T], out
 		inputIDs[i] = t.slotFor(in)
 	}
 	outID := t.slotFor(output)
+
+	// Backfill input slot shapes from ExtraArgs when the tensor's own shape
+	// was empty (common for GPU-resident tensors during tracing).
+	if extra != nil {
+		if aShape, ok := extra["aShape"].([]int); ok && len(aShape) > 0 && len(inputIDs) > 0 {
+			if len(t.shapes[inputIDs[0]]) == 0 {
+				t.shapes[inputIDs[0]] = aShape
+			}
+		}
+		if bShape, ok := extra["bShape"].([]int); ok && len(bShape) > 0 && len(inputIDs) > 1 {
+			if len(t.shapes[inputIDs[1]]) == 0 {
+				t.shapes[inputIDs[1]] = bShape
+			}
+		}
+	}
+
 	t.ops = append(t.ops, TracedOp{
 		OpName:    opName,
 		InputIDs:  inputIDs,
@@ -68,6 +84,14 @@ func (t *Tracer[T]) Record(opName string, inputs []*tensor.TensorNumeric[T], out
 func (t *Tracer[T]) slotFor(tn *tensor.TensorNumeric[T]) int {
 	ptr := ptrOf(tn)
 	if slot, ok := t.tensorMap[ptr]; ok {
+		// Update shape if the tensor now has a valid shape but the recorded
+		// one is empty. This handles GPU tensors that may not have shape
+		// metadata when first encountered (e.g. pre-allocated dst buffers).
+		if tn != nil && len(t.shapes[slot]) == 0 {
+			if s := tn.Shape(); len(s) > 0 {
+				t.shapes[slot] = s
+			}
+		}
 		return slot
 	}
 	slot := t.nextSlot
