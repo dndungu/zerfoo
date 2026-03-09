@@ -38,9 +38,28 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		frozenMeta[i] = codegen.FrozenSlotMeta{SlotIdx: f.SlotIdx}
 	}
 
+	slotShapes := plan.SlotShapes()
+	// Debug: count empty vs non-empty shapes.
+	var emptyCount, nonEmptyCount, nilCount int
+	for i, s := range slotShapes {
+		switch {
+		case s == nil:
+			nilCount++
+		case len(s) == 0:
+			emptyCount++
+			if i < 10 || (i > 160 && i < 180) {
+				log.Printf("megakernel: slot %d has EMPTY shape (non-nil, len=0)", i)
+			}
+		default:
+			nonEmptyCount++
+		}
+	}
+	log.Printf("megakernel: SlotShapes: %d total, %d nil, %d empty, %d non-empty",
+		len(slotShapes), nilCount, emptyCount, nonEmptyCount)
+
 	cfg := codegen.MegakernelConfig{
 		Instructions: instructions,
-		SlotShapes:   plan.SlotShapes(),
+		SlotShapes:   slotShapes,
 		FrozenSlots:  frozenMeta,
 		InputSlots:   plan.InputSlots(),
 		OutputSlot:   plan.OutputSlot(),
