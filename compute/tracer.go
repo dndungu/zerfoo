@@ -129,6 +129,7 @@ func (t *Tracer[T]) NextSlot() int {
 
 // SlotShapes returns the shape for each slot index.
 func (t *Tracer[T]) SlotShapes() map[int][]int {
+	log.Printf("tracer.SlotShapes: map has %d entries, nextSlot=%d", len(t.shapes), t.nextSlot)
 	return t.shapes
 }
 
