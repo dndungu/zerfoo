@@ -64,6 +64,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	// Load the compiled .so.
 	runner, err := codegen.LoadMegakernel(soPath)
 	if err != nil {
+		log.Printf("megakernel: load failed: %v", err)
 		return
 	}
 
@@ -82,6 +83,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 
 	// Allocate GPU workspace and upload weights.
 	if err := runner.PrepareWorkspace(cfg, frozenData); err != nil {
+		log.Printf("megakernel: prepare workspace failed: %v", err)
 		_ = runner.Close()
 		return
 	}
