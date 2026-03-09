@@ -369,8 +369,8 @@ func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNu
 				stdlog.Printf("CompileTraced: Gather slot %d type assertion failed: raw type=%T", op.OutputID, raw)
 			}
 		}
-		if i < 5 {
-			stdlog.Printf("CompileTraced: instruction %d: op=%s inputs=%v output=%d", i, op.OpName, op.InputIDs, op.OutputID)
+		if i < 10 {
+			stdlog.Printf("CompileTraced: instruction %d: op=%s inputs=%v output=%d slotNil=%v", i, op.OpName, op.InputIDs, op.OutputID, slots[op.OutputID] == nil)
 		}
 		fwd := makeTracedForward(engine, op)
 		inputIdx := make([]int, len(op.InputIDs))
