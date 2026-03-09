@@ -103,6 +103,66 @@ func broadcastShape(a, b []int) []int {
 	return out
 }
 
+// broadcastShapeChecked computes the broadcast output shape, returning an error
+// if dimensions are incompatible (neither equal nor 1).
+func broadcastShapeChecked(a, b []int) ([]int, error) {
+	n := len(a)
+	if len(b) > n {
+		n = len(b)
+	}
+	out := make([]int, n)
+	for i := range n {
+		da, db := 1, 1
+		if ai := len(a) - 1 - i; ai >= 0 {
+			da = a[ai]
+		}
+		if bi := len(b) - 1 - i; bi >= 0 {
+			db = b[bi]
+		}
+		if da != db && da != 1 && db != 1 {
+			return nil, fmt.Errorf("incompatible broadcast dimensions: %v vs %v", a, b)
+		}
+		if da > db {
+			out[n-1-i] = da
+		} else {
+			out[n-1-i] = db
+		}
+	}
+	return out, nil
+}
+
+// broadcastStrides computes per-dimension strides for an input shape
+// broadcast into outShape. Dimensions of size 1 (or missing/leading) get stride 0.
+func broadcastStrides(inShape, outShape []int) []int {
+	ndim := len(outShape)
+	strides := make([]int, ndim)
+	// Compute row-major strides for inShape, right-aligned to outShape.
+	stride := 1
+	for i := len(inShape) - 1; i >= 0; i-- {
+		oi := ndim - (len(inShape) - i) // aligned output dim
+		if inShape[i] == 1 {
+			strides[oi] = 0 // broadcast: stride 0
+		} else {
+			strides[oi] = stride
+		}
+		stride *= inShape[i]
+	}
+	// Leading dimensions (not in inShape) get stride 0.
+	return strides
+}
+
+// broadcastIndex converts a flat output index to a flat input index
+// given broadcast-aware strides.
+func broadcastIndex(flatIdx int, outShape, strides []int) int {
+	idx := 0
+	for d := len(outShape) - 1; d >= 0; d-- {
+		coord := flatIdx % outShape[d]
+		flatIdx /= outShape[d]
+		idx += coord * strides[d]
+	}
+	return idx
+}
+
 func (e *Expand[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
 	return nil, fmt.Errorf("Expand backward not implemented")
 }

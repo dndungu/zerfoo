@@ -26,60 +26,35 @@ func (w *Where[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]
 	if len(inputs) != 3 {
 		return nil, fmt.Errorf("Where requires 3 inputs (condition, x, y), got %d", len(inputs))
 	}
+	condShape, xShape, yShape := inputs[0].Shape(), inputs[1].Shape(), inputs[2].Shape()
 	cond, x, y := inputs[0].Data(), inputs[1].Data(), inputs[2].Data()
-	n := len(cond)
 
-	// Scalar broadcasting: if x or y is a single element, broadcast it.
-	xScalar := len(x) == 1
-	yScalar := len(y) == 1
-	condScalar := n == 1
-
-	if !xScalar && !condScalar && len(x) != n {
-		return nil, fmt.Errorf("Where: input sizes differ (cond=%d, x=%d, y=%d)", n, len(x), len(y))
+	// Compute output shape by broadcasting all three inputs.
+	xyShape, err := broadcastShapeChecked(xShape, yShape)
+	if err != nil {
+		return nil, fmt.Errorf("Where: %w", err)
 	}
-	if !yScalar && !condScalar && len(y) != n {
-		return nil, fmt.Errorf("Where: input sizes differ (cond=%d, x=%d, y=%d)", n, len(x), len(y))
+	outShape, err := broadcastShapeChecked(condShape, xyShape)
+	if err != nil {
+		return nil, fmt.Errorf("Where: %w", err)
 	}
-
-	// Determine output size as the largest non-scalar input.
-	outN := n
-	if len(x) > outN {
-		outN = len(x)
-	}
-	if len(y) > outN {
-		outN = len(y)
+	outSize := 1
+	for _, d := range outShape {
+		outSize *= d
 	}
 
-	out := make([]T, outN)
+	condStrides := broadcastStrides(condShape, outShape)
+	xStrides := broadcastStrides(xShape, outShape)
+	yStrides := broadcastStrides(yShape, outShape)
+
+	out := make([]T, outSize)
 	for i := range out {
-		var cv T
-		if condScalar {
-			cv = cond[0]
+		ci := broadcastIndex(i, outShape, condStrides)
+		if cond[ci] != 0 {
+			out[i] = x[broadcastIndex(i, outShape, xStrides)]
 		} else {
-			cv = cond[i]
+			out[i] = y[broadcastIndex(i, outShape, yStrides)]
 		}
-		if cv != 0 {
-			if xScalar {
-				out[i] = x[0]
-			} else {
-				out[i] = x[i]
-			}
-		} else {
-			if yScalar {
-				out[i] = y[0]
-			} else {
-				out[i] = y[i]
-			}
-		}
-	}
-
-	// Use the largest input's shape for the output.
-	outShape := inputs[0].Shape()
-	if len(x) > n {
-		outShape = inputs[1].Shape()
-	}
-	if len(y) > len(x) && len(y) > n {
-		outShape = inputs[2].Shape()
 	}
 	return tensor.New(outShape, out)
 }

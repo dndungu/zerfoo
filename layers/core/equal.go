@@ -17,50 +17,13 @@ type Equal[T tensor.Numeric] struct {
 	ops    numeric.Arithmetic[T]
 }
 
-func (e *Equal[T]) OpType() string                  { return "Equal" }
+func (e *Equal[T]) OpType() string                   { return "Equal" }
 func (e *Equal[T]) Attributes() map[string]any       { return nil }
 func (e *Equal[T]) OutputShape() []int               { return nil }
 func (e *Equal[T]) Parameters() []*graph.Parameter[T] { return nil }
 
 func (e *Equal[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-	if len(inputs) != 2 {
-		return nil, fmt.Errorf("Equal requires 2 inputs, got %d", len(inputs))
-	}
-	a, b := inputs[0].Data(), inputs[1].Data()
-	one := e.ops.One()
-
-	// Scalar broadcasting: if one input is a single element, broadcast it.
-	if len(b) == 1 {
-		out := make([]T, len(a))
-		bv := b[0]
-		for i := range a {
-			if a[i] == bv {
-				out[i] = one
-			}
-		}
-		return tensor.New(inputs[0].Shape(), out)
-	}
-	if len(a) == 1 {
-		out := make([]T, len(b))
-		av := a[0]
-		for i := range b {
-			if av == b[i] {
-				out[i] = one
-			}
-		}
-		return tensor.New(inputs[1].Shape(), out)
-	}
-
-	if len(a) != len(b) {
-		return nil, fmt.Errorf("Equal: input sizes differ (%d vs %d)", len(a), len(b))
-	}
-	out := make([]T, len(a))
-	for i := range a {
-		if a[i] == b[i] {
-			out[i] = one
-		}
-	}
-	return tensor.New(inputs[0].Shape(), out)
+	return binaryCompare("Equal", inputs, e.ops.One(), func(a, b float64) bool { return a == b })
 }
 
 func (e *Equal[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
@@ -75,4 +38,63 @@ func BuildEqual[T tensor.Numeric](
 	return &Equal[T]{engine: engine, ops: ops}, nil
 }
 
-var _ graph.Node[float32] = (*Equal[float32])(nil)
+// Greater represents an element-wise greater-than comparison. Output is 1 for true, 0 for false.
+type Greater[T tensor.Numeric] struct {
+	engine compute.Engine[T]
+	ops    numeric.Arithmetic[T]
+}
+
+func (g *Greater[T]) OpType() string                   { return "Greater" }
+func (g *Greater[T]) Attributes() map[string]any       { return nil }
+func (g *Greater[T]) OutputShape() []int               { return nil }
+func (g *Greater[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (g *Greater[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	return binaryCompare("Greater", inputs, g.ops.One(), func(a, b float64) bool { return a > b })
+}
+
+func (g *Greater[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, fmt.Errorf("Greater backward not implemented")
+}
+
+// BuildGreater constructs a Greater node from attributes.
+func BuildGreater[T tensor.Numeric](
+	engine compute.Engine[T], ops numeric.Arithmetic[T], _ string,
+	_ map[string]*graph.Parameter[T], _ map[string]any,
+) (graph.Node[T], error) {
+	return &Greater[T]{engine: engine, ops: ops}, nil
+}
+
+// LessOrEqual represents an element-wise less-than-or-equal comparison.
+// Output is 1 for true, 0 for false.
+type LessOrEqual[T tensor.Numeric] struct {
+	engine compute.Engine[T]
+	ops    numeric.Arithmetic[T]
+}
+
+func (l *LessOrEqual[T]) OpType() string                   { return "LessOrEqual" }
+func (l *LessOrEqual[T]) Attributes() map[string]any       { return nil }
+func (l *LessOrEqual[T]) OutputShape() []int               { return nil }
+func (l *LessOrEqual[T]) Parameters() []*graph.Parameter[T] { return nil }
+
+func (l *LessOrEqual[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
+	return binaryCompare("LessOrEqual", inputs, l.ops.One(), func(a, b float64) bool { return a <= b })
+}
+
+func (l *LessOrEqual[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
+	return nil, fmt.Errorf("LessOrEqual backward not implemented")
+}
+
+// BuildLessOrEqual constructs a LessOrEqual node from attributes.
+func BuildLessOrEqual[T tensor.Numeric](
+	engine compute.Engine[T], ops numeric.Arithmetic[T], _ string,
+	_ map[string]*graph.Parameter[T], _ map[string]any,
+) (graph.Node[T], error) {
+	return &LessOrEqual[T]{engine: engine, ops: ops}, nil
+}
+
+var (
+	_ graph.Node[float32] = (*Equal[float32])(nil)
+	_ graph.Node[float32] = (*Greater[float32])(nil)
+	_ graph.Node[float32] = (*LessOrEqual[float32])(nil)
+)

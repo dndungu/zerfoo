@@ -27,41 +27,33 @@ func (o *Or[T]) Forward(_ context.Context, inputs ...*tensor.TensorNumeric[T]) (
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("Or requires 2 inputs, got %d", len(inputs))
 	}
-	a, b := inputs[0].Data(), inputs[1].Data()
 	one := o.ops.One()
 	var zero T
 
-	if len(b) == 1 {
-		out := make([]T, len(a))
-		bv := b[0]
-		for i := range a {
-			if a[i] != zero || bv != zero {
-				out[i] = one
-			}
-		}
-		return tensor.New(inputs[0].Shape(), out)
+	aShape, bShape := inputs[0].Shape(), inputs[1].Shape()
+	a, b := inputs[0].Data(), inputs[1].Data()
+
+	outShape, err := broadcastShapeChecked(aShape, bShape)
+	if err != nil {
+		return nil, fmt.Errorf("Or: %w", err)
 	}
-	if len(a) == 1 {
-		out := make([]T, len(b))
-		av := a[0]
-		for i := range b {
-			if av != zero || b[i] != zero {
-				out[i] = one
-			}
-		}
-		return tensor.New(inputs[1].Shape(), out)
+	outSize := 1
+	for _, d := range outShape {
+		outSize *= d
 	}
 
-	if len(a) != len(b) {
-		return nil, fmt.Errorf("Or: input sizes differ (%d vs %d)", len(a), len(b))
-	}
-	out := make([]T, len(a))
-	for i := range a {
-		if a[i] != zero || b[i] != zero {
+	aStrides := broadcastStrides(aShape, outShape)
+	bStrides := broadcastStrides(bShape, outShape)
+
+	out := make([]T, outSize)
+	for i := range out {
+		ai := broadcastIndex(i, outShape, aStrides)
+		bi := broadcastIndex(i, outShape, bStrides)
+		if a[ai] != zero || b[bi] != zero {
 			out[i] = one
 		}
 	}
-	return tensor.New(inputs[0].Shape(), out)
+	return tensor.New(outShape, out)
 }
 
 func (o *Or[T]) Backward(_ context.Context, _ types.BackwardMode, _ *tensor.TensorNumeric[T], _ ...*tensor.TensorNumeric[T]) ([]*tensor.TensorNumeric[T], error) {
