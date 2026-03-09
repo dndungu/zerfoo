@@ -140,7 +140,7 @@ func (k *OpenCLKernels) Gather(table, indices, output unsafe.Pointer, N, D, V in
 	return fmt.Errorf("Gather: not implemented for OpenCL")
 }
 
-func (k *OpenCLKernels) RMSNorm(input, weight, output unsafe.Pointer, eps float32, rows, D int, _ Stream) error {
+func (k *OpenCLKernels) RMSNorm(input, weight, output, scales unsafe.Pointer, eps float32, rows, D int, _ Stream) error {
 	return fmt.Errorf("RMSNorm: not implemented for OpenCL")
 }
 

@@ -129,8 +129,8 @@ func (k *CUDAKernels) Gather(table, indices, output unsafe.Pointer, N, D, V int,
 	return kernels.Gather(table, indices, output, N, D, V, streamPtr(s))
 }
 
-func (k *CUDAKernels) RMSNorm(input, weight, output unsafe.Pointer, eps float32, rows, D int, s Stream) error { //nolint:gocritic // interface match
-	return kernels.RMSNorm(input, weight, output, eps, rows, D, streamPtr(s))
+func (k *CUDAKernels) RMSNorm(input, weight, output, scales unsafe.Pointer, eps float32, rows, D int, s Stream) error { //nolint:gocritic // interface match
+	return kernels.RMSNorm(input, weight, output, scales, eps, rows, D, streamPtr(s))
 }
 
 // Compile-time interface assertion.
