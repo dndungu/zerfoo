@@ -46,9 +46,54 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		frozenMeta[i] = codegen.FrozenSlotMeta{SlotIdx: f.SlotIdx, IsQ4: isQ4}
 	}
 
+	slotShapes := plan.SlotShapes()
+
+	// Discover constant workspace slots: slots used as inputs but never
+	// produced as outputs by any instruction. These hold data like
+	// dequantized weight copies that the tracer didn't mark as frozen.
+	// We must patch their shapes BEFORE emitting CUDA so the workspace
+	// layout allocates enough space and offsets are correct in the code.
+	frozenSet := make(map[int]bool, len(frozenSlots))
+	for _, f := range frozenSlots {
+		frozenSet[f.SlotIdx] = true
+	}
+	producedSlots := make(map[int]bool)
+	for _, inst := range instructions {
+		producedSlots[inst.OutputIdx] = true
+	}
+
+	type constSlot struct {
+		idx  int
+		data []float32
+	}
+	var constants []constSlot
+	seen := make(map[int]bool)
+	for _, inst := range instructions {
+		for _, idx := range inst.InputIdx {
+			if frozenSet[idx] || producedSlots[idx] || seen[idx] {
+				continue
+			}
+			seen[idx] = true
+			td := plan.SlotData(idx)
+			if td == nil {
+				continue
+			}
+			raw := td.Data()
+			f32 := make([]float32, len(raw))
+			for j, v := range raw {
+				f32[j] = float32(v)
+			}
+			constants = append(constants, constSlot{idx: idx, data: f32})
+			// Patch the shape so workspace layout allocates enough space.
+			if idx < len(slotShapes) {
+				slotShapes[idx] = []int{len(f32)}
+			}
+		}
+	}
+
 	cfg := codegen.MegakernelConfig{
 		Instructions: instructions,
-		SlotShapes:   plan.SlotShapes(),
+		SlotShapes:   slotShapes,
 		FrozenSlots:  frozenMeta,
 		InputSlots:   plan.InputSlots(),
 		OutputSlot:   plan.OutputSlot(),
@@ -115,46 +160,20 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		return
 	}
 
-	// Initialize constant workspace slots: slots that are used as inputs
-	// but never produced as outputs by any instruction. These hold data
-	// like dequantized weight copies that the tracer didn't mark as frozen.
-	frozenSet := make(map[int]bool, len(frozenSlots))
-	for _, f := range frozenSlots {
-		frozenSet[f.SlotIdx] = true
-	}
-	producedSlots := make(map[int]bool)
-	for _, inst := range instructions {
-		producedSlots[inst.OutputIdx] = true
-	}
+	// Upload constant slot data to the workspace.
 	layout := codegen.ComputeWorkspaceLayout(cfg)
 	var wsInitBytes int64
-	for _, inst := range instructions {
-		for _, idx := range inst.InputIdx {
-			if frozenSet[idx] || producedSlots[idx] {
-				continue
-			}
-			// This slot is used as input but never produced -- it's a constant.
-			offset, ok := layout.SlotOffsets[idx]
-			if !ok {
-				continue
-			}
-			td := plan.SlotData(idx)
-			if td == nil {
-				continue
-			}
-			raw := td.Data()
-			f32 := make([]float32, len(raw))
-			for j, v := range raw {
-				f32[j] = float32(v)
-			}
-			if err := runner.InitWorkspaceSlot(offset, f32); err != nil {
-				log.Printf("megakernel: init workspace slot %d failed: %v", idx, err)
-				_ = runner.Close()
-				return
-			}
-			producedSlots[idx] = true // avoid re-uploading
-			wsInitBytes += int64(len(f32)) * 4
+	for _, c := range constants {
+		offset, ok := layout.SlotOffsets[c.idx]
+		if !ok {
+			continue
 		}
+		if err := runner.InitWorkspaceSlot(offset, c.data); err != nil {
+			log.Printf("megakernel: init workspace slot %d failed: %v", c.idx, err)
+			_ = runner.Close()
+			return
+		}
+		wsInitBytes += int64(len(c.data)) * 4
 	}
 
 	outputShape := runner.OutputShape()
@@ -196,6 +215,6 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	if ready != nil {
 		ready.Store(true)
 	}
-	log.Printf("megakernel: compiled and loaded (%d instructions, %d frozen slots, %d MB frozen, %d MB workspace init, %s)",
-		len(instructions), len(frozenSlots), totalFrozenBytes/(1024*1024), wsInitBytes/(1024*1024), soPath)
+	log.Printf("megakernel: compiled and loaded (%d instructions, %d frozen slots, %d MB frozen, %d constants, %d MB workspace init, %s)",
+		len(instructions), len(frozenSlots), totalFrozenBytes/(1024*1024), len(constants), wsInitBytes/(1024*1024), soPath)
 }
