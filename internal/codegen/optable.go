@@ -387,10 +387,10 @@ func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		}
 	}
 	if len(meta.InputIdx) < 2 {
-		return fmt.Sprintf("  dev_gather(%s, frozen_%d, %s, %d);",
+		return fmt.Sprintf("  dev_gather(%s, frozen_%d, (int)%s[0], %d);",
 			outRef(meta), meta.OutputIdx, inRef(meta, 0), dim), nil
 	}
-	return fmt.Sprintf("  dev_gather(%s, %s, %s, %d);",
+	return fmt.Sprintf("  dev_gather(%s, %s, (int)%s[0], %d);",
 		outRef(meta), inRef(meta, 0), inRef(meta, 1), dim), nil
 }
 
@@ -429,9 +429,13 @@ func transposeOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) 
 		return fmt.Sprintf("  // Transpose: %s = %s (shape/perm unknown, no-op)",
 			outRef(meta), inRef(meta, 0)), nil
 	}
-	return fmt.Sprintf("  { const int shape[] = %s; const int perm[] = %s; dev_transpose(%s, %s, shape, perm); }",
+	total := 1
+	for _, d := range shape {
+		total *= d
+	}
+	return fmt.Sprintf("  { const int shape[] = %s; const int perm[] = %s; dev_transpose(%s, %s, shape, perm, %d, %d); }",
 		formatIntArray(shape), formatIntArray(axes),
-		outRef(meta), inRef(meta, 0)), nil
+		outRef(meta), inRef(meta, 0), len(shape), total), nil
 }
 
 func sliceOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
