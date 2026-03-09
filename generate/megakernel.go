@@ -38,28 +38,9 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		frozenMeta[i] = codegen.FrozenSlotMeta{SlotIdx: f.SlotIdx}
 	}
 
-	slotShapes := plan.SlotShapes()
-	// Debug: count empty vs non-empty shapes.
-	var emptyCount, nonEmptyCount, nilCount int
-	for i, s := range slotShapes {
-		switch {
-		case s == nil:
-			nilCount++
-		case len(s) == 0:
-			emptyCount++
-			if i < 10 || (i > 160 && i < 180) {
-				log.Printf("megakernel: slot %d has EMPTY shape (non-nil, len=0)", i)
-			}
-		default:
-			nonEmptyCount++
-		}
-	}
-	log.Printf("megakernel: SlotShapes: %d total, %d nil, %d empty, %d non-empty",
-		len(slotShapes), nilCount, emptyCount, nonEmptyCount)
-
 	cfg := codegen.MegakernelConfig{
 		Instructions: instructions,
-		SlotShapes:   slotShapes,
+		SlotShapes:   plan.SlotShapes(),
 		FrozenSlots:  frozenMeta,
 		InputSlots:   plan.InputSlots(),
 		OutputSlot:   plan.OutputSlot(),
@@ -69,22 +50,6 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	source, err := codegen.EmitMegakernel(cfg)
 	if err != nil {
 		log.Printf("megakernel: emit failed: %v", err)
-		for i, inst := range instructions {
-			if inst.OpName == "MatMul" || inst.OpName == "MatMulNBits" {
-				inShapes := make([][]int, len(inst.InputIdx))
-				for j, idx := range inst.InputIdx {
-					if idx < len(cfg.SlotShapes) {
-						inShapes[j] = cfg.SlotShapes[idx]
-					}
-				}
-				var outShape []int
-				if inst.OutputIdx < len(cfg.SlotShapes) {
-					outShape = cfg.SlotShapes[inst.OutputIdx]
-				}
-				log.Printf("  [%d] %s inputs=%v shapes=%v out=%d outShape=%v",
-					i, inst.OpName, inst.InputIdx, inShapes, inst.OutputIdx, outShape)
-			}
-		}
 		return
 	}
 

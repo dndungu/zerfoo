@@ -235,21 +235,28 @@ func Load(modelID string, opts ...Option) (*Model, error) {
 		buildOpts = append(buildOpts, model.WithGlobalAttributes(globalAttrs))
 	}
 
+	// Wrap engine in EngineProxy so layers use the proxy for all operations.
+	// This enables CompileTraced to record primitive ops via the proxy's tracer.
+	proxy := compute.NewEngineProxy[float32](eng)
+
 	var mdl *model.Model[float32]
 	var mmapCloser io.Closer
 	if o.mmap {
-		mdl, mmapCloser, err = loadZMFWithMmap(eng, zmfPath, buildOpts)
+		mdl, mmapCloser, err = loadZMFWithMmap(proxy, zmfPath, buildOpts)
 		if err != nil {
 			return nil, fmt.Errorf("load model (mmap): %w", err)
 		}
 	} else {
-		mdl, err = model.LoadModelFromZMF[float32](eng, numeric.Float32Ops{}, zmfPath, buildOpts...)
+		mdl, err = model.LoadModelFromZMF[float32](proxy, numeric.Float32Ops{}, zmfPath, buildOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("load model: %w", err)
 		}
 	}
 
+	mdl.Graph.SetEngineProxy(proxy)
+
 	// Upload model weights to GPU if the engine supports it.
+	// Use the raw engine (not proxy) for the WeightUploader type assertion.
 	if uploader, ok := eng.(compute.WeightUploader); ok {
 		tensors := mdl.Graph.ConstantTensors()
 		if mdl.Embedding != nil {
