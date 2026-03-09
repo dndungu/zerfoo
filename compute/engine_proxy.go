@@ -2,6 +2,8 @@ package compute
 
 import (
 	"context"
+	"log"
+	"runtime"
 
 	"github.com/zerfoo/zerfoo/numeric"
 	"github.com/zerfoo/zerfoo/tensor"
@@ -56,6 +58,11 @@ func (p *EngineProxy[T]) Ops() numeric.Arithmetic[T] {
 func (p *EngineProxy[T]) UnaryOp(ctx context.Context, a *tensor.TensorNumeric[T], op func(T) T, dst ...*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 	result, err := p.real.UnaryOp(ctx, a, op, dst...)
 	if err == nil && p.tracer != nil {
+		// Log caller to identify which layer uses UnaryOp (debug for megakernel).
+		_, file, line, ok := runtime.Caller(1)
+		if ok {
+			log.Printf("EngineProxy.UnaryOp called from %s:%d (opaque for tracing)", file, line)
+		}
 		p.tracer.Record("UnaryOp", []*tensor.TensorNumeric[T]{a}, result, nil)
 		if marker, ok := p.tracer.(interface{ MarkOpaque() }); ok {
 			marker.MarkOpaque()
