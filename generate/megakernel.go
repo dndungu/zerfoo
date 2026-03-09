@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/zerfoo/zerfoo/graph"
 	"github.com/zerfoo/zerfoo/internal/codegen"
@@ -32,10 +33,17 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	}
 
 	// Build megakernel config from the plan.
+	// Detect Q4 frozen slots to upload raw Q4 bytes instead of dequantizing.
 	frozenSlots := plan.FrozenSlots()
 	frozenMeta := make([]codegen.FrozenSlotMeta, len(frozenSlots))
 	for i, f := range frozenSlots {
-		frozenMeta[i] = codegen.FrozenSlotMeta{SlotIdx: f.SlotIdx}
+		isQ4 := false
+		if f.Data != nil {
+			if _, ok := any(f.Data.GetStorage()).(*tensor.Q4Storage); ok {
+				isQ4 = true
+			}
+		}
+		frozenMeta[i] = codegen.FrozenSlotMeta{SlotIdx: f.SlotIdx, IsQ4: isQ4}
 	}
 
 	cfg := codegen.MegakernelConfig{
@@ -69,10 +77,27 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	}
 
 	// Extract frozen slot data for GPU upload.
+	// Q4 frozen slots: upload raw Q4 bytes reinterpreted as []float32.
+	// Float32 frozen slots: dequantize and upload as before.
 	frozenData := make([][]float32, len(frozenSlots))
 	var totalFrozenBytes int64
 	for i, f := range frozenSlots {
-		if f.Data != nil {
+		if f.Data == nil {
+			continue
+		}
+		if qs, ok := any(f.Data.GetStorage()).(*tensor.Q4Storage); ok {
+			// Upload raw Q4 bytes. Reinterpret as []float32 for the
+			// PrepareWorkspace API -- the GPU just sees raw bytes.
+			rawBytes := qs.RawBytes()
+			nFloats := (len(rawBytes) + 3) / 4 // round up to float32 boundary
+			f32 := make([]float32, nFloats)
+			copy(
+				unsafe.Slice((*byte)(unsafe.Pointer(&f32[0])), nFloats*4),
+				rawBytes,
+			)
+			frozenData[i] = f32
+			totalFrozenBytes += int64(len(rawBytes))
+		} else {
 			raw := f.Data.Data()
 			f32 := make([]float32, len(raw))
 			for j, v := range raw {
@@ -81,14 +106,6 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 			frozenData[i] = f32
 			totalFrozenBytes += int64(len(f32)) * 4
 		}
-	}
-	// Skip megakernel if frozen data exceeds 2 GB (Q4 models dequantized).
-	const maxFrozenBytes = 2 * 1024 * 1024 * 1024
-	if totalFrozenBytes > maxFrozenBytes {
-		log.Printf("megakernel: skipping, frozen data too large (%d MB, max %d MB)",
-			totalFrozenBytes/(1024*1024), maxFrozenBytes/(1024*1024))
-		_ = runner.Close()
-		return
 	}
 
 	// Allocate GPU workspace and upload weights.
@@ -137,5 +154,6 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	if ready != nil {
 		ready.Store(true)
 	}
-	log.Printf("megakernel: compiled and loaded (%d instructions, %s)", len(instructions), soPath)
+	log.Printf("megakernel: compiled and loaded (%d instructions, %d frozen slots, %d MB, %s)",
+		len(instructions), len(frozenSlots), totalFrozenBytes/(1024*1024), soPath)
 }
