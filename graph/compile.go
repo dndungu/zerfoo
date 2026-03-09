@@ -94,6 +94,15 @@ func (p *ExecutionPlan[T]) FrozenSlots() []FrozenSlot[T] {
 	return frozen
 }
 
+// SlotData returns the tensor stored in a specific slot, or nil if the
+// slot index is out of range or the slot was not populated during warmup.
+func (p *ExecutionPlan[T]) SlotData(idx int) *tensor.TensorNumeric[T] {
+	if idx < 0 || idx >= len(p.slots) {
+		return nil
+	}
+	return p.slots[idx]
+}
+
 // InputSlots returns the slot indices that receive graph inputs.
 func (p *ExecutionPlan[T]) InputSlots() []int {
 	idx := make([]int, len(p.inputIdx))
