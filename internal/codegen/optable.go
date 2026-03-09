@@ -146,7 +146,7 @@ var emitters = map[string]OpEmitter{
 
 	// Memory ops
 	"MatMul":      gemvOp,
-	"MatMulNBits": gemvQ4Op,
+	"MatMulNBits": gemvOp, // gemvOp auto-detects Q4 frozen inputs
 	"Gather":      gatherOp,
 
 	// Indexing ops
@@ -278,6 +278,14 @@ func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 }
 
 func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	// Check if either input is a Q4 frozen slot. The tracer records
+	// MatMul(input, weights) so the weight can be at index 0 or 1
+	// depending on how the engine was called.
+	for i := range len(meta.InputIdx) {
+		if isQ4Input(meta, i) {
+			return gemvQ4Op(meta, inputs, i)
+		}
+	}
 	dimM, dimK := gemvDims(meta, inputs)
 	if dimM == 0 || dimK == 0 {
 		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
@@ -287,21 +295,21 @@ func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
 }
 
-// gemvQ4Op emits a Q4 dequant-GEMV when the weight input (input 0) is Q4,
-// otherwise falls back to float32 GEMV.
-func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	if !isQ4Input(meta, 0) {
-		return gemvOp(meta, inputs)
-	}
+// gemvQ4Op emits a Q4 dequant-GEMV. weightIdx is the input index holding
+// the Q4 frozen data. The other input is the activation vector.
+func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo, weightIdx int) (string, error) {
 	dimM, dimK := gemvDims(meta, inputs)
 	if dimM == 0 || dimK == 0 {
 		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
 			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
 	// dev_gemv_q4(out, weight_q4, activation, M, K)
-	// Weight is frozen Q4 raw bytes; activation is the second input.
+	actIdx := 1 - weightIdx // the other input is the activation
+	if actIdx < 0 || actIdx >= len(meta.InputIdx) {
+		actIdx = 0
+	}
 	return fmt.Sprintf("  dev_gemv_q4(%s, (const void*)%s, %s, %d, %d);",
-		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
+		outRef(meta), inRef(meta, weightIdx), inRef(meta, actIdx), dimM, dimK), nil
 }
 
 
