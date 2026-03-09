@@ -1,4 +1,4 @@
-//go:build cuda
+//go:build !cuda
 
 package codegen
 
@@ -10,13 +10,10 @@ import (
 // MegakernelRunner manages a compiled megakernel .so and its GPU resources.
 // This is a stub for the CGo build path where purego-based dlopen is not used.
 type MegakernelRunner struct {
-	soHandle    uintptr
-	launchFn    uintptr
-	workspace   unsafe.Pointer
-	frozenPtrs  unsafe.Pointer
-	frozenBufs  []unsafe.Pointer
-	layout      WorkspaceLayout
-	outputShape []int
+	workspace  unsafe.Pointer
+	frozenPtrs unsafe.Pointer
+	frozenBufs []unsafe.Pointer
+	layout     WorkspaceLayout
 }
 
 var errStub = fmt.Errorf("megakernel runner not supported in cgo build")
