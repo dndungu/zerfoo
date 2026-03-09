@@ -139,6 +139,9 @@ func (p *ExecutionPlan[T]) Run(ctx context.Context, inputs ...*tensor.TensorNume
 		ins := make([]*tensor.TensorNumeric[T], len(inst.InputIdx))
 		for j, idx := range inst.InputIdx {
 			ins[j] = slots[idx]
+			if ins[j] == nil {
+				return nil, fmt.Errorf("instruction %d (%s): input %d (slot %d) is nil", i, inst.OpName, j, idx)
+			}
 		}
 		result, err := inst.Forward(ctx, ins)
 		if err != nil {
