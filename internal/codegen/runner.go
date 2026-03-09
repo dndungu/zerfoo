@@ -130,6 +130,15 @@ func (r *MegakernelRunner) Launch(inputData []float32, pos int) ([]float32, erro
 	return output, nil
 }
 
+// InitWorkspaceSlot copies float32 data to a workspace slot at the given offset.
+func (r *MegakernelRunner) InitWorkspaceSlot(offset int, data []float32) error {
+	if len(data) == 0 || r.workspace == nil {
+		return nil
+	}
+	dstPtr := unsafe.Add(r.workspace, offset*4)
+	return cuda.Memcpy(dstPtr, unsafe.Pointer(&data[0]), len(data)*4, cuda.MemcpyHostToDevice)
+}
+
 // ClearGPUError is a no-op in the purego build.
 func (r *MegakernelRunner) ClearGPUError() {}
 

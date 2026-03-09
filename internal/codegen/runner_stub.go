@@ -156,6 +156,18 @@ func (r *MegakernelRunner) Launch(inputData []float32, pos int) ([]float32, erro
 	return output, nil
 }
 
+// InitWorkspaceSlot copies float32 data to a workspace slot at the given offset.
+func (r *MegakernelRunner) InitWorkspaceSlot(offset int, data []float32) error {
+	if len(data) == 0 || r.workspace == nil {
+		return nil
+	}
+	dstPtr := unsafe.Add(r.workspace, offset*4)
+	if ret := C.cudaMemcpy(dstPtr, unsafe.Pointer(&data[0]), C.size_t(len(data)*4), C.cudaMemcpyHostToDevice); ret != 0 {
+		return fmt.Errorf("init workspace slot: cuda error %d", ret)
+	}
+	return nil
+}
+
 // ClearGPUError clears the sticky CUDA error state after a kernel failure.
 func (r *MegakernelRunner) ClearGPUError() {
 	C.cudaGetLastError()

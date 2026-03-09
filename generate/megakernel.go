@@ -115,6 +115,48 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		return
 	}
 
+	// Initialize constant workspace slots: slots that are used as inputs
+	// but never produced as outputs by any instruction. These hold data
+	// like dequantized weight copies that the tracer didn't mark as frozen.
+	frozenSet := make(map[int]bool, len(frozenSlots))
+	for _, f := range frozenSlots {
+		frozenSet[f.SlotIdx] = true
+	}
+	producedSlots := make(map[int]bool)
+	for _, inst := range instructions {
+		producedSlots[inst.OutputIdx] = true
+	}
+	layout := codegen.ComputeWorkspaceLayout(cfg)
+	var wsInitBytes int64
+	for _, inst := range instructions {
+		for _, idx := range inst.InputIdx {
+			if frozenSet[idx] || producedSlots[idx] {
+				continue
+			}
+			// This slot is used as input but never produced -- it's a constant.
+			offset, ok := layout.SlotOffsets[idx]
+			if !ok {
+				continue
+			}
+			td := plan.SlotData(idx)
+			if td == nil {
+				continue
+			}
+			raw := td.Data()
+			f32 := make([]float32, len(raw))
+			for j, v := range raw {
+				f32[j] = float32(v)
+			}
+			if err := runner.InitWorkspaceSlot(offset, f32); err != nil {
+				log.Printf("megakernel: init workspace slot %d failed: %v", idx, err)
+				_ = runner.Close()
+				return
+			}
+			producedSlots[idx] = true // avoid re-uploading
+			wsInitBytes += int64(len(f32)) * 4
+		}
+	}
+
 	outputShape := runner.OutputShape()
 
 	// Set the megakernel function on the plan.
@@ -154,6 +196,6 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	if ready != nil {
 		ready.Store(true)
 	}
-	log.Printf("megakernel: compiled and loaded (%d instructions, %d frozen slots, %d MB, %s)",
-		len(instructions), len(frozenSlots), totalFrozenBytes/(1024*1024), soPath)
+	log.Printf("megakernel: compiled and loaded (%d instructions, %d frozen slots, %d MB frozen, %d MB workspace init, %s)",
+		len(instructions), len(frozenSlots), totalFrozenBytes/(1024*1024), wsInitBytes/(1024*1024), soPath)
 }
