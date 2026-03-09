@@ -27,6 +27,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	// Check if all ops are supported by the code generator.
 	unsupported := codegen.CheckSupport(instructions)
 	if len(unsupported) > 0 {
+		log.Printf("megakernel: %d unsupported ops: %v", len(unsupported), unsupported)
 		return
 	}
 
@@ -48,6 +49,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	// Emit CUDA source.
 	source, err := codegen.EmitMegakernel(cfg)
 	if err != nil {
+		log.Printf("megakernel: emit failed: %v", err)
 		return
 	}
 
@@ -55,6 +57,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	cacheDir := os.TempDir()
 	soPath, err := codegen.CachedCompile(source, cacheDir, "megakernel")
 	if err != nil {
+		log.Printf("megakernel: compile failed: %v", err)
 		return
 	}
 
