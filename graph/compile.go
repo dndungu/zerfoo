@@ -342,6 +342,18 @@ func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNu
 		slots[sid] = ft
 	}
 
+	// Populate slots from all graph node outputs (memo). This catches
+	// intermediate tensors created by node logic (not engine ops) that
+	// later appear as inputs to engine operations.
+	for _, t := range memo {
+		if t != nil {
+			sid := tracer.SlotFor(t)
+			if sid < numSlots && slots[sid] == nil {
+				slots[sid] = t
+			}
+		}
+	}
+
 	// Record input slot IDs.
 	inputSlots := make([]int, len(inputs))
 	for i, in := range inputs {
