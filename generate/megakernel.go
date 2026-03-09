@@ -90,6 +90,21 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 
 	outputShape := runner.OutputShape()
 
+	// Validate with a test launch before enabling.
+	inputSize := 1
+	if len(cfg.InputSlots) > 0 && cfg.InputSlots[0] < len(cfg.SlotShapes) {
+		for _, d := range cfg.SlotShapes[cfg.InputSlots[0]] {
+			inputSize *= d
+		}
+	}
+	testInput := make([]float32, inputSize)
+	if _, err := runner.Launch(testInput, 0); err != nil {
+		log.Printf("megakernel: test launch failed: %v", err)
+		_ = runner.Close()
+		return
+	}
+	log.Printf("megakernel: test launch passed")
+
 	// Set the megakernel function on the plan.
 	plan.SetMegakernelFn(func(ctx context.Context, inputs []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
 		if len(inputs) == 0 {
