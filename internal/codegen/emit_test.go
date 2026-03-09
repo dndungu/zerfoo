@@ -52,6 +52,40 @@ func TestEmitMegakernel(t *testing.T) {
 	}
 }
 
+func TestSupportedCosSinMax(t *testing.T) {
+	for _, op := range []string{"Cos", "Sin", "Max"} {
+		if !Supported(op) {
+			t.Errorf("Supported(%q) = false, want true", op)
+		}
+	}
+}
+
+func TestEmitCosSinMax(t *testing.T) {
+	// Cos and Sin are unary ops.
+	for _, tc := range []struct {
+		opName string
+		want   string
+	}{
+		{"Cos", "cosf(slot_0[tid])"},
+		{"Sin", "sinf(slot_0[tid])"},
+		{"Max", "fmaxf(slot_0[tid], slot_1[tid])"},
+	} {
+		var meta graph.InstructionMeta
+		if tc.opName == "Max" {
+			meta = graph.InstructionMeta{OpName: tc.opName, InputIdx: []int{0, 1}, OutputIdx: 2}
+		} else {
+			meta = graph.InstructionMeta{OpName: tc.opName, InputIdx: []int{0}, OutputIdx: 1}
+		}
+		code, err := Emit(meta, nil)
+		if err != nil {
+			t.Fatalf("Emit(%s): %v", tc.opName, err)
+		}
+		if !strings.Contains(code, tc.want) {
+			t.Errorf("Emit(%s) = %q, missing %q", tc.opName, code, tc.want)
+		}
+	}
+}
+
 func TestEmitMegakernelUnsupportedOp(t *testing.T) {
 	instructions := []graph.InstructionMeta{
 		{OpName: "FancyNewOp", InputIdx: []int{0}, OutputIdx: 1},
@@ -203,6 +237,194 @@ func TestEmitMegakernelNoKVCache(t *testing.T) {
 	}
 	if strings.Contains(code, "kv_seq_len") {
 		t.Error("NumKVLayers=0 should not emit kv_seq_len")
+	}
+}
+
+func TestSupportedShapeOps(t *testing.T) {
+	for _, op := range []string{"Shape", "Unsqueeze", "Expand", "ConstantOfShape"} {
+		if !Supported(op) {
+			t.Errorf("Supported(%q) = false, want true", op)
+		}
+	}
+}
+
+func TestEmitShapeOps(t *testing.T) {
+	tests := []struct {
+		name   string
+		opName string
+		inputs []SlotInfo
+		want   string
+	}{
+		{
+			name:   "Shape is no-op reindex",
+			opName: "Shape",
+			inputs: []SlotInfo{{Shape: []int{2, 3}}},
+			want:   "// Shape: slot_1 = slot_0 (reindex, no compute)",
+		},
+		{
+			name:   "Unsqueeze is no-op reindex",
+			opName: "Unsqueeze",
+			inputs: []SlotInfo{{Shape: []int{2, 3}}},
+			want:   "// Unsqueeze: slot_1 = slot_0 (reindex, no compute)",
+		},
+		{
+			name:   "Expand uses modulo broadcast",
+			opName: "Expand",
+			inputs: []SlotInfo{{Shape: []int{1, 4}}},
+			want:   "slot_1[tid] = slot_0[tid % 4]",
+		},
+		{
+			name:   "ConstantOfShape fills with zero",
+			opName: "ConstantOfShape",
+			inputs: nil,
+			want:   "slot_1[tid] = 0.0f",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := graph.InstructionMeta{
+				OpName:    tc.opName,
+				InputIdx:  []int{0},
+				OutputIdx: 1,
+			}
+			code, err := Emit(meta, tc.inputs)
+			if err != nil {
+				t.Fatalf("Emit(%s): %v", tc.opName, err)
+			}
+			if !strings.Contains(code, tc.want) {
+				t.Errorf("Emit(%s) = %q, want substring %q", tc.opName, code, tc.want)
+			}
+		})
+	}
+}
+
+func TestSupportedCastEqualGreaterWhere(t *testing.T) {
+	for _, op := range []string{"Cast", "Equal", "Greater", "Where"} {
+		if !Supported(op) {
+			t.Errorf("Supported(%q) = false, want true", op)
+		}
+	}
+}
+
+func TestEmitCastEqualGreaterWhere(t *testing.T) {
+	tests := []struct {
+		name string
+		meta graph.InstructionMeta
+		want string
+	}{
+		{
+			name: "Cast copies input to output",
+			meta: graph.InstructionMeta{OpName: "Cast", InputIdx: []int{0}, OutputIdx: 1},
+			want: "slot_1[tid] = slot_0[tid];",
+		},
+		{
+			name: "Equal emits float mask",
+			meta: graph.InstructionMeta{OpName: "Equal", InputIdx: []int{0, 1}, OutputIdx: 2},
+			want: "(slot_0[tid] == slot_1[tid]) ? 1.0f : 0.0f",
+		},
+		{
+			name: "Greater emits float mask",
+			meta: graph.InstructionMeta{OpName: "Greater", InputIdx: []int{0, 1}, OutputIdx: 2},
+			want: "(slot_0[tid] > slot_1[tid]) ? 1.0f : 0.0f",
+		},
+		{
+			name: "Where selects based on condition",
+			meta: graph.InstructionMeta{OpName: "Where", InputIdx: []int{0, 1, 2}, OutputIdx: 3},
+			want: "(slot_0[tid] != 0.0f) ? slot_1[tid] : slot_2[tid]",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, err := Emit(tc.meta, nil)
+			if err != nil {
+				t.Fatalf("Emit(%s): %v", tc.meta.OpName, err)
+			}
+			if !strings.Contains(code, tc.want) {
+				t.Errorf("Emit(%s) = %q, want substring %q", tc.meta.OpName, code, tc.want)
+			}
+		})
+	}
+}
+
+func TestSupportedAutoOps(t *testing.T) {
+	for _, op := range []string{"AutoPositionIds", "AutoZeroKVCache"} {
+		if !Supported(op) {
+			t.Errorf("Supported(%q) = false, want true", op)
+		}
+	}
+}
+
+func TestEmitAutoPositionIds(t *testing.T) {
+	meta := graph.InstructionMeta{OpName: "AutoPositionIds", OutputIdx: 5}
+	code, err := Emit(meta, nil)
+	if err != nil {
+		t.Fatalf("Emit(AutoPositionIds): %v", err)
+	}
+	want := "slot_5[tid] = (float)(pos + tid);"
+	if !strings.Contains(code, want) {
+		t.Errorf("Emit(AutoPositionIds) = %q, missing %q", code, want)
+	}
+}
+
+func TestEmitAutoZeroKVCache(t *testing.T) {
+	meta := graph.InstructionMeta{OpName: "AutoZeroKVCache", OutputIdx: 3}
+	code, err := Emit(meta, nil)
+	if err != nil {
+		t.Fatalf("Emit(AutoZeroKVCache): %v", err)
+	}
+	want := "slot_3[tid] = 0.0f;"
+	if !strings.Contains(code, want) {
+		t.Errorf("Emit(AutoZeroKVCache) = %q, missing %q", code, want)
+	}
+}
+
+func TestSupportedRangeTriluScatterND(t *testing.T) {
+	for _, op := range []string{"Range", "Trilu", "ScatterND"} {
+		if !Supported(op) {
+			t.Errorf("Supported(%q) = false, want true", op)
+		}
+	}
+}
+
+func TestEmitRangeTriluScatterND(t *testing.T) {
+	tests := []struct {
+		name   string
+		meta   graph.InstructionMeta
+		inputs []SlotInfo
+		want   string
+	}{
+		{
+			name:   "Range emits tid cast",
+			meta:   graph.InstructionMeta{OpName: "Range", InputIdx: []int{0}, OutputIdx: 1},
+			inputs: nil,
+			want:   "slot_1[tid] = (float)tid;",
+		},
+		{
+			name:   "Trilu emits lower-triangular mask",
+			meta:   graph.InstructionMeta{OpName: "Trilu", InputIdx: []int{0}, OutputIdx: 1},
+			inputs: []SlotInfo{{Shape: []int{4, 4}}},
+			want:   "(col <= row) ? slot_0[tid] : 0.0f",
+		},
+		{
+			name:   "ScatterND emits copy with comment",
+			meta:   graph.InstructionMeta{OpName: "ScatterND", InputIdx: []int{0, 1}, OutputIdx: 2},
+			inputs: nil,
+			want:   "slot_2[tid] = slot_0[tid];",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, err := Emit(tc.meta, tc.inputs)
+			if err != nil {
+				t.Fatalf("Emit(%s): %v", tc.meta.OpName, err)
+			}
+			if !strings.Contains(code, tc.want) {
+				t.Errorf("Emit(%s) = %q, want substring %q", tc.meta.OpName, code, tc.want)
+			}
+		})
 	}
 }
 

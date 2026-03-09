@@ -26,12 +26,15 @@ var emitters = map[string]OpEmitter{
 	"Mul": binaryOp("*"),
 	"Div": binaryOp("/"),
 	"Pow": funcBinaryOp("powf"),
+	"Max": funcBinaryOp("fmaxf"),
 
 	// Unary elementwise
 	"Exp":   unaryOp("expf"),
 	"Log":   unaryOp("logf"),
 	"Sqrt":  unaryOp("sqrtf"),
 	"Rsqrt": unaryOp("rsqrtf"),
+	"Cos":   unaryOp("cosf"),
+	"Sin":   unaryOp("sinf"),
 	"Tanh":  unaryOp("tanhf"),
 	"Neg":   prefixUnaryOp("-"),
 	"Abs":   unaryOp("fabsf"),
@@ -61,9 +64,24 @@ var emitters = map[string]OpEmitter{
 	"Repeat": repeatOp,
 
 	// Shape ops (no-compute in megakernel, just reindex)
-	"Concat":    reshapeOp, // reindex in registers
-	"Reshape":   reshapeOp, // no-op in flat memory
-	"Transpose": transposeOp,
+	"Concat":           reshapeOp, // reindex in registers
+	"Reshape":          reshapeOp, // no-op in flat memory
+	"Shape":            reshapeOp, // metadata-only, shape known at compile time
+	"Unsqueeze":        reshapeOp, // adds dim of size 1, no data movement
+	"Expand":           expandOp,
+	"ConstantOfShape":  constantOfShapeOp,
+	"Transpose":        transposeOp,
+
+	// Comparison / selection ops
+	"Cast":    castOp,
+	"Equal":   cmpOp("=="),
+	"Greater": cmpOp(">"),
+	"Where":   whereOp,
+
+	// Sequence / masking ops
+	"Range":     rangeOp,
+	"Trilu":     triluOp,
+	"ScatterND": scatterNDOp,
 
 	// KV cache ops
 	"KVCacheAppendK": kvCacheAppendOp("kv_k"),
@@ -71,6 +89,10 @@ var emitters = map[string]OpEmitter{
 	"KVCacheGetK":    kvCacheGetOp("kv_k"),
 	"KVCacheGetV":    kvCacheGetOp("kv_v"),
 	"KVCacheSeqLen":  kvCacheSeqLenOp,
+
+	// Auto ops (decode-step helpers)
+	"AutoPositionIds":  autoPositionIdsOp,
+	"AutoZeroKVCache":  autoZeroKVCacheOp,
 }
 
 // Emit generates CUDA code for a single instruction. Returns an error
@@ -174,6 +196,22 @@ func reshapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 		meta.OpName, meta.OutputIdx, meta.InputIdx[0]), nil
 }
 
+func expandOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	size := 1
+	if len(inputs) > 0 {
+		for _, d := range inputs[0].Shape {
+			size *= d
+		}
+	}
+	return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid %% %d];",
+		meta.OutputIdx, meta.InputIdx[0], size), nil
+}
+
+func constantOfShapeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = 0.0f;",
+		meta.OutputIdx), nil
+}
+
 func transposeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 	return fmt.Sprintf("  dev_transpose(slot_%d, slot_%d, shape_%d, perm_%d);",
 		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[0], meta.OutputIdx), nil
@@ -206,6 +244,23 @@ func reduceOp(fn string) OpEmitter {
 		return fmt.Sprintf("  %s(slot_%d, slot_%d, axis_%d, %d);",
 			fn, meta.OutputIdx, meta.InputIdx[0], meta.OutputIdx, dim), nil
 	}
+}
+
+func castOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = slot_%d[tid];",
+		meta.OutputIdx, meta.InputIdx[0]), nil
+}
+
+func cmpOp(op string) OpEmitter {
+	return func(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+		return fmt.Sprintf("  slot_%d[tid] = (slot_%d[tid] %s slot_%d[tid]) ? 1.0f : 0.0f;",
+			meta.OutputIdx, meta.InputIdx[0], op, meta.InputIdx[1]), nil
+	}
+}
+
+func whereOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = (slot_%d[tid] != 0.0f) ? slot_%d[tid] : slot_%d[tid];",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.InputIdx[2]), nil
 }
 
 // kvCacheAppendOp emits a dev_kv_append call that writes new K or V data
@@ -244,4 +299,32 @@ func kvCacheGetOp(arrayName string) OpEmitter {
 func kvCacheSeqLenOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
 	return fmt.Sprintf("  int seq_len_%d = kv_seq_len;",
 		meta.OutputIdx), nil
+}
+
+// autoPositionIdsOp emits position ID generation using the pos kernel argument.
+func autoPositionIdsOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = (float)(pos + tid);", meta.OutputIdx), nil
+}
+
+// autoZeroKVCacheOp emits zeroing of a KV cache region.
+func autoZeroKVCacheOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = 0.0f;", meta.OutputIdx), nil
+}
+
+func rangeOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  slot_%d[tid] = (float)tid;", meta.OutputIdx), nil
+}
+
+func triluOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	cols := 1
+	if len(inputs) > 0 && len(inputs[0].Shape) > 0 {
+		cols = inputs[0].Shape[len(inputs[0].Shape)-1]
+	}
+	return fmt.Sprintf("  { int row = tid / %d; int col = tid %% %d; slot_%d[tid] = (col <= row) ? slot_%d[tid] : 0.0f; }",
+		cols, cols, meta.OutputIdx, meta.InputIdx[0]), nil
+}
+
+func scatterNDOp(meta graph.InstructionMeta, _ []SlotInfo) (string, error) {
+	return fmt.Sprintf("  // ScatterND: slot_%d updated from slot_%d via indices slot_%d\n  slot_%d[tid] = slot_%d[tid];",
+		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], meta.OutputIdx, meta.InputIdx[0]), nil
 }
