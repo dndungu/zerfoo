@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	stdlog "log"
 	"sync/atomic"
 
 	"github.com/zerfoo/zerfoo/compute"
@@ -362,6 +363,10 @@ func (g *Graph[T]) CompileTraced(ctx context.Context, inputs ...*tensor.TensorNu
 		if op.OpName == "Gather" && slots[op.OutputID] == nil {
 			if cached, ok := op.ExtraArgs["_cachedOutput"].(*tensor.TensorNumeric[T]); ok {
 				slots[op.OutputID] = cached
+				stdlog.Printf("CompileTraced: cached Gather output in slot %d (shape %v)", op.OutputID, cached.Shape())
+			} else {
+				raw := op.ExtraArgs["_cachedOutput"]
+				stdlog.Printf("CompileTraced: Gather slot %d type assertion failed: raw type=%T", op.OutputID, raw)
 			}
 		}
 		fwd := makeTracedForward(engine, op)
