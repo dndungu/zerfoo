@@ -11,6 +11,7 @@ import (
 // FrozenSlotMeta describes a frozen (constant/weight) slot for the emitter.
 type FrozenSlotMeta struct {
 	SlotIdx int
+	IsQ4    bool // true if this slot holds raw Q4_0 quantized data
 }
 
 // MegakernelConfig holds all information needed to emit a megakernel .cu file.
@@ -131,8 +132,12 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 	layout := ComputeWorkspaceLayout(cfg)
 
 	frozenSet := make(map[int]bool, len(cfg.FrozenSlots))
+	q4Set := make(map[int]bool)
 	for _, f := range cfg.FrozenSlots {
 		frozenSet[f.SlotIdx] = true
+		if f.IsQ4 {
+			q4Set[f.SlotIdx] = true
+		}
 	}
 
 	// Header.
@@ -193,10 +198,13 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 		}
 		// Mark which inputs are frozen so emitters can use frozen_N vs slot_N.
 		frozenInputs := make([]bool, len(inst.InputIdx))
+		q4Inputs := make([]bool, len(inst.InputIdx))
 		for j, idx := range inst.InputIdx {
 			frozenInputs[j] = frozenSet[idx]
+			q4Inputs[j] = q4Set[idx]
 		}
 		inst.ExtraArgs["_frozenInputs"] = frozenInputs
+		inst.ExtraArgs["_q4Inputs"] = q4Inputs
 
 		code, err := Emit(inst, inputs)
 		if err != nil {

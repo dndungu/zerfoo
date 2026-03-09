@@ -146,7 +146,7 @@ var emitters = map[string]OpEmitter{
 
 	// Memory ops
 	"MatMul":      gemvOp,
-	"MatMulNBits": gemvOp, // megakernel uploads Q4 weights as dequantized float32
+	"MatMulNBits": gemvQ4Op,
 	"Gather":      gatherOp,
 
 	// Indexing ops
@@ -287,6 +287,23 @@ func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
 }
 
+// gemvQ4Op emits a Q4 dequant-GEMV when the weight input (input 0) is Q4,
+// otherwise falls back to float32 GEMV.
+func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
+	if !isQ4Input(meta, 0) {
+		return gemvOp(meta, inputs)
+	}
+	dimM, dimK := gemvDims(meta, inputs)
+	if dimM == 0 || dimK == 0 {
+		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
+			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
+	}
+	// dev_gemv_q4(out, weight_q4, activation, M, K)
+	// Weight is frozen Q4 raw bytes; activation is the second input.
+	return fmt.Sprintf("  dev_gemv_q4(%s, (const void*)%s, %s, %d, %d);",
+		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
+}
+
 
 // gemvDims extracts matrix dimensions for gemv ops from available shape info.
 // Tries: (1) SlotInfo shapes, (2) ExtraArgs aShape/bShape from trace,
@@ -343,6 +360,21 @@ func isFrozenInput(extra map[string]any, i int) bool {
 	}
 	if frozen, ok := v.([]bool); ok && i < len(frozen) {
 		return frozen[i]
+	}
+	return false
+}
+
+// isQ4Input returns true if input i of the instruction is a Q4-quantized frozen slot.
+func isQ4Input(meta graph.InstructionMeta, i int) bool {
+	if meta.ExtraArgs == nil {
+		return false
+	}
+	v, ok := meta.ExtraArgs["_q4Inputs"]
+	if !ok {
+		return false
+	}
+	if q4, ok := v.([]bool); ok && i < len(q4) {
+		return q4[i]
 	}
 	return false
 }
