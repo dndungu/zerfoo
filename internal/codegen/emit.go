@@ -185,6 +185,14 @@ func EmitMegakernel(cfg MegakernelConfig) (string, error) {
 			}
 		}
 
+		// Inject output shape into ExtraArgs so emitters can infer dimensions.
+		if inst.OutputIdx < len(cfg.SlotShapes) && cfg.SlotShapes[inst.OutputIdx] != nil {
+			if inst.ExtraArgs == nil {
+				inst.ExtraArgs = make(map[string]any)
+			}
+			inst.ExtraArgs["_outputShape"] = cfg.SlotShapes[inst.OutputIdx]
+		}
+
 		code, err := Emit(inst, inputs)
 		if err != nil {
 			return "", fmt.Errorf("instruction %d (%s): %w", i, inst.OpName, err)

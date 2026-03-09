@@ -277,36 +277,62 @@ func softmaxOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 }
 
 func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	dimM, dimK := 0, 0
-	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
-		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
-		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
-	}
+	dimM, dimK := gemvDims(meta, inputs)
 	if dimM == 0 || dimK == 0 {
-		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions from input shape %v", inputs[0].Shape)
+		return "", fmt.Errorf("gemvOp: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
+			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
 	return fmt.Sprintf("  dev_gemv_f32(slot_%d, frozen_%d, slot_%d, %d, %d);",
 		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dimM, dimK), nil
 }
 
 func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	dimM, dimK := 0, 0
-	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
-		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
-		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
-	}
+	dimM, dimK := gemvDims(meta, inputs)
 	if dimM == 0 || dimK == 0 {
-		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions from input shape %v", inputs[0].Shape)
+		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
+			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
 	}
 	return fmt.Sprintf("  dev_gemv_q4(slot_%d, frozen_%d, slot_%d, %d, %d);",
 		meta.OutputIdx, meta.InputIdx[0], meta.InputIdx[1], dimM, dimK), nil
 }
 
+// gemvDims extracts matrix dimensions for gemv ops from available shape info.
+// Tries: (1) weight shape [M, K], (2) output shape for M + input vector for K.
+func gemvDims(meta graph.InstructionMeta, inputs []SlotInfo) (dimM, dimK int) {
+	// Try weight shape (first input).
+	if len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
+		dimM = inputs[0].Shape[len(inputs[0].Shape)-2]
+		dimK = inputs[0].Shape[len(inputs[0].Shape)-1]
+		return
+	}
+	// Fallback: M from output shape, K from input vector shape.
+	outShape := extraIntSlice(meta.ExtraArgs, "_outputShape")
+	if len(outShape) > 0 {
+		dimM = outShape[len(outShape)-1]
+	}
+	if len(inputs) > 1 && len(inputs[1].Shape) > 0 {
+		dimK = inputs[1].Shape[len(inputs[1].Shape)-1]
+	}
+	return
+}
+
+// safeShape returns the shape of the i-th input, or nil if out of range.
+func safeShape(inputs []SlotInfo, i int) []int {
+	if i < len(inputs) {
+		return inputs[i].Shape
+	}
+	return nil
+}
+
 func gatherOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 	// Embedding dim is the last dimension of the embedding table (frozen slot).
 	dim := lastDim(inputs, 0)
-	if dim == 0 && len(inputs) > 0 && len(inputs[0].Shape) >= 2 {
-		dim = inputs[0].Shape[len(inputs[0].Shape)-1]
+	// Fallback: try output shape last dim (output of gather has same embed dim).
+	if dim == 0 {
+		outShape := extraIntSlice(meta.ExtraArgs, "_outputShape")
+		if len(outShape) > 0 {
+			dim = outShape[len(outShape)-1]
+		}
 	}
 	if len(meta.InputIdx) < 2 {
 		// Single input: params is frozen, indices come from InputIdx[0].
