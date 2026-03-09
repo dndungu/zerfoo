@@ -94,8 +94,8 @@ func TestEmitMegakernelLargeModel(t *testing.T) {
 	if !strings.Contains(code, "dev_rmsnorm") {
 		t.Error("missing dev_rmsnorm call")
 	}
-	if !strings.Contains(code, "dev_gemv_q4") {
-		t.Error("missing dev_gemv_q4 call")
+	if !strings.Contains(code, "dev_gemv") {
+		t.Error("missing dev_gemv call")
 	}
 	if !strings.Contains(code, "dev_softmax") {
 		t.Error("missing dev_softmax call")

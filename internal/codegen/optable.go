@@ -146,7 +146,7 @@ var emitters = map[string]OpEmitter{
 
 	// Memory ops
 	"MatMul":      gemvOp,
-	"MatMulNBits": gemvQ4Op,
+	"MatMulNBits": gemvOp, // megakernel uploads Q4 weights as dequantized float32
 	"Gather":      gatherOp,
 
 	// Indexing ops
@@ -287,15 +287,6 @@ func gemvOp(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
 		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
 }
 
-func gemvQ4Op(meta graph.InstructionMeta, inputs []SlotInfo) (string, error) {
-	dimM, dimK := gemvDims(meta, inputs)
-	if dimM == 0 || dimK == 0 {
-		return "", fmt.Errorf("gemvQ4Op: cannot determine weight dimensions (inputs[0]=%v, inputs[1]=%v, output=%v)",
-			safeShape(inputs, 0), safeShape(inputs, 1), extraIntSlice(meta.ExtraArgs, "_outputShape"))
-	}
-	return fmt.Sprintf("  dev_gemv_q4(%s, %s, %s, %d, %d);",
-		outRef(meta), inRef(meta, 0), inRef(meta, 1), dimM, dimK), nil
-}
 
 // gemvDims extracts matrix dimensions for gemv ops from available shape info.
 // Tries: (1) SlotInfo shapes, (2) ExtraArgs aShape/bShape from trace,
