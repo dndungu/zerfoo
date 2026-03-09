@@ -100,6 +100,7 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 	testInput := make([]float32, inputSize)
 	if _, err := runner.Launch(testInput, 0); err != nil {
 		log.Printf("megakernel: test launch failed: %v", err)
+		runner.ClearGPUError()
 		_ = runner.Close()
 		return
 	}

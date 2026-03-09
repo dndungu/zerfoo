@@ -156,6 +156,13 @@ func (r *MegakernelRunner) Launch(inputData []float32, pos int) ([]float32, erro
 	return output, nil
 }
 
+// ClearGPUError clears the sticky CUDA error state after a kernel failure.
+func (r *MegakernelRunner) ClearGPUError() {
+	C.cudaGetLastError()
+	C.cudaDeviceSynchronize()
+	C.cudaGetLastError()
+}
+
 // Close releases all GPU resources.
 func (r *MegakernelRunner) Close() error {
 	for _, buf := range r.frozenBufs {

@@ -130,6 +130,9 @@ func (r *MegakernelRunner) Launch(inputData []float32, pos int) ([]float32, erro
 	return output, nil
 }
 
+// ClearGPUError is a no-op in the purego build.
+func (r *MegakernelRunner) ClearGPUError() {}
+
 // Close releases all GPU resources.
 func (r *MegakernelRunner) Close() error {
 	for _, buf := range r.frozenBufs {
