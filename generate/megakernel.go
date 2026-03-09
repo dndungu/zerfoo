@@ -153,6 +153,14 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		}
 	}
 
+	// Debug: log Q4 frozen slot sizes.
+	for i, f := range frozenSlots {
+		if frozenMeta[i].IsQ4 && frozenData[i] != nil {
+			log.Printf("megakernel: frozen[%d] slot=%d Q4 bytes=%d shape=%v",
+				i, f.SlotIdx, len(frozenData[i])*4, f.Data.Shape())
+		}
+	}
+
 	// Allocate GPU workspace and upload weights.
 	if err := runner.PrepareWorkspace(cfg, frozenData); err != nil {
 		log.Printf("megakernel: prepare workspace failed: %v", err)
@@ -178,9 +186,11 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 
 	outputShape := runner.OutputShape()
 
-	// Set the megakernel function on the plan.
+	// Set the megakernel function on the plan. If launch fails, clear GPU
+	// error state and disable the megakernel so we fall back gracefully.
+	var disabled atomic.Bool
 	plan.SetMegakernelFn(func(ctx context.Context, inputs []*tensor.TensorNumeric[T]) (*tensor.TensorNumeric[T], error) {
-		if len(inputs) == 0 {
+		if disabled.Load() || len(inputs) == 0 {
 			return nil, nil
 		}
 
@@ -195,7 +205,11 @@ func tryCompileMegakernel[T tensor.Numeric](plan *graph.ExecutionPlan[T], ready 
 		pos := 0 // position for rotary embeddings (TODO: wire from KV cache)
 		outputF32, err := runner.Launch(inputF32, pos)
 		if err != nil {
-			return nil, err
+			log.Printf("megakernel: launch failed, disabling: %v", err)
+			runner.ClearGPUError()
+			disabled.Store(true)
+			plan.SetMegakernelFn(nil)
+			return nil, nil // return nil to trigger per-instruction fallback
 		}
 
 		// Convert output back to T and wrap in tensor.
