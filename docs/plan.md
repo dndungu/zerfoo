@@ -114,58 +114,97 @@ See docs/design.md for full architecture and package layout.
   - New epic E1b created to implement missing emitters.
 
 - [ ] T1.5 Merge PR after validation  Owner: TBD  Est: 10m
-  - Merge feat/neon-softmax to main after E1b complete and megakernel fires.
-  - Acceptance: PR merged. main branch updated.
-  - Dependencies: T1.1, T1.3, T1.4, E1b.
+  - Merge feat/neon-softmax to main after correctness validated.
+  - Acceptance: PR merged. main branch updated. Output is coherent.
+  - Dependencies: T1.1, T1.3, T1.4, E1b, E1c, E1d.
 
 ### E1b: Implement Missing Megakernel Op Emitters (Priority 1, Blocker)
 
-16 ops need emitters in internal/codegen/optable.go. Pattern: add OpEmitter
-function and register in the emitters map. Each emitter returns a CUDA code
-fragment. Test each emitter in internal/codegen/emit_test.go.
+All 16 missing op emitters were implemented and validated:
+- [x] T1b.1-T1b.5 All emitters implemented  2026-03-09
+- [x] T1b.6 Megakernel compiles and loads on DGX Spark  2026-03-09
+  - "megakernel: compiled and loaded (2731 instructions, 376 frozen slots)"
 
-- [ ] T1b.1 Add emitters: Cos, Sin, Max  Owner: TBD  Est: 30m
-  - Cos, Sin: unary ops using cosf(), sinf() -- same pattern as Exp/Log.
-  - Max: binary op using fmaxf() -- same pattern as Pow.
-  - Add to emitters map. Add test cases in emit_test.go.
-  - Acceptance: codegen.Supported("Cos") == true, etc.
+### E1c: Fix Megakernel CUDA Memory Errors (Priority 1, Blocker)
+
+Six bugs fixed to resolve CUDA error 700 (illegal memory access):
+
+- [x] T1c.1 Workspace constant initialization  Owner: TBD  Est: done  2026-03-09
+  - Added InitWorkspaceSlot method and detection logic (0a30af7)
+- [x] T1c.2 Workspace layout size for constant slots  Owner: TBD  Est: done  2026-03-09
+  - Patched slotShapes before emit so layout allocates enough space (c2d6e5a)
+- [x] T1c.3 Fix GEMV dim/weight ordering  Owner: TBD  Est: done  2026-03-09
+  - gemvDimsWithWeight replaces gemvDims, uses bShape for M/K, returns weightIdx (6b5b8d0)
+- [x] T1c.4 Fix scalar broadcast in binary ops  Owner: TBD  Est: done  2026-03-09
+  - indexExpr helper returns [0] for scalars, [tid] for vectors (6b5b8d0)
+- [x] T1c.5 Allocate shared memory in kernel launch  Owner: TBD  Est: done  2026-03-09
+  - Added smem arg to <<<grid, 1024, smem>>> (6b5b8d0)
+- [x] T1c.6 Filter 1D Q4 frozen slots from dev_gemv_q4  Owner: TBD  Est: done  2026-03-09
+  - Only dispatch 2D Q4 weight matrices to gemvQ4Op (6b5b8d0)
+- [x] T1c.7 Error recovery and nil-fallback  Owner: TBD  Est: done  2026-03-09
+  - Graceful fallback to per-instruction on launch failure (fad9935, 1aafa02)
+- Status: Megakernel launches without memory errors. 3.78 tok/s on DGX Spark.
+
+### E1d: Fix Model Output Correctness (Priority 0, Critical Blocker)
+
+All execution paths (CPU, GPU per-instruction, GPU megakernel) produce
+garbage output. The bug predates the megakernel work -- it exists at commits
+as old as a9e6fb1 (the "Track A validated" commit from Phase 34).
+
+Debug findings (2026-03-09):
+- F32 model forward on "The capital of France is" produces top logit "The" (12.47)
+  instead of "Paris". Token "Paris" has logit -1.61 (extremely negative).
+- Q4 model forward produces top logit "disturbances" (19.85), "Paris" at -1.61.
+- Greedy decode (temp=0) produces "notnotnot" (F32) or "decreases decreases" (Q4).
+- Arena disabled: still garbage. Not arena-related.
+- ZMF model file: 1.5GB Q4, md5 c23b670f023113f711606fabd3d23178.
+- Config says "gemma-3-1b-it" (model_type: "gemma3_text").
+- model_type "gemma3_text" NOT registered in ArchConfigRegistry (only "gemma3").
+  Falls back to parseFallbackConfig -- parses fields correctly but Architecture
+  field is "gemma3_text" instead of "gemma3".
+
+Root cause investigation needed:
+1. Check if ZMF model was exported correctly by zonnx (weight permutations,
+   embedding scale, tied LM head handling).
+2. Check if Q4 dequantization produces correct values by comparing a single
+   layer's weight matrix against the ONNX reference.
+3. Check if the graph builder (BuildFromZMF) wires attention correctly
+   (Q/K/V projections, rotary embeddings, head splitting).
+4. Check if inference.Load uses the correct architecture config parser.
+5. Re-export the model from ONNX using latest zonnx and compare.
+
+- [ ] T1d.1 Register "gemma3_text" model_type in ArchConfigRegistry  Owner: TBD  Est: 15m
+  - Add r.Register("gemma3_text", parseGemmaConfig) in DefaultArchConfigRegistry.
+  - Acceptance: inference.Load parses config as "gemma3_text" architecture.
+  - Dependencies: none.
+  - Note: This alone may not fix output -- the ZMF path does not use
+    buildTransformerGraph (it uses BuildFromZMF from protobuf).
+
+- [ ] T1d.2 Validate Q4 dequantization correctness  Owner: TBD  Est: 1h
+  - Extract a single weight matrix from model.zmf using Go code.
+  - Dequantize Q4 blocks and compare against reference values.
+  - Load same tensor from ONNX model in Python and compare.
+  - Acceptance: Q4 dequant values match ONNX within 0.5 (Q4 precision).
   - Dependencies: none.
 
-- [ ] T1b.2 Add emitters: Shape, Unsqueeze, Expand, ConstantOfShape  Owner: TBD  Est: 45m
-  - Shape: no-op, output is shape metadata (emit comment like reshapeOp).
-  - Unsqueeze: no-op reindex (same as reshapeOp pattern).
-  - Expand: broadcast copy (emit dev_expand or loop copy with stride).
-  - ConstantOfShape: fill output with constant value (emit memset-like fill).
-  - Acceptance: All 4 ops in emitters map with tests.
+- [ ] T1d.3 Verify ZMF graph wiring for Gemma 3  Owner: TBD  Est: 2h
+  - Trace through BuildFromZMF to verify the computation graph.
+  - Check: embedding lookup + scale, RMSNorm, attention Q/K/V/O projections,
+    RoPE frequencies, GQA head splitting, FFN SwiGLU, final norm, LM head.
+  - Compare graph structure against Gemma 3 HuggingFace reference.
+  - Acceptance: Graph matches expected Gemma 3 architecture.
   - Dependencies: none.
 
-- [ ] T1b.3 Add emitters: Cast, Equal, Where, Greater  Owner: TBD  Est: 45m
-  - Cast: no-op for float->float (megakernel is all float32).
-  - Equal: binary comparison, emit (slot_a[tid] == slot_b[tid]) ? 1.0f : 0.0f.
-  - Greater: binary comparison, emit (slot_a[tid] > slot_b[tid]) ? 1.0f : 0.0f.
-  - Where: ternary, emit (slot_cond[tid] != 0.0f) ? slot_a[tid] : slot_b[tid].
-  - Acceptance: All 4 ops in emitters map with tests.
-  - Dependencies: none.
+- [ ] T1d.4 Re-export model from ONNX with latest zonnx  Owner: TBD  Est: 1h
+  - Run zonnx quantizer on fresh ONNX export.
+  - Compare outputs between old and new ZMF files.
+  - Acceptance: New ZMF produces correct logits for "The capital of France is".
+  - Dependencies: T1d.2.
 
-- [ ] T1b.4 Add emitters: Range, Trilu, ScatterND  Owner: TBD  Est: 1h
-  - Range: emit tid-based sequence (slot[tid] = start + tid * step).
-  - Trilu: triangular mask, emit conditional zero based on row/col indices.
-  - ScatterND: indexed scatter, emit dev_scatter_nd device function call.
-  - Acceptance: All 3 ops in emitters map with tests.
-  - Dependencies: none.
-
-- [ ] T1b.5 Add emitters: AutoPositionIds, AutoZeroKVCache  Owner: TBD  Est: 30m
-  - AutoPositionIds: emit position ID assignment (slot[tid] = pos + tid).
-  - AutoZeroKVCache: emit zero-fill for KV cache at current position.
-  - These are custom graph ops specific to the inference pipeline.
-  - Acceptance: Both ops in emitters map with tests.
-  - Dependencies: none.
-
-- [ ] T1b.6 Run tests and validate on DGX Spark  Owner: TBD  Est: 30m
-  - go test ./internal/codegen/... locally.
-  - Push to DGX Spark, rebuild with cuda tag, run bench_tps.
-  - Acceptance: "megakernel: compiled and loaded" in output.
-  - Dependencies: T1b.1, T1b.2, T1b.3, T1b.4, T1b.5.
+- [ ] T1d.5 End-to-end correctness validation  Owner: TBD  Est: 30m
+  - Generate 16 tokens with temp=0. Output must be coherent English.
+  - Acceptance: Output is semantically correct for 3 test prompts.
+  - Dependencies: T1d.1, T1d.3, T1d.4.
 
 ### E2: GPU KV Cache Integration (Priority 1)
 
@@ -465,6 +504,27 @@ A task is done when:
 
 ## 8. Progress Log
 
+### Change Summary -- 2026-03-09 (update 2)
+
+Megakernel CUDA memory errors (E1c) fully resolved. Six bugs fixed across
+optable.go, emit.go, megakernel.go, compile.go, generator.go. Commits:
+6b5b8d0, fad9935, 1aafa02. Megakernel now launches without crashes on DGX
+Spark at 3.78 tok/s.
+
+Critical finding: ALL execution paths produce garbage output. Root cause is
+NOT the megakernel -- the bug exists at commits as far back as a9e6fb1
+(Phase 34 Track A validation). F32 model also produces garbage. Created new
+critical epic E1d to investigate and fix model output correctness.
+
+Key debug data:
+- "The capital of France is" -> top logit "disturbances" (Q4), "The" (F32)
+- "Paris" token logit = -1.61 (should be top-1 or top-3)
+- Arena disabled: still garbage (rules out TensorArena)
+- model_type "gemma3_text" not registered (falls to fallback parser)
+
+Updated E1b (all emitters done), added E1c (all memory fixes done), added
+E1d (correctness investigation, new priority-0 blocker).
+
 ### Change Summary -- 2026-03-09
 
 New plan created for Phase 35: Close the Performance Gap. Replaced Phase 34
@@ -497,6 +557,11 @@ Stable knowledge preserved in docs/design.md.
 - **Megakernel:** generate/megakernel.go emits a single CUDA kernel from traced
   instruction tape. See docs/adr/026-megakernel-decode.md and
   docs/adr/028-tracing-compiler.md.
+- **Critical bug:** All execution paths produce garbage output. Predates
+  megakernel work. Root cause unknown -- see E1d for investigation plan.
+  Both Q4 and F32 models affected. Not arena-related.
+- **model_type mismatch:** Config says "gemma3_text" but only "gemma3" is
+  registered. May affect inference.Load config parsing.
 - **NEON kernels:** internal/xblas/ contains ARM64 plan9 assembly for softmax,
   RMSNorm, RoPE, SiLU, exp, elementwise, scalar ops.
   See docs/adr/029-neon-simd-cpu-acceleration.md.
